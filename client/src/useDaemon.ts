@@ -21,6 +21,8 @@ export interface DaemonState {
   console: ConsoleEntry[];
   connected: boolean;
   error: string | null;
+  /** True while a server-update/mod-install/mod-update-all task is streaming over the websocket. */
+  busy: boolean;
   refresh: () => Promise<void>;
 }
 
@@ -35,6 +37,12 @@ export function useDaemon(): DaemonState {
   const [lines, setLines] = useState<ConsoleEntry[]>([]);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Tracks in-flight task ids (server-update, mod-install, mod-update-all) so
+  // the UI can block launching a second one - the HTTP route that kicks a
+  // task off is fire-and-forget (it returns a taskId immediately, well before
+  // the work finishes), so status.state alone does not say whether one is
+  // already running.
+  const [pendingTasks, setPendingTasks] = useState<Set<string>>(new Set());
 
   const refresh = useCallback(async () => {
     try {
@@ -71,6 +79,11 @@ export function useDaemon(): DaemonState {
       };
       ws.onclose = () => {
         setConnected(false);
+        // A dropped connection may have swallowed a "task-done" for a task
+        // that started before the drop; clearing here trades a possible
+        // false "not busy" for the alternative of a stuck-forever "busy" the
+        // UI could never recover from.
+        setPendingTasks(new Set());
         if (!closed) retry = setTimeout(connect, 2000);
       };
       ws.onerror = () => {
@@ -96,6 +109,7 @@ export function useDaemon(): DaemonState {
           setStatus(msg.status);
         } else if (msg.type === "task") {
           append({ line: msg.line, ts: new Date().toISOString(), kind: "task" });
+          setPendingTasks((prev) => (prev.has(msg.taskId) ? prev : new Set(prev).add(msg.taskId)));
         } else if (msg.type === "task-done") {
           const summary = msg.ok ? `--- ${msg.kind} finished` : `--- ${msg.kind} FAILED: ${msg.error ?? ""}`;
           append({ line: summary, ts: new Date().toISOString(), kind: "task" });
@@ -106,6 +120,12 @@ export function useDaemon(): DaemonState {
               kind: "task",
             });
           }
+          setPendingTasks((prev) => {
+            if (!prev.has(msg.taskId)) return prev;
+            const next = new Set(prev);
+            next.delete(msg.taskId);
+            return next;
+          });
           void refresh();
         }
       };
@@ -128,6 +148,7 @@ export function useDaemon(): DaemonState {
     console: lines,
     connected,
     error,
+    busy: pendingTasks.size > 0,
     refresh,
   };
 }
