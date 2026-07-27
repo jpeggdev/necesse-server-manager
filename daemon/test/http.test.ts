@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildServer, TASK_EXPIRY_MS } from "../src/http.js";
@@ -13,6 +14,10 @@ import { makeFakeSpawn } from "./fixtures/fake-spawn.js";
 import { makeFakeFetch, detailsBody, type FakeFetch } from "./fixtures/fake-fetch.js";
 import type { DaemonConfig, WsMessage } from "../src/types.js";
 import * as F from "./fixtures/log-fixtures.js";
+import { makeWorldZip, WORLD_SETTINGS_CFG } from "./fixtures/world-zip.js";
+import { openWorldSettings } from "../src/world-settings.js";
+/** What `app.inject` resolves to; naming it lets a helper declare its own return type. */
+import type { Response as Injected } from "light-my-request";
 
 /** Never a real key; the injected fetch means it is never sent anywhere either. */
 const FAKE_KEY = "0000000000000000000000000000TEST";
@@ -912,5 +917,317 @@ describe("PUT /api/config", () => {
     expect(res.statusCode).toBe(200);
     expect(res.payload).not.toContain(FAKE_KEY);
     expect(res.json().steamApiKeyConfigured).toBe(true);
+  });
+});
+
+/*
+ * World settings. This is the one part of the API that writes inside somebody's
+ * only copy of a save, so its guards are deliberately stricter than everything
+ * above: the server must be confirmed `stopped` rather than merely asked to
+ * stop, no background task may be in flight, and every value is checked before
+ * the zip is opened at all.
+ */
+describe("world settings", () => {
+  const WORLD = "Tulsa What";
+  let zipPath: string;
+
+  const sha = (b: Buffer): string => createHash("sha256").update(b).digest("hex");
+  const zipBytes = (): Promise<Buffer> => readFile(zipPath);
+
+  beforeEach(async () => {
+    zipPath = await makeWorldZip(cfg.worldsDir, WORLD);
+  });
+
+  const settings = (world = WORLD): Promise<Injected> =>
+    app.inject({ method: "GET", url: `/api/worlds/${encodeURIComponent(world)}/settings` });
+
+  const put = (payload: object, world = WORLD): Promise<Injected> =>
+    app.inject({ method: "PUT", url: `/api/worlds/${encodeURIComponent(world)}/settings`, payload });
+
+  const fieldsOf = async (world = WORLD): Promise<Record<string, unknown>[]> =>
+    (await settings(world)).json().fields;
+
+  const valueOf = async (key: string): Promise<unknown> =>
+    (await fieldsOf()).find((f) => f.key === key)?.value;
+
+  describe("GET", () => {
+    it("reports every key in the file, in the file's order", async () => {
+      const res = await settings();
+      expect(res.statusCode).toBe(200);
+      expect(res.json().entry).toBe(`${WORLD}/worldSettings.cfg`);
+      expect(res.json().fields.map((f: { key: string }) => f.key)).toEqual([
+        "allowCheats",
+        "difficulty",
+        "deathPenalty",
+        "raidFrequency",
+        "survivalMode",
+        "playerHunger",
+        "disableMobSpawns",
+        "forcedPvP",
+        "allowOutsideCharacters",
+        "creativeMode",
+        "disableMobAI",
+        "canSettlersDie",
+        "dayTimeMod",
+        "nightTimeMod",
+        "gameVersion",
+        "rpgskillsWorldStackLevel",
+        "rpgskillsChestSlotUpgradeLevel",
+        "rpgskillsWelcomeMessageShown",
+      ]);
+    });
+
+    // The point of shipping the option sets: a client that hardcoded them would
+    // be guessing at what the game accepts, and a wrong guess corrupts a world
+    // to find out.
+    it("ships each enum's real option set so a form never has to guess", async () => {
+      const fields = await fieldsOf();
+      const by = (k: string): Record<string, unknown> | undefined => fields.find((f) => f.key === k);
+      expect(by("difficulty")).toMatchObject({
+        type: "enum",
+        options: ["CASUAL", "ADVENTURE", "CLASSIC", "HARD", "BRUTAL"],
+        editable: true,
+      });
+      expect(by("deathPenalty")?.options).toEqual([
+        "NONE",
+        "DROP_MATS",
+        "DROP_MAIN_INVENTORY",
+        "DROP_FULL_INVENTORY",
+        "HARDCORE",
+      ]);
+      expect(by("raidFrequency")?.options).toEqual(["OFTEN", "OCCASIONALLY", "RARELY", "NEVER"]);
+      expect(by("allowCheats")).toMatchObject({ type: "boolean", value: "false", editable: true });
+      expect(by("dayTimeMod")).toMatchObject({ type: "float", value: "1.0", max: 10, editable: true });
+    });
+
+    it("flags gameVersion as the game's to write, not the form's", async () => {
+      const fields = await fieldsOf();
+      expect(fields.find((f) => f.key === "gameVersion")).toMatchObject({
+        type: "string",
+        value: "1.2.0",
+        editable: false,
+      });
+    });
+
+    it("reports mod-written keys as unknown and uneditable rather than hiding them", async () => {
+      const fields = await fieldsOf();
+      for (const key of [
+        "rpgskillsWorldStackLevel",
+        "rpgskillsChestSlotUpgradeLevel",
+        "rpgskillsWelcomeMessageShown",
+      ]) {
+        expect(fields.find((f) => f.key === key), key).toMatchObject({ type: null, editable: false });
+      }
+    });
+
+    it("404s a world that is not there", async () => {
+      const res = await settings("No Such World");
+      expect(res.statusCode).toBe(404);
+      expect(res.json().error).toMatch(/No world named/);
+    });
+
+    it("reports a world file that is not a readable zip as a failure, not as empty settings", async () => {
+      // `Tulsa.zip` is the one-byte placeholder this suite's beforeEach writes.
+      const res = await settings("Tulsa");
+      expect(res.statusCode).toBe(500);
+      expect(res.json().error).toMatch(/not a readable zip/);
+    });
+  });
+
+  describe("name handling", () => {
+    // The name reaches the filesystem. It is validated, and then resolved
+    // against the real listing rather than joined onto worldsDir, so neither
+    // half alone is what stops a traversal.
+    it("refuses a name that could escape the worlds directory", async () => {
+      for (const name of ["..", ".", "../../Server", "..\\..\\Server", "a/b", "a|b"]) {
+        // Dots are percent-encoded too, so the request reaches the route with
+        // the name the caller meant rather than one the router has already
+        // collapsed: what is under test is this daemon's refusal, not
+        // find-my-way's path normalisation.
+        const encoded = encodeURIComponent(name).replace(/\./g, "%2E");
+        for (const method of ["GET", "PUT"] as const) {
+          const res = await app.inject({
+            method,
+            url: `/api/worlds/${encoded}/settings`,
+            ...(method === "PUT" ? { payload: { allowCheats: true } } : {}),
+          });
+          // Either this daemon refused the name (400) or the router never
+          // matched a route for it at all (404). Both are refusals. What must
+          // never appear is a 200, or a 500 from something having gone off and
+          // tried to open a file.
+          expect([400, 404], `${method} ${name} -> ${res.statusCode}`).toContain(res.statusCode);
+        }
+      }
+    });
+
+    it("says so plainly when the traversal attempt does reach the route", async () => {
+      // These survive routing as a single path segment, so the refusal is this
+      // daemon's own rather than find-my-way declining to match.
+      for (const name of ["a/b", "a|b", "..\\..\\Server"]) {
+        const res = await app.inject({
+          method: "GET",
+          url: `/api/worlds/${encodeURIComponent(name)}/settings`,
+        });
+        expect(res.statusCode, name).toBe(400);
+        expect(res.json().error, name).toMatch(/Invalid world name/);
+      }
+    });
+
+    it("404s rather than writing when the name is valid but no such world exists", async () => {
+      const res = await put({ allowCheats: true }, "Somewhere Else");
+      expect(res.statusCode).toBe(404);
+    });
+  });
+
+  describe("PUT guards", () => {
+    it("refuses unless the server is a confirmed stopped", async () => {
+      const before = await zipBytes();
+      await app.inject({ method: "POST", url: "/api/server/start", payload: { world: "Tulsa" } });
+      expect(pm.status.state).not.toBe("stopped");
+
+      const res = await put({ allowCheats: true });
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error).toMatch(/confirmed stopped/);
+      expect(sha(await zipBytes())).toBe(sha(before));
+    });
+
+    // Stricter than the mod routes on purpose: `crashed` is precisely the case
+    // where nobody can say what the server was doing to the zip when it died.
+    it("refuses after a crash, which the looser guards elsewhere allow", async () => {
+      await app.inject({ method: "POST", url: "/api/server/start", payload: { world: "Tulsa" } });
+      spawn.calls[0].child.exit(1);
+      await vi.waitFor(() => {
+        expect(pm.status.state).toBe("crashed");
+      });
+
+      const res = await put({ allowCheats: true });
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error).toMatch(/crashed/);
+    });
+
+    it("refuses while a server this daemon did not start is running", async () => {
+      pm.markUnmanaged(4321);
+      const res = await put({ allowCheats: true });
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error).toMatch(/unmanaged/);
+    });
+
+    it("refuses while a background task is in flight", async () => {
+      const before = await zipBytes();
+      await app.inject({ method: "POST", url: "/api/server/update" });
+
+      const res = await put({ allowCheats: true });
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error).toMatch(/background task/i);
+      expect(sha(await zipBytes())).toBe(sha(before));
+
+      spawn.calls[0].child.exit(0);
+      await vi.waitFor(async () => {
+        expect((await app.inject({ method: "GET", url: "/api/status" })).json().activeTasks).toEqual([]);
+      });
+      expect((await put({ allowCheats: true })).statusCode).toBe(200);
+    });
+
+    it("never stops the server to win itself permission to write", async () => {
+      await app.inject({ method: "POST", url: "/api/server/start", payload: { world: "Tulsa" } });
+      const stateBefore = pm.status.state;
+      await put({ allowCheats: true });
+      expect(pm.status.state).toBe(stateBefore);
+    });
+  });
+
+  describe("PUT validation, all of it before the zip is opened", () => {
+    const rejected: [string, unknown, RegExp][] = [
+      ["gameVersion", "9.9.9", /written by the game/],
+      ["allowCheats", "yes", /must be true or false/],
+      ["allowCheats", 1, /must be true or false/],
+      ["difficulty", "IMPOSSIBLE", /must be one of CASUAL, ADVENTURE, CLASSIC, HARD, BRUTAL/],
+      ["difficulty", 3, /must be one of/],
+      ["dayTimeMod", 11, /at most 10/],
+      ["dayTimeMod", 0, /at least 0\.1/],
+      ["dayTimeMod", "1.5", /must be a number/],
+      ["rpgskillsWorldStackLevel", 2, /not a world setting this daemon knows/],
+      ["notAFieldAtAll", true, /not a world setting this daemon knows/],
+    ];
+
+    for (const [key, value, message] of rejected) {
+      it(`rejects ${key} = ${JSON.stringify(value)} and writes nothing`, async () => {
+        const before = await zipBytes();
+        const res = await put({ [key]: value });
+        expect(res.statusCode).toBe(400);
+        expect(res.json().error).toMatch(message);
+        expect(sha(await zipBytes())).toBe(sha(before));
+        expect(await readdir(cfg.worldsDir)).not.toContain("settings-backups");
+      });
+    }
+
+    it("rejects the whole request when one change of several is bad", async () => {
+      const before = await zipBytes();
+      const res = await put({ allowCheats: true, difficulty: "NIGHTMARE", survivalMode: false });
+      expect(res.statusCode).toBe(400);
+      expect(sha(await zipBytes())).toBe(sha(before));
+    });
+
+    // A world whose file never had `maxSettlersPerSettlement` must not gain
+    // one: adding a field the game left out changes how the world behaves.
+    it("refuses a known field this world's file does not already contain", async () => {
+      const before = await zipBytes();
+      const res = await put({ maxSettlersPerSettlement: 12 });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toMatch(/no "maxSettlersPerSettlement" line/);
+      expect(sha(await zipBytes())).toBe(sha(before));
+    });
+
+    it("rejects a body that is not an object of settings", async () => {
+      const res = await app.inject({
+        method: "PUT",
+        url: `/api/worlds/${encodeURIComponent(WORLD)}/settings`,
+        payload: ["allowCheats"],
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toMatch(/must be an object/);
+    });
+  });
+
+  describe("PUT applies changes", () => {
+    it("writes the requested values, backs the world up, and reports what changed", async () => {
+      const original = await zipBytes();
+      const res = await put({ allowCheats: true, difficulty: "HARD", dayTimeMod: 2.5 });
+
+      expect(res.statusCode).toBe(200);
+      expect([...res.json().changed].sort()).toEqual(["allowCheats", "dayTimeMod", "difficulty"]);
+      expect(sha(await readFile(res.json().backup))).toBe(sha(original));
+
+      expect(await valueOf("allowCheats")).toBe("true");
+      expect(await valueOf("difficulty")).toBe("HARD");
+      expect(await valueOf("dayTimeMod")).toBe("2.5");
+      // Untouched fields, mod keys included, are exactly as they were.
+      expect(await valueOf("gameVersion")).toBe("1.2.0");
+      expect(await valueOf("rpgskillsWorldStackLevel")).toBe("1");
+    });
+
+    it("changes only the lines it was asked to, comments and all", async () => {
+      expect((await put({ forcedPvP: true })).statusCode).toBe(200);
+      const open = await openWorldSettings(zipPath);
+      expect(open.file.text()).toBe(WORLD_SETTINGS_CFG.replace("forcedPvP = false", "forcedPvP = true"));
+    });
+
+    it("writes a whole float back the way the game spells it", async () => {
+      await put({ nightTimeMod: 3 });
+      expect(await valueOf("nightTimeMod")).toBe("3.0");
+    });
+
+    // Saving a form nobody edited must not rewrite a 12MB world zip, and must
+    // not fill the backups folder with copies of an unchanged file.
+    it("writes nothing at all when every requested value already matches", async () => {
+      const before = await zipBytes();
+      const res = await put({ allowCheats: false, difficulty: "CLASSIC", dayTimeMod: 1 });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json().changed).toEqual([]);
+      expect(res.json().backup).toBeNull();
+      expect(sha(await zipBytes())).toBe(sha(before));
+      expect(await readdir(cfg.worldsDir)).not.toContain("settings-backups");
+    });
   });
 });

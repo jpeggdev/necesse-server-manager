@@ -168,6 +168,55 @@ export interface WorldInfo {
   sizeBytes: number;
 }
 
+export type WorldSettingType = "boolean" | "int" | "float" | "enum" | "string";
+
+/**
+ * One line of a world's `worldSettings.cfg`, as GET /api/worlds/:name/settings
+ * reports it.
+ *
+ * `value` is the raw text exactly as the file spells it, not a parsed value.
+ * The file is the authority and it is edited textually so that keys this daemon
+ * does not know - the `rpgskills*` ones a mod writes - survive an edit
+ * untouched; reporting the raw text keeps the API honest about that. `type`
+ * tells a client how to read it, and is null precisely for those unknown keys.
+ *
+ * `options`, `min` and `max` travel with the field so a form never hardcodes an
+ * option set. They come from `Server.jar`, and a client's guess at them would
+ * be a guess about what the game accepts.
+ */
+export interface WorldSettingField {
+  key: string;
+  value: string;
+  /** null for a key written by a mod: unknown type, unknown legal values. */
+  type: WorldSettingType | null;
+  /** Enum fields only. */
+  options?: string[];
+  /** Numeric fields only, inclusive. */
+  min?: number;
+  max?: number;
+  /** false for unknown keys and for fields the game owns, such as gameVersion. */
+  editable: boolean;
+}
+
+export interface WorldSettingsResponse {
+  ok: true;
+  world: string;
+  /** The zip entry these came from, e.g. "Tulsa What/worldSettings.cfg". */
+  entry: string;
+  /** In the order the file declares them, unknown keys included. */
+  fields: WorldSettingField[];
+}
+
+export interface WorldSettingsWriteResponse extends WorldSettingsResponse {
+  /**
+   * Where the pre-edit zip was copied, or null when nothing was written
+   * because every requested value already matched the file.
+   */
+  backup: string | null;
+  /** Keys whose line actually changed. A no-op edit changes nothing at all. */
+  changed: string[];
+}
+
 export interface ConsoleLine {
   line: string;
   ts: string;

@@ -2,7 +2,10 @@ import Fastify, { type FastifyInstance } from "fastify";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
 import { saveConfig } from "./config.js";
-import { listWorlds, worldExists, isValidWorldName } from "./worlds.js";
+import { listWorlds, worldExists, worldZipPath, isValidWorldName } from "./worlds.js";
+import { openWorldSettings, WorldSettingsError } from "./world-settings.js";
+import type { WorldSettingsFile } from "./world-settings-file.js";
+import { WORLD_SETTING_FIELDS, checkChange, isSameValue } from "./world-settings-schema.js";
 import type { ModInstaller } from "./mod-installer.js";
 import type { ProcessManager } from "./process-manager.js";
 import type { SteamCmd } from "./steamcmd.js";
@@ -15,6 +18,9 @@ import type {
   StatusPayload,
   TaskKind,
   WorkshopItem,
+  WorldSettingField,
+  WorldSettingsResponse,
+  WorldSettingsWriteResponse,
   WsMessage,
 } from "./types.js";
 
@@ -295,6 +301,182 @@ export function buildServer(deps: Deps): FastifyInstance {
             exists: isValidWorldName(name) ? await worldExists(cfg.worldsDir, name) : false,
           };
     return { worlds, lastWorld: cfg.lastWorld, candidate };
+  });
+
+  /**
+   * Stricter than `requireStopped`, and deliberately so.
+   *
+   * Everything else in this API guards a folder of jars: get it wrong and a mod
+   * is reinstalled. This guards the single file that holds somebody's world,
+   * and there is no reinstalling that. So `crashed` is refused here even though
+   * the process is demonstrably gone - a crash is precisely the case where
+   * nobody can say what the server was doing to the zip when it died - and
+   * `unmanaged` is refused because a server this daemon did not start may still
+   * have the world open. Only a clean, observed `stopped` is enough.
+   *
+   * This never stops the server to get there. Ending someone's session to
+   * satisfy a settings edit is not a trade this daemon is allowed to make.
+   */
+  const requireVerifiedStopped = (
+    reply: { code(c: number): { send(b: unknown): unknown } },
+    action: string,
+  ): boolean => {
+    const state = pm.status.state;
+    if (state === "stopped") return true;
+    reply.code(409).send({
+      ok: false,
+      error:
+        `Cannot ${action} while the server is ${state}. A world zip is the only copy of that ` +
+        `save, so this needs the server confirmed stopped - not stopping, not crashed, not ` +
+        `running outside this daemon. Stop it and try again.`,
+    });
+    return false;
+  };
+
+  /** One settings file rendered for a client, in the file's own key order. */
+  const settingsFields = (file: WorldSettingsFile): WorldSettingField[] =>
+    file.entries().map(({ key, value }) => {
+      const known = WORLD_SETTING_FIELDS[key];
+      // A key this daemon does not know is a mod's. It is reported so nobody
+      // is surprised by what is in their file, and it is not editable, because
+      // nothing here knows what values that mod accepts.
+      if (known === undefined) return { key, value, type: null, editable: false };
+      return {
+        key,
+        value,
+        type: known.type,
+        ...(known.options === undefined ? {} : { options: [...known.options] }),
+        ...(known.min === undefined ? {} : { min: known.min }),
+        ...(known.max === undefined ? {} : { max: known.max }),
+        editable: known.editable,
+      };
+    });
+
+  /**
+   * Maps a failure from the world-settings layer onto a status. ENOENT means
+   * the zip went away between listing it and opening it; a missing settings
+   * entry means this zip is not a world this daemon can edit. Neither is
+   * reworded - the underlying message is what says which it was.
+   */
+  const settingsFailure = (
+    reply: { code(c: number): { send(b: unknown): unknown } },
+    e: unknown,
+  ): unknown => {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+      return reply.code(404).send({ ok: false, error: (e as Error).message });
+    }
+    const missing = e instanceof WorldSettingsError && e.kind === "missing-entry";
+    return reply.code(missing ? 404 : 500).send({ ok: false, error: (e as Error).message });
+  };
+
+  app.get("/api/worlds/:name/settings", async (req, reply) => {
+    const { name } = req.params as { name: string };
+    // The name reaches the filesystem, so it is validated before anything is
+    // built from it - and `worldZipPath` still resolves it against the real
+    // listing rather than trusting it, so ".." can neither pass here nor
+    // address anything if it did.
+    if (!isValidWorldName(name)) {
+      return reply.code(400).send({ ok: false, error: `Invalid world name: ${JSON.stringify(name)}` });
+    }
+    const zipPath = await worldZipPath(cfg.worldsDir, name);
+    if (zipPath === null) {
+      return reply.code(404).send({ ok: false, error: `No world named ${JSON.stringify(name)}.` });
+    }
+    // Reading is allowed whatever the server is doing: it cannot damage
+    // anything, and a save in progress can at worst make the zip unreadable
+    // for a moment, which surfaces as the error it is.
+    try {
+      const open = await openWorldSettings(zipPath);
+      return {
+        ok: true,
+        world: name,
+        entry: open.entryName,
+        fields: settingsFields(open.file),
+      } satisfies WorldSettingsResponse;
+    } catch (e) {
+      return settingsFailure(reply, e);
+    }
+  });
+
+  /**
+   * Applies a partial set of changes to a world's settings file.
+   *
+   * Every check that can be made without opening the zip is made first, and the
+   * zip is only opened once all of them pass. Nothing is written until the
+   * whole replacement has been built elsewhere and verified; see
+   * `world-settings.ts` for that half.
+   */
+  app.put("/api/worlds/:name/settings", async (req, reply) => {
+    const { name } = req.params as { name: string };
+    if (!isValidWorldName(name)) {
+      return reply.code(400).send({ ok: false, error: `Invalid world name: ${JSON.stringify(name)}` });
+    }
+    const body = req.body ?? {};
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      return reply
+        .code(400)
+        .send({ ok: false, error: "Body must be an object of setting name to new value." });
+    }
+    const patch = body as Record<string, unknown>;
+    if (!requireVerifiedStopped(reply, "change world settings")) return reply;
+    if (!requireNoActiveTask(reply, "change world settings")) return reply;
+
+    const zipPath = await worldZipPath(cfg.worldsDir, name);
+    if (zipPath === null) {
+      return reply.code(404).send({ ok: false, error: `No world named ${JSON.stringify(name)}.` });
+    }
+
+    // Validation before the zip is opened, not during the edit. An unknown
+    // key, a wrong type, an out-of-range number or a value outside an enum's
+    // real option set all fail here, with the file still unread.
+    const wanted = new Map<string, string>();
+    for (const [key, value] of Object.entries(patch)) {
+      const check = checkChange(key, value);
+      if (!check.ok) return reply.code(400).send({ ok: false, error: check.error });
+      wanted.set(key, check.text);
+    }
+
+    try {
+      const open = await openWorldSettings(zipPath);
+      // A key this daemon knows but this world's file does not have is still a
+      // refusal: writing it would add a field the game left out, which is a
+      // change to how the world behaves and not what anyone asked for.
+      for (const key of wanted.keys()) {
+        if (!open.file.has(key)) {
+          return reply.code(400).send({
+            ok: false,
+            error:
+              `This world's worldSettings.cfg has no "${key}" line. This daemon only changes ` +
+              `values that are already there; it never adds a field the game left out.`,
+          });
+        }
+      }
+
+      const changed: string[] = [];
+      for (const [key, text] of wanted) {
+        const current = open.file.get(key) as string;
+        const type = WORLD_SETTING_FIELDS[key].type;
+        if (isSameValue(current, text, type)) continue;
+        open.file.set(key, text);
+        changed.push(key);
+      }
+
+      // Nothing to do means nothing is written - no rebuild, no backup, no
+      // replacement. A form saved without edits must not rewrite a world zip.
+      const backup =
+        changed.length === 0 ? null : (await open.save()).backupPath;
+
+      return {
+        ok: true,
+        world: name,
+        entry: open.entryName,
+        fields: settingsFields(open.file),
+        backup,
+        changed,
+      } satisfies WorldSettingsWriteResponse;
+    } catch (e) {
+      return settingsFailure(reply, e);
+    }
   });
 
   app.post("/api/server/start", async (req, reply) => {

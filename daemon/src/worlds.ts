@@ -27,9 +27,24 @@ export async function listWorlds(worldsDir: string): Promise<WorldInfo[]> {
   return out.sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt));
 }
 
-export async function worldExists(worldsDir: string, name: string): Promise<boolean> {
+/**
+ * The zip backing a world, or null if no world by that name is there.
+ *
+ * Resolved through `listWorlds` rather than by joining the caller's string onto
+ * `worldsDir`: the returned path is built from a name this module actually saw
+ * on disk, so it can only ever address a real world file, and the server's own
+ * LATEST_BACKUP saves stay excluded here exactly as they are from the list.
+ * Matching is case-insensitive because Windows is.
+ */
+export async function worldZipPath(worldsDir: string, name: string): Promise<string | null> {
+  if (!isValidWorldName(name)) return null;
   const target = name.toLowerCase();
-  return (await listWorlds(worldsDir)).some((w) => w.name.toLowerCase() === target);
+  const found = (await listWorlds(worldsDir)).find((w) => w.name.toLowerCase() === target);
+  return found === undefined ? null : join(worldsDir, `${found.name}.zip`);
+}
+
+export async function worldExists(worldsDir: string, name: string): Promise<boolean> {
+  return (await worldZipPath(worldsDir, name)) !== null;
 }
 
 export function isValidWorldName(name: string): boolean {
