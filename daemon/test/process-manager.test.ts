@@ -108,6 +108,30 @@ describe("stop", () => {
     await expect(pm.stop()).rejects.toThrow(/not running/i);
   });
 
+  it("still records an abnormal exit after the stop timeout already rejected", async () => {
+    pm.start("Tulsa");
+    child().child.emitLine(F.READY_LINE_WITH_TS);
+    await expect(pm.stop()).rejects.toThrow(/did not exit/i);
+    expect(pm.status.state).toBe("stopping");
+
+    child().child.exit(1);
+
+    expect(pm.status.state).toBe("crashed");
+    expect(pm.status.lastError).toMatch(/code 1/);
+  });
+
+  it("still reports a clean stop for a zero exit after the stop timeout already rejected", async () => {
+    pm.start("Tulsa");
+    child().child.emitLine(F.READY_LINE_WITH_TS);
+    await expect(pm.stop()).rejects.toThrow(/did not exit/i);
+    expect(pm.status.state).toBe("stopping");
+
+    child().child.exit(0);
+
+    expect(pm.status.state).toBe("stopped");
+    expect(pm.status.lastError).toBeNull();
+  });
+
   it("treats a zero exit code during stop as clean, with no lastError", async () => {
     pm.start("Tulsa");
     child().child.emitLine(F.READY_LINE_WITH_TS);

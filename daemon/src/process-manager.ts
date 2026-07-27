@@ -134,15 +134,19 @@ export class ProcessManager extends EventEmitter {
   }
 
   private onExit(code: number | null): void {
+    // "stopping" covers both a graceful stop() awaiting exit and a kill() in
+    // flight (kill() sets this state too but never a waiter), and it survives
+    // the stop() timeout firing (the timeout nulls the waiter but leaves state
+    // at "stopping"), so it — not waiter presence — is what tells an abnormal
+    // exit during shutdown apart from a clean one. `code === null` (kill()'s
+    // signature exit, notably on Windows) is never treated as abnormal.
     const wasStopping = this.state === "stopping";
-    // A waiter only exists while a graceful stop() is pending; kill() also
-    // moves state to "stopping" but never creates one, so this is how an
-    // unexpected fault during a graceful stop is told apart from a kill().
+    const abnormal = wasStopping && code !== 0 && code !== null;
     const waiter = this.stopWaiter;
     this.stopWaiter = null;
     this.child = null;
 
-    if (waiter && code !== 0) {
+    if (abnormal) {
       this.lastError = `Server exited with code ${code} while stopping; the shutdown was not clean.`;
       this.setState("crashed");
     } else if (wasStopping) {
@@ -152,9 +156,11 @@ export class ProcessManager extends EventEmitter {
       this.setState("crashed");
     }
 
+    // A waiter already settled by the timeout is gone (nulled there) by the
+    // time we get here, so this never double-settles the same promise.
     if (waiter) {
       clearTimeout(waiter.timer);
-      if (code !== 0) {
+      if (abnormal) {
         waiter.reject(new Error(this.lastError!));
       } else {
         waiter.resolve();
