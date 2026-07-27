@@ -61,6 +61,100 @@ describe("GET /api/status", () => {
   });
 });
 
+// The daemon is the authority on what is in flight: it is the only party that
+// sees both a task's acceptance and its completion. These pin the lifecycle of
+// that set on every exit path, plus the server-side interlock that stops a
+// second client (or curl, or a page left open) from launching the game while
+// steamcmd is rewriting the install.
+describe("activeTasks in the status payload", () => {
+  it("is empty with nothing running", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/status" });
+    expect(res.json().activeTasks).toEqual([]);
+  });
+
+  it("lists an accepted task's id until the task finishes", async () => {
+    const launch = await app.inject({ method: "POST", url: "/api/server/update" });
+    const { taskId } = launch.json();
+
+    const during = await app.inject({ method: "GET", url: "/api/status" });
+    expect(during.json().activeTasks).toEqual([taskId]);
+
+    // steamcmd exits; the task settles.
+    spawn.calls[0].child.exit(0);
+    await vi.waitFor(async () => {
+      const after = await app.inject({ method: "GET", url: "/api/status" });
+      expect(after.json().activeTasks).toEqual([]);
+    });
+  });
+
+  it("clears the entry when the task's own promise rejects", async () => {
+    // A task whose underlying work throws must not leak an entry - a leak
+    // wedges Start for the whole life of the daemon.
+    const throwingSteam = {
+      updateApp: () => Promise.reject(new Error("steamcmd is missing")),
+    } as unknown as SteamCmd;
+    const rejectApp = buildServer({ cfg, configFile, pm, installer, steam: throwingSteam });
+
+    const launch = await rejectApp.inject({ method: "POST", url: "/api/server/update" });
+    expect(launch.json().ok).toBe(true);
+
+    await vi.waitFor(async () => {
+      const res = await rejectApp.inject({ method: "GET", url: "/api/status" });
+      expect(res.json().activeTasks).toEqual([]);
+    });
+  });
+
+  it("keeps the other id when one of two overlapping tasks finishes", async () => {
+    const a = (await app.inject({ method: "POST", url: "/api/server/update" })).json().taskId;
+    const b = (await app.inject({ method: "POST", url: "/api/server/update" })).json().taskId;
+    expect((await app.inject({ method: "GET", url: "/api/status" })).json().activeTasks).toEqual([a, b]);
+
+    spawn.calls[0].child.exit(0); // only the first steamcmd run exits
+    await vi.waitFor(async () => {
+      const res = await app.inject({ method: "GET", url: "/api/status" });
+      expect(res.json().activeTasks).toEqual([b]);
+    });
+  });
+});
+
+describe("POST /api/server/start task interlock", () => {
+  it("returns 409 while a task is active, and works again once it finishes", async () => {
+    await app.inject({ method: "POST", url: "/api/server/update" });
+
+    const blocked = await app.inject({
+      method: "POST",
+      url: "/api/server/start",
+      payload: { world: "Tulsa" },
+    });
+    expect(blocked.statusCode).toBe(409);
+    expect(blocked.json().error).toMatch(/task/i);
+    expect(spawn.calls).toHaveLength(1); // steamcmd only; no server was spawned
+
+    spawn.calls[0].child.exit(0);
+    await vi.waitFor(async () => {
+      const res = await app.inject({ method: "GET", url: "/api/status" });
+      expect(res.json().activeTasks).toEqual([]);
+    });
+
+    const allowed = await app.inject({
+      method: "POST",
+      url: "/api/server/start",
+      payload: { world: "Tulsa" },
+    });
+    expect(allowed.statusCode).toBe(200);
+  });
+
+  it("still rejects an invalid world name with 400 rather than the interlock's 409", async () => {
+    await app.inject({ method: "POST", url: "/api/server/update" });
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/server/start",
+      payload: { world: "bad:name" },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+});
+
 describe("GET /api/worlds", () => {
   it("lists worlds and echoes lastWorld", async () => {
     const res = await app.inject({ method: "GET", url: "/api/worlds" });

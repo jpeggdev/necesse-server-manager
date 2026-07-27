@@ -1,7 +1,11 @@
-// Drives useDaemon's `busy` flag with a fake WebSocket carrying real
-// `task`/`task-done` message shapes - the hook has no other test coverage,
-// and `busy` (added in Task 11's fix round) is exactly the signal the UI
-// relies on to block launching a second mod/server task while one streams.
+// `busy` is the signal the UI relies on to block launching a second
+// mod/server task - and, more importantly, to block Start while steamcmd is
+// mid-rewrite of the install or mods folder. It is read straight off the
+// daemon's status payload (`activeTasks`), never reconstructed here by
+// correlating the HTTP response that accepts a task against the websocket
+// that streams it: those are independent channels with no ordering guarantee,
+// and every attempt to correlate them raced. These tests drive the hook with a
+// fake WebSocket carrying real message shapes.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 import { useDaemon } from "../src/useDaemon";
@@ -23,6 +27,11 @@ class FakeWebSocket {
   }
 }
 
+// What GET /api/status will answer with. Mutable so a test can move the
+// daemon's authoritative state and then force a re-read, exactly as a
+// reconnect or a task-done-driven refresh() does.
+let activeTasks: string[] = [];
+
 function statusPayload() {
   return {
     state: "stopped",
@@ -33,6 +42,7 @@ function statusPayload() {
     slots: null,
     gameVersion: null,
     lastError: null,
+    activeTasks: [...activeTasks],
   };
 }
 
@@ -41,6 +51,7 @@ function jsonResponse(body: unknown) {
 }
 
 beforeEach(() => {
+  activeTasks = [];
   FakeWebSocket.instances = [];
   vi.stubGlobal("WebSocket", FakeWebSocket as unknown as typeof WebSocket);
   vi.stubGlobal(
@@ -69,257 +80,174 @@ async function openConnection() {
   return { result, ws, unmount };
 }
 
-function send(ws: FakeWebSocket, msg: unknown) {
+/** The daemon's `status` broadcast, which it sends whenever activeTasks changes. */
+function pushStatus(ws: FakeWebSocket, ids: string[]) {
+  activeTasks = ids;
   act(() => {
-    ws.onmessage?.({ data: JSON.stringify(msg) });
+    ws.onmessage?.({ data: JSON.stringify({ type: "status", status: statusPayload() }) });
   });
 }
 
-describe("useDaemon busy tracking", () => {
-  it("is not busy before any task starts", async () => {
-    const { result, unmount } = await openConnection();
-    expect(result.current.busy).toBe(false);
-    unmount();
+/** The daemon's `backlog`, sent to every socket the moment it connects. */
+function pushBacklog(ws: FakeWebSocket, ids: string[]) {
+  activeTasks = ids;
+  act(() => {
+    ws.onmessage?.({ data: JSON.stringify({ type: "backlog", lines: [], status: statusPayload() }) });
   });
+}
 
-  it("becomes busy on a task message and clears on its task-done", async () => {
-    const { result, ws, unmount } = await openConnection();
-
-    send(ws, { type: "task", taskId: "t1", kind: "mod-install", line: "downloading..." });
-    expect(result.current.busy).toBe(true);
-
-    await act(async () => {
-      ws.onmessage?.({
-        data: JSON.stringify({ type: "task-done", taskId: "t1", kind: "mod-install", ok: true }),
-      });
-      await Promise.resolve();
-    });
-    expect(result.current.busy).toBe(false);
-    unmount();
-  });
-
-  it("stays busy while a second concurrent task is still running", async () => {
-    const { result, ws, unmount } = await openConnection();
-
-    send(ws, { type: "task", taskId: "t1", kind: "mod-install", line: "a" });
-    send(ws, { type: "task", taskId: "t2", kind: "mod-update-all", line: "b" });
-    expect(result.current.busy).toBe(true);
-
-    await act(async () => {
-      ws.onmessage?.({
-        data: JSON.stringify({ type: "task-done", taskId: "t1", kind: "mod-install", ok: true }),
-      });
-      await Promise.resolve();
-    });
-    expect(result.current.busy).toBe(true); // t2 has not finished yet
-
-    await act(async () => {
-      ws.onmessage?.({
-        data: JSON.stringify({ type: "task-done", taskId: "t2", kind: "mod-update-all", ok: true }),
-      });
-      await Promise.resolve();
-    });
-    expect(result.current.busy).toBe(false);
-    unmount();
-  });
-
-  it("reports busy=false on a failed task-done too, not only on ok:true", async () => {
-    const { result, ws, unmount } = await openConnection();
-
-    send(ws, { type: "task", taskId: "t1", kind: "server-update", line: "a" });
-    expect(result.current.busy).toBe(true);
-
-    await act(async () => {
-      ws.onmessage?.({
-        data: JSON.stringify({ type: "task-done", taskId: "t1", kind: "server-update", ok: false, error: "boom" }),
-      });
-      await Promise.resolve();
-    });
-    expect(result.current.busy).toBe(false);
-    unmount();
-  });
-
-  it("clears busy on disconnect so a dropped task-done can't strand it forever", async () => {
-    const { result, ws, unmount } = await openConnection();
-
-    send(ws, { type: "task", taskId: "t1", kind: "mod-install", line: "a" });
-    expect(result.current.busy).toBe(true);
-
+/** Drops the socket and runs the hook's 2s auto-retry, returning the new socket. */
+function dropAndReconnect(ws: FakeWebSocket): FakeWebSocket {
+  vi.useFakeTimers();
+  try {
     act(() => {
       ws.onclose?.();
+      vi.advanceTimersByTime(2000);
     });
+  } finally {
+    vi.useRealTimers();
+  }
+  const next = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
+  expect(next).not.toBe(ws);
+  return next;
+}
+
+async function pushTaskDone(ws: FakeWebSocket, taskId: string, ok = true) {
+  await act(async () => {
+    ws.onmessage?.({ data: JSON.stringify({ type: "task-done", taskId, kind: "mod-install", ok }) });
+    await Promise.resolve();
+  });
+}
+
+describe("useDaemon busy", () => {
+  it("is false when the daemon reports no active tasks", async () => {
+    const { result, unmount } = await openConnection();
+    expect(result.current.busy).toBe(false);
+    unmount();
+  });
+
+  it("is true while the daemon reports an active task, and false once it clears", async () => {
+    const { result, ws, unmount } = await openConnection();
+
+    pushStatus(ws, ["t1"]);
+    expect(result.current.busy).toBe(true);
+
+    pushStatus(ws, []);
+    expect(result.current.busy).toBe(false);
+    unmount();
+  });
+
+  it("is true from the initial backlog if a task was already running before this client connected", async () => {
+    // A page opened mid-install must not offer Start. Nothing about the
+    // websocket task stream would tell it - only the status payload does.
+    const { result, ws, unmount } = await openConnection();
+    pushBacklog(ws, ["t1"]);
+    expect(result.current.busy).toBe(true);
+    unmount();
+  });
+
+  it("stays busy while one of two overlapping tasks is still running", async () => {
+    const { result, ws, unmount } = await openConnection();
+
+    pushStatus(ws, ["t1", "t2"]);
+    expect(result.current.busy).toBe(true);
+
+    pushStatus(ws, ["t2"]); // t1 finished; t2 has not
+    expect(result.current.busy).toBe(true);
+
+    pushStatus(ws, []);
     expect(result.current.busy).toBe(false);
     unmount();
   });
 });
 
-// registerTask() exists specifically to close the window between "the
-// task-launching HTTP response resolved with a taskId" and "the daemon's
-// first websocket 'task' line for it arrives" - relying on the "task"
-// message alone (the previous fix round) left `busy` false for that whole
-// span, during which Start would incorrectly re-enable while steamcmd/the
-// installer was already running.
-describe("useDaemon registerTask - closes the HTTP-response-to-first-line gap", () => {
-  it("is busy immediately once a task is registered, before any websocket message at all", async () => {
-    const { result, unmount } = await openConnection();
+// The failure mode that broke two prior attempts: a task that fails
+// immediately, whose terminal websocket message can arrive before (or without)
+// anything the client would have used to register it. Nothing the client
+// receives in any order may leave `busy` stuck true, because a stuck `busy`
+// disables Start, Update Server, Add Mod and Update All for the whole session.
+describe("useDaemon busy - orderings that previously wedged it", () => {
+  it("a task that fails immediately ends with busy false", async () => {
+    const { result, ws, unmount } = await openConnection();
+
+    // task-done arrives with the client never having seen the task start.
+    await pushTaskDone(ws, "t1", false);
     expect(result.current.busy).toBe(false);
 
-    act(() => {
-      result.current.registerTask("t1");
-    });
-    expect(result.current.busy).toBe(true);
+    // ...and the status broadcast that accompanies it confirms it.
+    pushStatus(ws, []);
+    expect(result.current.busy).toBe(false);
     unmount();
   });
 
-  it("stays busy across the registered-but-no-line-yet window, through to task-done", async () => {
+  it("a task-done for an id this client never saw start cannot wedge busy", async () => {
     const { result, ws, unmount } = await openConnection();
 
-    act(() => {
-      result.current.registerTask("t1");
-    });
-    expect(result.current.busy).toBe(true); // registered; steamcmd hasn't logged anything yet
-
-    // The first real console line eventually arrives - must be a no-op
-    // (already tracked), not a second, separately-cleared entry.
-    send(ws, { type: "task", taskId: "t1", kind: "server-update", line: "Updating app..." });
+    pushStatus(ws, ["t1"]);
     expect(result.current.busy).toBe(true);
 
-    await act(async () => {
+    await pushTaskDone(ws, "some-unrelated-id");
+    expect(result.current.busy).toBe(true); // t1 is still genuinely running
+
+    pushStatus(ws, []);
+    expect(result.current.busy).toBe(false);
+    unmount();
+  });
+
+  it("task lines alone never make it busy - only the daemon's own report does", async () => {
+    // A stray `task` line (a duplicate frame, a replayed buffer) is console
+    // output, not evidence about what is in flight.
+    const { result, ws, unmount } = await openConnection();
+    act(() => {
       ws.onmessage?.({
-        data: JSON.stringify({ type: "task-done", taskId: "t1", kind: "server-update", ok: true }),
+        data: JSON.stringify({ type: "task", taskId: "t1", kind: "mod-install", line: "downloading..." }),
       });
-      await Promise.resolve();
     });
     expect(result.current.busy).toBe(false);
-    unmount();
-  });
-
-  it("leaves busy false when a task launch is never registered (the failed-call case)", async () => {
-    const { result, unmount } = await openConnection();
-    // Mirrors App's guardTask(): a rejected fn() never reaches the .then()
-    // that calls registerTask, so nothing here should ever mark this busy.
-    expect(result.current.busy).toBe(false);
-    unmount();
-  });
-
-  it("ignores a task-done for a taskId it never registered, without throwing or clearing an unrelated task", async () => {
-    const { result, ws, unmount } = await openConnection();
-
-    act(() => {
-      result.current.registerTask("t1");
-    });
-    expect(result.current.busy).toBe(true);
-
-    expect(() => {
-      act(() => {
-        ws.onmessage?.({
-          data: JSON.stringify({ type: "task-done", taskId: "unknown-id", kind: "mod-install", ok: true }),
-        });
-      });
-    }).not.toThrow();
-    expect(result.current.busy).toBe(true); // t1 is unaffected by the unrelated task-done
-
-    await act(async () => {
-      ws.onmessage?.({ data: JSON.stringify({ type: "task-done", taskId: "t1", kind: "mod-install", ok: true }) });
-      await Promise.resolve();
-    });
-    expect(result.current.busy).toBe(false);
+    expect(result.current.console.some((l) => l.line === "downloading...")).toBe(true);
     unmount();
   });
 });
 
-// The HTTP response and the websocket are independent channels with no
-// ordering guarantee between them. registerTask() naively adding an id
-// whenever it's called introduced a worse bug than the one it fixed: for a
-// fast-failing task, "task-done" can arrive BEFORE the HTTP response (and
-// therefore registerTask) does. The daemon sends exactly one task-done per
-// id, so if registerTask were to add the id anyway, nothing would ever
-// clear it - `busy` would read true for the rest of the session, wedging
-// Start/Update Server/Add Mod/Update All permanently.
-describe("useDaemon task-done/registerTask ordering race", () => {
-  it("task-done before registerTask for the same id leaves busy false and does not wedge it", async () => {
+describe("useDaemon reconnect", () => {
+  it("re-syncs to a still-running task after a reconnect instead of clearing busy", async () => {
     const { result, ws, unmount } = await openConnection();
 
-    // task-done arrives first - the fast-failing-task case.
-    await act(async () => {
-      ws.onmessage?.({
-        data: JSON.stringify({ type: "task-done", taskId: "t1", kind: "mod-install", ok: false, error: "bad id" }),
-      });
-      await Promise.resolve();
-    });
-    expect(result.current.busy).toBe(false);
+    pushStatus(ws, ["t1"]);
+    expect(result.current.busy).toBe(true);
 
-    // The HTTP response resolves after - this must NOT wedge busy true.
-    act(() => {
-      result.current.registerTask("t1");
-    });
-    expect(result.current.busy).toBe(false);
+    // The daemon still has t1 in flight; the fresh backlog says so.
+    const reconnected = dropAndReconnect(ws);
+    expect(result.current.connected).toBe(false);
+    pushBacklog(reconnected, ["t1"]);
+    expect(result.current.busy).toBe(true);
+
     unmount();
   });
 
-  it("the normal order (registerTask, then task lines, then task-done) still works", async () => {
+  it("re-syncs to idle after a reconnect if the task finished during the outage", async () => {
+    // The old design cleared its bookkeeping on close and could never learn
+    // otherwise; this one re-reads the truth either way.
     const { result, ws, unmount } = await openConnection();
 
-    act(() => {
-      result.current.registerTask("t1");
-    });
+    pushStatus(ws, ["t1"]);
     expect(result.current.busy).toBe(true);
 
-    send(ws, { type: "task", taskId: "t1", kind: "mod-install", line: "downloading..." });
-    expect(result.current.busy).toBe(true);
-
-    await act(async () => {
-      ws.onmessage?.({ data: JSON.stringify({ type: "task-done", taskId: "t1", kind: "mod-install", ok: true }) });
-      await Promise.resolve();
-    });
+    pushBacklog(dropAndReconnect(ws), []);
     expect(result.current.busy).toBe(false);
+
     unmount();
   });
 
-  it("two overlapping tasks registered normally: one completing does not clear the other", async () => {
-    const { result, ws, unmount } = await openConnection();
-
-    act(() => {
-      result.current.registerTask("t1");
-      result.current.registerTask("t2");
-    });
-    expect(result.current.busy).toBe(true);
-
-    await act(async () => {
-      ws.onmessage?.({ data: JSON.stringify({ type: "task-done", taskId: "t1", kind: "mod-install", ok: true }) });
-      await Promise.resolve();
-    });
-    expect(result.current.busy).toBe(true); // t2 is still pending
-
-    await act(async () => {
-      ws.onmessage?.({ data: JSON.stringify({ type: "task-done", taskId: "t2", kind: "mod-update-all", ok: true }) });
-      await Promise.resolve();
-    });
-    expect(result.current.busy).toBe(false);
-    unmount();
-  });
-
-  it("bounds the completed-task bookkeeping so a long session can't grow it forever", async () => {
-    const { result, ws, unmount } = await openConnection();
-
-    // 55 fast-failing tasks whose task-done arrives before any matching
-    // registerTask call - one more than the implemented cap of 50. None of
-    // these were ever pending, so busy must stay false throughout.
-    for (let i = 0; i < 55; i++) {
-      await act(async () => {
-        ws.onmessage?.({
-          data: JSON.stringify({ type: "task-done", taskId: `race-${i}`, kind: "mod-install", ok: false }),
-        });
-        await Promise.resolve();
-      });
-    }
+  it("recovers busy from GET /api/status alone, with no websocket message at all", async () => {
+    // refresh() runs on every reconnect's onopen; it must carry the same
+    // truth as the backlog, so neither channel is a special case.
+    const { result, unmount } = await openConnection();
     expect(result.current.busy).toBe(false);
 
-    // The oldest markers must have been evicted to keep the store bounded:
-    // a late registerTask for the very first one is treated as a brand-new
-    // task (not suppressed), so it genuinely goes pending.
-    act(() => {
-      result.current.registerTask("race-0");
+    activeTasks = ["t1"];
+    await act(async () => {
+      await result.current.refresh();
     });
     expect(result.current.busy).toBe(true);
 

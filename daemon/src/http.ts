@@ -6,7 +6,7 @@ import { listWorlds, worldExists, isValidWorldName } from "./worlds.js";
 import type { ModInstaller } from "./mod-installer.js";
 import type { ProcessManager } from "./process-manager.js";
 import type { SteamCmd } from "./steamcmd.js";
-import type { DaemonConfig, TaskKind, WsMessage } from "./types.js";
+import type { DaemonConfig, InstallResult, StatusPayload, TaskKind, WsMessage } from "./types.js";
 
 export interface Deps {
   cfg: DaemonConfig;
@@ -34,6 +34,14 @@ export function buildServer(deps: Deps): FastifyInstance {
   type Socket = { send(data: string): void };
   const sockets = new Set<Socket>();
   let taskSeq = 0;
+  /**
+   * Ids of tasks accepted and not yet finished. The daemon is the authority on
+   * this - it is the only party that sees both the acceptance and the
+   * completion of a task, so it is the only party that can answer "is anything
+   * in flight" without racing two channels against each other. It is published
+   * in every StatusPayload and enforced server-side by POST /api/server/start.
+   */
+  const activeTasks = new Set<string>();
 
   const broadcast = (msg: WsMessage): void => {
     const data = JSON.stringify(msg);
@@ -50,9 +58,14 @@ export function buildServer(deps: Deps): FastifyInstance {
     for (const s of dead) sockets.delete(s);
   };
 
+  /** The one place a StatusPayload is built, so every channel reports the same thing. */
+  const statusPayload = (): StatusPayload => ({ ...pm.status, activeTasks: [...activeTasks] });
+
+  const broadcastStatus = (): void => broadcast({ type: "status", status: statusPayload() });
+
   pm.on("line", (l) => broadcast({ type: "console", line: l.line, ts: l.ts }));
   pm.on("state", (status) => {
-    broadcast({ type: "status", status });
+    broadcastStatus();
     if (status.state === "running" && status.world) {
       cfg.lastWorld = status.world;
       // Fire-and-forget from an event handler with no request to report to;
@@ -71,18 +84,55 @@ export function buildServer(deps: Deps): FastifyInstance {
     return false;
   };
 
+  /**
+   * Registers the task as active, runs it, and guarantees the entry is removed
+   * again on every exit path - resolve, reject, or a synchronous throw out of
+   * `fn` (the async IIFE turns that into a rejection too). A leaked entry would
+   * wedge POST /api/server/start and every client's Start button for the life
+   * of the daemon, so the `finally` is load-bearing, not defensive padding.
+   */
   const runTask = (
     kind: TaskKind,
-    fn: (onLine: (l: string) => void) => Promise<{ ok: boolean; error?: string }>,
+    fn: (
+      onLine: (l: string) => void,
+    ) => Promise<{ ok: boolean; error?: string; results?: InstallResult[] }>,
   ): string => {
     const taskId = `t${++taskSeq}`;
     const onLine = (line: string) => broadcast({ type: "task", taskId, kind, line });
-    fn(onLine)
-      .then((r) => broadcast({ type: "task-done", taskId, kind, ok: r.ok, error: r.error }))
-      .catch((e: Error) =>
-        broadcast({ type: "task-done", taskId, kind, ok: false, error: e.message }),
-      );
+    activeTasks.add(taskId);
+    broadcastStatus();
+    void (async () => {
+      try {
+        const r = await fn(onLine);
+        broadcast({ type: "task-done", taskId, kind, ok: r.ok, error: r.error, results: r.results });
+      } catch (e) {
+        broadcast({ type: "task-done", taskId, kind, ok: false, error: (e as Error).message });
+      } finally {
+        activeTasks.delete(taskId);
+        broadcastStatus();
+      }
+    })();
     return taskId;
+  };
+
+  /**
+   * Server-side interlock. A UI-only guard cannot stop a second client, a page
+   * left open from before the task started, or curl - and starting the game
+   * while steamcmd is mid-rewrite of the install or mods folder is exactly the
+   * corruption this exists to prevent.
+   */
+  const requireNoActiveTask = (reply: {
+    code(c: number): { send(b: unknown): unknown };
+  }): boolean => {
+    if (activeTasks.size === 0) return true;
+    reply.code(409).send({
+      ok: false,
+      error:
+        `Cannot start the server while a background task (mod install, mod update, or ` +
+        `server update) is still running. Starting now risks launching against a ` +
+        `half-rewritten install. Wait for it to finish. In flight: ${[...activeTasks].join(", ")}.`,
+    });
+    return false;
   };
 
   void app.register(cors, { origin: true });
@@ -92,7 +142,11 @@ export function buildServer(deps: Deps): FastifyInstance {
     instance.get("/ws", { websocket: true }, (socket) => {
       sockets.add(socket);
       socket.send(
-        JSON.stringify({ type: "backlog", lines: pm.backlog, status: pm.status } satisfies WsMessage),
+        JSON.stringify({
+          type: "backlog",
+          lines: pm.backlog,
+          status: statusPayload(),
+        } satisfies WsMessage),
       );
       socket.on("close", () => sockets.delete(socket));
       socket.on("error", () => sockets.delete(socket));
@@ -101,7 +155,7 @@ export function buildServer(deps: Deps): FastifyInstance {
 
   app.get("/api/status", async () => {
     pm.refreshUnmanaged();
-    return pm.status;
+    return statusPayload();
   });
 
   app.get("/api/worlds", async (req) => {
@@ -123,18 +177,19 @@ export function buildServer(deps: Deps): FastifyInstance {
     if (typeof world !== "string" || !isValidWorldName(world)) {
       return reply.code(400).send({ ok: false, error: `Invalid world name: ${JSON.stringify(world)}` });
     }
+    if (!requireNoActiveTask(reply)) return reply;
     try {
       pm.start(world);
     } catch (e) {
       return reply.code(409).send({ ok: false, error: (e as Error).message });
     }
-    return { ok: true, status: pm.status };
+    return { ok: true, status: statusPayload() };
   });
 
   app.post("/api/server/stop", async (_req, reply) => {
     try {
       await pm.stop();
-      return { ok: true, status: pm.status };
+      return { ok: true, status: statusPayload() };
     } catch (e) {
       const msg = (e as Error).message;
       return reply.code(/did not exit/.test(msg) ? 504 : 409).send({ ok: false, error: msg });
@@ -144,7 +199,7 @@ export function buildServer(deps: Deps): FastifyInstance {
   app.post("/api/server/kill", async (_req, reply) => {
     try {
       pm.kill();
-      return { ok: true, status: pm.status };
+      return { ok: true, status: statusPayload() };
     } catch (e) {
       return reply.code(409).send({ ok: false, error: (e as Error).message });
     }
@@ -210,23 +265,12 @@ export function buildServer(deps: Deps): FastifyInstance {
         error: `Cannot update mods while the server is ${pm.status.state}. Stop it first.`,
       });
     }
-    const taskId = `t${++taskSeq}`;
-    const onLine = (line: string) =>
-      broadcast({ type: "task", taskId, kind: "mod-update-all", line });
-    installer
-      .updateAll(onLine)
-      .then((results) =>
-        broadcast({
-          type: "task-done",
-          taskId,
-          kind: "mod-update-all",
-          ok: results.every((r) => r.ok),
-          results,
-        }),
-      )
-      .catch((e: Error) =>
-        broadcast({ type: "task-done", taskId, kind: "mod-update-all", ok: false, error: e.message }),
-      );
+    // Goes through runTask like every other task kind so the activeTasks
+    // lifecycle has exactly one implementation and no second path to leak from.
+    const taskId = runTask("mod-update-all", async (onLine) => {
+      const results = await installer.updateAll(onLine);
+      return { ok: results.every((r) => r.ok), results };
+    });
     return { ok: true, taskId };
   });
 

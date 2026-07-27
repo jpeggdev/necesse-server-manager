@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { parseReady, isStopped } from "./log-lines.js";
-import type { ConsoleLine, DaemonConfig, ServerState, StatusPayload } from "./types.js";
+import type { ConsoleLine, DaemonConfig, ServerState, ServerStatus } from "./types.js";
 
 const BACKLOG_LIMIT = 2000;
 
@@ -45,7 +45,9 @@ export class ProcessManager extends EventEmitter {
     super();
   }
 
-  get status(): StatusPayload {
+  // Deliberately NOT a StatusPayload: activeTasks is owned by the HTTP layer,
+  // which composes the two into the payload clients actually see.
+  get status(): ServerStatus {
     return {
       state: this.state,
       world: this.world,
