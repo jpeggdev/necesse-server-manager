@@ -34,9 +34,29 @@ export function ServerHeader(props: ServerHeaderProps) {
     return () => clearTimeout(handle);
   }, [world, onCandidateChange]);
 
-  const stateBusy = status.state === "starting" || status.state === "stopping";
-  const live = status.state === "running" || status.state === "starting";
-  const canStart = !stateBusy && !live && world.trim().length > 0 && candidate?.valid !== false;
+  // A candidate is only trustworthy for the text currently in the box. The
+  // lookup that produced `candidate` is debounced plus a network round trip
+  // behind whatever the user has typed since, so `candidate` can legitimately
+  // describe a name the user has already edited away from - showing its
+  // verdict (or letting Start use its name) in that window is exactly the
+  // "typo silently creates a world" bug this field exists to prevent.
+  const candidateIsCurrent = candidate !== null && candidate.name === world;
+
+  // `stopping` counts as live so the header keeps showing Stop (disabled)
+  // while the world saves, instead of flashing a disabled Start button that
+  // misreports what the server is doing.
+  const live = status.state === "running" || status.state === "starting" || status.state === "stopping";
+  const canStart = !live && !taskBusy && world.trim().length > 0 && candidateIsCurrent && candidate!.valid;
+
+  const startTitle = taskBusy
+    ? "Another task is already running"
+    : world.trim().length === 0
+      ? undefined
+      : !candidateIsCurrent
+        ? "Waiting to confirm the world name…"
+        : !candidate!.valid
+          ? "Not a valid world name"
+          : undefined;
 
   return (
     <header className="header">
@@ -47,7 +67,7 @@ export function ServerHeader(props: ServerHeaderProps) {
         id="world"
         list="world-options"
         value={world}
-        disabled={live || stateBusy}
+        disabled={live}
         onChange={(e) => setWorld(e.target.value)}
       />
       <datalist id="world-options">
@@ -56,22 +76,25 @@ export function ServerHeader(props: ServerHeaderProps) {
         ))}
       </datalist>
 
-      {candidate && candidate.name.length > 0 && (
-        <span className={candidate.valid ? (candidate.exists ? "hint" : "hint hint-warn") : "hint hint-bad"}>
-          {!candidate.valid
-            ? "Not a valid world name"
-            : candidate.exists
-              ? "Will load existing world"
-              : "Will create a new world"}
-        </span>
-      )}
+      {world.trim().length > 0 &&
+        (candidateIsCurrent ? (
+          <span className={candidate!.valid ? (candidate!.exists ? "hint" : "hint hint-warn") : "hint hint-bad"}>
+            {!candidate!.valid
+              ? "Not a valid world name"
+              : candidate!.exists
+                ? "Will load existing world"
+                : "Will create a new world"}
+          </span>
+        ) : (
+          <span className="hint">Checking world name&hellip;</span>
+        ))}
 
       {live ? (
         <button onClick={props.onStop} disabled={status.state === "stopping"}>
           Stop
         </button>
       ) : (
-        <button onClick={() => props.onStart(world)} disabled={!canStart}>
+        <button onClick={() => props.onStart(world)} disabled={!canStart} title={startTitle}>
           Start
         </button>
       )}

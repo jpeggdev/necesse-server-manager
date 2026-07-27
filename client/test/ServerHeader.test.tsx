@@ -31,8 +31,8 @@ function setup(overrides: Partial<Parameters<typeof ServerHeader>[0]> = {}) {
     onCandidateChange: vi.fn(),
     ...overrides,
   };
-  render(<ServerHeader {...props} />);
-  return props;
+  const { rerender } = render(<ServerHeader {...props} />);
+  return { ...props, rerender };
 }
 
 describe("ServerHeader", () => {
@@ -41,34 +41,58 @@ describe("ServerHeader", () => {
     expect(screen.getByLabelText(/world/i)).toHaveValue("Infected Toenail");
   });
 
-  it("lets the user type a world name that is not in the list", async () => {
-    const props = setup();
+  it("lets the user type a world name that is not in the list, once the candidate resolves for it", async () => {
+    const { rerender, ...headerProps } = setup();
     const input = screen.getByLabelText(/world/i);
     await userEvent.clear(input);
     await userEvent.type(input, "Brand New World");
     expect(input).toHaveValue("Brand New World");
+    // Before the (debounced, async) candidate lookup resolves for this exact
+    // text, Start must stay disabled - clicking it here must be a no-op.
+    expect(screen.getByRole("button", { name: /^start$/i })).toBeDisabled();
+    rerender(
+      <ServerHeader
+        {...headerProps}
+        candidate={{ name: "Brand New World", valid: true, exists: false }}
+      />,
+    );
     await userEvent.click(screen.getByRole("button", { name: /^start$/i }));
-    expect(props.onStart).toHaveBeenCalledWith("Brand New World");
+    expect(headerProps.onStart).toHaveBeenCalledWith("Brand New World");
   });
 
   it("warns that an unknown name will create a world", () => {
-    setup({ candidate: { name: "Brand New", valid: true, exists: false } });
+    setup({
+      worlds: { ...worlds, lastWorld: "Brand New" },
+      candidate: { name: "Brand New", valid: true, exists: false },
+    });
     expect(screen.getByText(/will create a new world/i)).toBeTruthy();
   });
 
   it("says an existing name will be loaded", () => {
-    setup({ candidate: { name: "Tulsa", valid: true, exists: true } });
+    setup({
+      worlds: { ...worlds, lastWorld: "Tulsa" },
+      candidate: { name: "Tulsa", valid: true, exists: true },
+    });
     expect(screen.getByText(/will load existing world/i)).toBeTruthy();
   });
 
   it("blocks Start on an invalid name", () => {
-    setup({ candidate: { name: "bad:name", valid: false, exists: false } });
+    setup({
+      worlds: { ...worlds, lastWorld: "bad:name" },
+      candidate: { name: "bad:name", valid: false, exists: false },
+    });
     expect(screen.getByRole("button", { name: /^start$/i })).toBeDisabled();
   });
 
   it("shows Stop instead of Start while running", () => {
     setup({ status: running });
     expect(screen.getByRole("button", { name: /^stop$/i })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: /^start$/i })).toBeNull();
+  });
+
+  it("shows Stop, disabled, instead of Start while stopping", () => {
+    setup({ status: { ...running, state: "stopping" } });
+    expect(screen.getByRole("button", { name: /^stop$/i })).toBeDisabled();
     expect(screen.queryByRole("button", { name: /^start$/i })).toBeNull();
   });
 
@@ -114,6 +138,18 @@ describe("ServerHeader", () => {
     expect(btn.getAttribute("title")).toMatch(/running|progress/i);
   });
 
+  it("disables Start while a task is busy, with a perceivable reason", () => {
+    setup({
+      status: stopped,
+      busy: true,
+      worlds: { ...worlds, lastWorld: "Infected Toenail" },
+      candidate: { name: "Infected Toenail", valid: true, exists: true },
+    });
+    const btn = screen.getByRole("button", { name: /^start$/i });
+    expect(btn).toBeDisabled();
+    expect(btn.getAttribute("title")).toMatch(/running|progress/i);
+  });
+
   it("prefers the actually-running world over lastWorld on initial render", () => {
     setup({ status: running, worlds: { ...worlds, lastWorld: "Infected Toenail" } });
     expect(screen.getByLabelText(/world/i)).toHaveValue("Tulsa");
@@ -153,5 +189,36 @@ describe("ServerHeader", () => {
     );
 
     expect(screen.getByLabelText(/world/i)).toHaveValue("Brand New World");
+  });
+
+  it("shows a checking state and disables Start once the typed text no longer matches the resolved candidate", async () => {
+    const props = setup({
+      worlds: { ...worlds, lastWorld: "Infected Toenail" },
+      candidate: { name: "Infected Toenail", valid: true, exists: true },
+    });
+    // Matches at mount: the real verdict shows.
+    expect(screen.getByText(/will load existing world/i)).toBeTruthy();
+
+    const input = screen.getByLabelText(/world/i);
+    await userEvent.type(input, "x"); // now "Infected Toenailx" - candidate is stale
+
+    expect(screen.queryByText(/will load existing world/i)).toBeNull();
+    expect(screen.queryByText(/will create a new world/i)).toBeNull();
+    expect(screen.getByText(/checking/i)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /^start$/i })).toBeDisabled();
+    expect(props.onStart).not.toHaveBeenCalled();
+  });
+
+  it("never invokes onStart with a name the candidate has not validated, even if clicked", async () => {
+    const props = setup({
+      worlds: { ...worlds, lastWorld: "Infected Toenail" },
+      candidate: { name: "Infected Toenail", valid: true, exists: true },
+    });
+    const input = screen.getByLabelText(/world/i);
+    await userEvent.type(input, "typo"); // "Infected Toenailtypo" - unvalidated
+    const btn = screen.getByRole("button", { name: /^start$/i });
+    expect(btn).toBeDisabled();
+    fireEvent.click(btn); // disabled buttons swallow the click; assert it truly does
+    expect(props.onStart).not.toHaveBeenCalled();
   });
 });
