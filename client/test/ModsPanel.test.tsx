@@ -10,6 +10,17 @@ const mods = {
   untracked: [{ jar: "MysteryMod.jar" }],
 };
 
+const updateAvailable = [
+  {
+    id: "3731244177",
+    title: "Safe Haven QOL",
+    workshopUpdatedAt: "2026-07-27T00:00:00.000Z",
+    installedAt: "2026-07-26T00:00:00.000Z",
+    onWorkshop: true,
+    updateAvailable: true,
+  },
+];
+
 function setup(overrides = {}) {
   const props = {
     mods,
@@ -86,5 +97,107 @@ describe("ModsPanel", () => {
     expect(screen.getByRole("button", { name: /^add$/i })).toBeDisabled();
     expect(screen.getByRole("button", { name: /remove Safe Haven QOL/i })).toBeDisabled();
     expect(screen.getByText(/task.*progress|already running/i)).toBeTruthy();
+  });
+});
+
+describe("ModsPanel update badges", () => {
+  it("badges a mod whose workshop entry changed after it was installed", () => {
+    setup({ updates: updateAvailable });
+    expect(screen.getByText(/may be newer/i)).toBeTruthy();
+  });
+
+  it("words the badge as a possibility, never as a promised new version", () => {
+    setup({ updates: updateAvailable });
+    // Steam moves time_updated for a description tweak too, so the UI must not
+    // claim a new jar exists.
+    const badge = screen.getByText(/may be newer/i);
+    expect(badge.getAttribute("title")).toMatch(/may be a new version|only an edit/i);
+    expect(screen.queryByText(/new version available/i)).toBeNull();
+  });
+
+  it("shows no badge when the entry has not changed", () => {
+    setup({ updates: [{ ...updateAvailable[0], updateAvailable: false }] });
+    expect(screen.queryByText(/may be newer/i)).toBeNull();
+  });
+
+  it("still lists every mod when the update check is unavailable", () => {
+    // Steam being down costs badges, never the mod list - that separation is
+    // the entire reason /api/mods/updates is a second call.
+    setup({ updates: null, updatesError: "Steam is unreachable" });
+    expect(screen.getByText("Safe Haven QOL")).toBeTruthy();
+    expect(screen.getByText("MysteryMod.jar")).toBeTruthy();
+    expect(screen.queryByText(/may be newer/i)).toBeNull();
+    expect(screen.getByText(/update check unavailable/i)).toBeTruthy();
+  });
+
+  it("says in the tooltip when Steam has no entry to compare against", () => {
+    setup({
+      updates: [{ ...updateAvailable[0], onWorkshop: false, updateAvailable: false }],
+    });
+    const row = screen.getByText("Safe Haven QOL").closest("li");
+    expect(row?.getAttribute("title")).toMatch(/no usable entry/i);
+  });
+
+  it("keeps the badged row to a single line: name, badge, and nothing else", () => {
+    setup({ updates: updateAvailable });
+    const row = screen.getByText("Safe Haven QOL").closest("li");
+    // The id and jar stay in the tooltip rather than growing the row.
+    expect(row?.textContent).not.toContain("3731244177");
+    expect(row?.textContent).not.toContain("SafeHavenQOL-1.2.0-2.6.jar");
+  });
+});
+
+describe("ModsPanel adding by id alone", () => {
+  it("adds with no name at all, leaving the daemon to resolve the title", async () => {
+    const props = setup();
+    await userEvent.type(screen.getByLabelText(/mod id/i), "3603448084");
+    expect(screen.getByRole("button", { name: /^add$/i })).toBeEnabled();
+    await userEvent.click(screen.getByRole("button", { name: /^add$/i }));
+    expect(props.onAdd).toHaveBeenCalledWith("3603448084", undefined);
+  });
+
+  it("still refuses a non-numeric id client-side", async () => {
+    const props = setup();
+    await userEvent.type(screen.getByLabelText(/mod id/i), "abc");
+    expect(screen.getByRole("button", { name: /^add$/i })).toBeDisabled();
+    expect(props.onAdd).not.toHaveBeenCalled();
+  });
+
+  it("refuses an empty id even though the name is optional", async () => {
+    setup();
+    expect(screen.getByRole("button", { name: /^add$/i })).toBeDisabled();
+  });
+
+  it("tells the user the name may be left empty", () => {
+    setup();
+    expect(screen.getByText(/leave the name empty/i)).toBeTruthy();
+  });
+});
+
+describe("ModsPanel workshop search toggle", () => {
+  const search = () =>
+    Promise.resolve({ ok: true as const, items: [], nextCursor: null, total: 0 });
+
+  it("does not offer search when no search function is supplied", () => {
+    setup();
+    expect(screen.queryByRole("button", { name: /search workshop/i })).toBeNull();
+  });
+
+  it("swaps the mod list for the search view and back", async () => {
+    setup({ onSearch: search });
+    await userEvent.click(screen.getByRole("button", { name: /search workshop/i }));
+    expect(screen.getByLabelText(/search the steam workshop/i)).toBeTruthy();
+    expect(screen.queryByText("Safe Haven QOL")).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: /back to mods/i }));
+    expect(screen.getByText("Safe Haven QOL")).toBeTruthy();
+  });
+
+  it("marks the toggle as pressed while the search view is showing", async () => {
+    setup({ onSearch: search });
+    const toggle = screen.getByRole("button", { name: /search workshop/i });
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    await userEvent.click(toggle);
+    expect(screen.getByRole("button", { name: /back to mods/i }).getAttribute("aria-pressed")).toBe("true");
   });
 });

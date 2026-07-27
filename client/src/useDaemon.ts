@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { makeApi, type Api, type WorldsResponse } from "./api";
-import type { ModListResponse, StatusPayload, WsMessage } from "./types";
+import type { ModListResponse, ModUpdateInfo, StatusPayload, WsMessage } from "./types";
 
 export const DAEMON_BASE = "http://192.168.1.106:8710";
 const WS_URL = "ws://192.168.1.106:8710/ws";
@@ -28,6 +28,19 @@ export interface DaemonState {
   worlds: WorldsResponse | null;
   lastWorld: string | null;
   mods: ModListResponse | null;
+  /**
+   * Per-mod workshop update status, or null when it is unknown - which is the
+   * state before the first check lands AND the state after a failed one. Null
+   * means "show no badges", never "nothing is out of date".
+   */
+  modUpdates: ModUpdateInfo[] | null;
+  /**
+   * Why the update check has nothing to say, when it failed. Deliberately not
+   * routed into `error`: `error` is the daemon-connectivity banner, and Steam
+   * being unreachable is not the daemon being unreachable. Conflating them
+   * would put a red banner over a perfectly working app.
+   */
+  updatesError: string | null;
   console: ConsoleEntry[];
   connected: boolean;
   error: string | null;
@@ -56,6 +69,8 @@ export function useDaemon(): DaemonState {
   const [status, setStatus] = useState<StatusPayload | null>(null);
   const [worlds, setWorlds] = useState<WorldsResponse | null>(null);
   const [mods, setMods] = useState<ModListResponse | null>(null);
+  const [modUpdates, setModUpdates] = useState<ModUpdateInfo[] | null>(null);
+  const [updatesError, setUpdatesError] = useState<string | null>(null);
   const [lines, setLines] = useState<ConsoleEntry[]>([]);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -73,6 +88,51 @@ export function useDaemon(): DaemonState {
       setError((e as Error).message);
     }
   }, [api]);
+
+  /**
+   * Identity of the managed set as far as update-checking is concerned: which
+   * ids are installed and when each was installed. Both halves matter - an
+   * install that replaces a jar changes only `lastUpdated`, and that is exactly
+   * the event that should clear the badge it was prompted by.
+   */
+  const modsKey =
+    mods === null ? "" : mods.managed.map((m) => `${m.id}@${m.lastUpdated}`).join(",");
+
+  /**
+   * The update check runs in its own effect rather than inside refresh(), and
+   * that separation is the point: refresh() is a Promise.all whose rejection
+   * blanks the whole UI, so a Steam outage folded into it would take the mod
+   * list, the world list and the status down with it. Here a failure sets
+   * `updatesError` and leaves every other piece of state untouched.
+   *
+   * Keyed on `modsKey` so it fires exactly when the managed set actually
+   * changes - not on every status broadcast, and not on every console line.
+   */
+  useEffect(() => {
+    if (modsKey.length === 0) {
+      setModUpdates(null);
+      setUpdatesError(null);
+      return;
+    }
+    let cancelled = false;
+    api
+      .modUpdates()
+      .then((r) => {
+        if (cancelled) return;
+        setModUpdates(r.mods);
+        setUpdatesError(null);
+      })
+      .catch((e: Error) => {
+        if (cancelled) return;
+        // Dropped, not kept: stale badges after a failed re-check would claim
+        // an update is available for a mod that may have just been updated.
+        setModUpdates(null);
+        setUpdatesError(e.message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [api, modsKey]);
 
   const append = useCallback((entry: ConsoleEntry) => {
     setLines((prev) => {
@@ -192,6 +252,8 @@ export function useDaemon(): DaemonState {
     worlds,
     lastWorld: worlds?.lastWorld ?? null,
     mods,
+    modUpdates,
+    updatesError,
     console: lines,
     connected,
     error,

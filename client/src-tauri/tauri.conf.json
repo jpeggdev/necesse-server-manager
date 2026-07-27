@@ -18,7 +18,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://192.168.1.106:8710 ws://192.168.1.106:8710; style-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self'; connect-src 'self' http://192.168.1.106:8710 ws://192.168.1.106:8710; img-src 'self' data: https://images.steamusercontent.com https://*.steamusercontent.com https://*.steamstatic.com https://*.akamaihd.net; style-src 'self' 'unsafe-inline'"
     }
   },
   "bundle": {

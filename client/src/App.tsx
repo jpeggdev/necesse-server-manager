@@ -19,6 +19,8 @@ export default function App() {
     status,
     worlds,
     mods,
+    modUpdates,
+    updatesError,
     console: lines,
     connected,
     error: daemonError,
@@ -109,6 +111,14 @@ export default function App() {
     [api],
   );
 
+  // Read-only, so it does not go through guard(): a search must not touch the
+  // error banner or fire a refresh(), and it stays usable while the server is
+  // running. Only the Install button a result carries is gated.
+  const searchWorkshop = useCallback(
+    (q: string, cursor?: string) => api.workshopSearch(q, cursor),
+    [api],
+  );
+
   if (!connected || !status || !worlds || !mods) {
     return (
       <main className="app">
@@ -148,8 +158,11 @@ export default function App() {
         <div className="mods-pane" style={{ width: modsWidth }}>
           <ModsPanel
             mods={mods}
+            updates={modUpdates}
+            updatesError={updatesError}
             busy={busy}
             running={running}
+            onSearch={searchWorkshop}
             onAdd={(id, name) => guard(() => api.addMod(id, name))()}
             onRemove={(id) => guard(() => api.removeMod(id))()}
             onUpdateAll={guard(() => api.updateAllMods())}

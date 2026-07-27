@@ -135,6 +135,24 @@ hold an HTTP handler open for the life of the daemon. A test asserts the signal
 is attached, because a fake fetch always answers and would otherwise never
 notice its removal.
 
+## Thumbnails and the Tauri CSP
+
+`preview_url` points at Steam's own image CDN, which is a different origin from
+both the app and the daemon. `client/src-tauri/tauri.conf.json` sets
+`default-src 'self'`, so before this the browser blocked every thumbnail with no
+visible symptom other than empty boxes. An explicit `img-src` was added:
+
+```
+img-src 'self' data: https://images.steamusercontent.com
+        https://*.steamusercontent.com https://*.steamstatic.com
+        https://*.akamaihd.net
+```
+
+`images.steamusercontent.com` is what live `QueryFiles` responses actually
+return; the wildcards cover the older `steamuserimages-a.akamaihd.net` and
+`*.steamstatic.com` forms Steam still hands out for some items. `connect-src` is
+untouched - nothing fetches these, they are only ever `<img src>`.
+
 ## Design constraints worth keeping
 
 **`GET /api/mods` does not call Steam.** The mod list is read off disk and has to

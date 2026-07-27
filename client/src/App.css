@@ -16,7 +16,9 @@ button.danger { background: #5a2020; border-color: #7a2a2a; }
 .mods { flex: 1; min-width: 0; padding: 1rem; overflow-y: auto; }
 .splitter { flex: 0 0 6px; background: #2b3138; cursor: col-resize; }
 .splitter:hover, .splitter:focus-visible { background: #4a7fb5; outline: none; }
-.mods-head { display: flex; justify-content: space-between; align-items: center; }
+.mods-head { display: flex; justify-content: space-between; align-items: center; gap: .5rem; }
+.mods-head-actions { display: flex; gap: .4rem; flex: 0 0 auto; }
+.mods-head-actions button[aria-pressed="true"] { background: #2b4a6b; border-color: #3d6a97; }
 .mod-list { list-style: none; padding: 0; }
 /* One row per mod: [X] name. Workshop id and jar filename live in the row's
    title, so the list stays scannable at any panel width. */
@@ -30,8 +32,23 @@ button.danger { background: #5a2020; border-color: #7a2a2a; }
   background: #6b3434; border-color: #8a4444; font-size: 1.1rem; line-height: 1;
 }
 .x:hover:not(:disabled) { background: #7f3f3f; }
+.mod-tag-update { color: #6fd39b; border-color: #2f6b4a; }
 .mod-add { display: grid; grid-template-columns: auto 1fr; gap: .4rem; align-items: center; margin-top: 1rem; }
-.mod-add button { grid-column: 1 / span 2; }
+.mod-add button, .mod-add-hint { grid-column: 1 / span 2; }
+.mod-add-hint { margin: 0; }
+
+/* Search results follow the mod list's one-row-per-mod rule: thumbnail, title,
+   subscriber count, Install. Everything else is in the row's title. */
+.workshop-form { display: grid; grid-template-columns: auto 1fr; gap: .4rem; align-items: center; margin-bottom: .6rem; }
+.workshop-form label { font-size: .85rem; }
+.workshop-form input { background: #1f242a; color: inherit; border: 1px solid #2b3138; border-radius: 4px; padding: .35rem .5rem; min-width: 0; }
+.workshop-form button { grid-column: 1 / span 2; }
+.workshop-list { list-style: none; padding: 0; margin: .4rem 0 0; }
+.workshop-list li { display: flex; align-items: center; gap: .5rem; padding: .3rem 0; border-bottom: 1px solid #23282e; }
+/* Fixed box so a thumbnail that fails to load cannot reflow the row. */
+.workshop-thumb { flex: 0 0 32px; width: 32px; height: 32px; object-fit: cover; border-radius: 3px; background: #1f242a; }
+.workshop-subs { flex: 0 0 auto; font-size: .75rem; color: #9aa6b2; }
+.workshop-more { margin-top: .6rem; width: 100%; }
 .console { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .console-body { flex: 1; overflow-y: auto; padding: .6rem 1rem; font-family: Consolas, monospace; font-size: .8rem; }
 .line { white-space: pre-wrap; } .line-task { color: #6fd39b; }

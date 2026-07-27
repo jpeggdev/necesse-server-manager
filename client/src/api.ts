@@ -1,4 +1,10 @@
-import type { ModListResponse, StatusPayload, WorldInfo } from "./types";
+import type {
+  ModListResponse,
+  ModUpdatesResponse,
+  StatusPayload,
+  WorkshopSearchResponse,
+  WorldInfo,
+} from "./types";
 
 export interface WorldsResponse {
   worlds: WorldInfo[];
@@ -69,7 +75,42 @@ export function makeApi(base: string) {
     kill: () => post<{ ok: true }>("/api/server/kill"),
     updateServer: () => post<{ ok: true; taskId: string }>("/api/server/update"),
     mods: () => request<ModListResponse>(`${base}/api/mods`),
-    addMod: (id: string, name: string) => post<{ ok: true; taskId: string }>("/api/mods", { id, name }),
+    /**
+     * Which managed mods have a newer workshop entry. A separate call from
+     * mods() on purpose: the mod list is read off the server's disk and must
+     * keep working when Steam is down, so this one failing (502) costs badges
+     * and nothing else. Never fold the two together.
+     */
+    modUpdates: () => request<ModUpdatesResponse>(`${base}/api/mods/updates`),
+    /**
+     * Empty `q` is a browse rather than an error - the daemon omits
+     * `search_text` and Steam ranks by trend. `cursor` comes from a previous
+     * response's `nextCursor`; the daemon already collapses Steam's
+     * echo-the-cursor-back-forever behaviour into a null.
+     */
+    workshopSearch: (q: string, cursor?: string, count?: number) => {
+      const params = new URLSearchParams();
+      if (q.trim().length > 0) params.set("q", q.trim());
+      if (cursor !== undefined) params.set("cursor", cursor);
+      if (count !== undefined) params.set("count", String(count));
+      const qs = params.toString();
+      return request<WorkshopSearchResponse>(
+        `${base}/api/workshop/search${qs.length > 0 ? `?${qs}` : ""}`,
+      );
+    },
+    /**
+     * `name` is optional: with no name the daemon resolves the title from
+     * Steam, which is what makes installing straight out of workshop search
+     * possible. The key is omitted rather than sent empty so the daemon's
+     * "an explicit name always wins" branch is never entered with nothing in
+     * it. If Steam cannot resolve it the daemon answers 400 asking for a name,
+     * and that message is what the user needs to see.
+     */
+    addMod: (id: string, name?: string) =>
+      post<{ ok: true; taskId: string }>(
+        "/api/mods",
+        name !== undefined && name.trim().length > 0 ? { id, name: name.trim() } : { id },
+      ),
     removeMod: (id: string) =>
       request<{ ok: true }>(`${base}/api/mods/${id}`, { method: "DELETE" }),
     updateAllMods: () => post<{ ok: true; taskId: string }>("/api/mods/update-all"),

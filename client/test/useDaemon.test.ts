@@ -7,7 +7,7 @@
 // and every attempt to correlate them raced. These tests drive the hook with a
 // fake WebSocket carrying real message shapes.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { renderHook, act } from "@testing-library/react";
+import { renderHook, act, waitFor } from "@testing-library/react";
 import { useDaemon, WS_FAILURE_THRESHOLD } from "../src/useDaemon";
 
 class FakeWebSocket {
@@ -300,6 +300,96 @@ describe("useDaemon websocket connection failures", () => {
 
     expect(result.current.connected).toBe(true);
     expect(result.current.error).toBeNull();
+    unmount();
+  });
+});
+
+/*
+ * GET /api/mods/updates is a second call on purpose: the mod list is read off
+ * the server's disk and has to keep working when Steam is down. These pin that
+ * the two never share a fate - a 502 from the update check may cost badges and
+ * nothing else, and in particular must not raise the daemon-connectivity
+ * banner, which would tell the operator the daemon is broken when it is not.
+ */
+describe("useDaemon workshop update badges", () => {
+  const managed = [
+    { id: "3731244177", name: "Safe Haven QOL", jar: "shq.jar", lastUpdated: "2026-07-26T00:00:00.000Z" },
+  ];
+
+  function stubFetch(updates: () => unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.endsWith("/api/mods/updates")) return updates();
+        if (url.endsWith("/api/status")) return jsonResponse(statusPayload());
+        if (url.includes("/api/worlds")) {
+          return jsonResponse({ worlds: [], lastWorld: null, candidate: null });
+        }
+        if (url.endsWith("/api/mods")) return jsonResponse({ managed, untracked: [] });
+        return jsonResponse({});
+      }),
+    );
+  }
+
+  it("reports which managed mods have a newer workshop entry", async () => {
+    stubFetch(() =>
+      jsonResponse({
+        ok: true,
+        checkedAt: "2026-07-27T00:00:00.000Z",
+        mods: [
+          {
+            id: "3731244177",
+            title: "Safe Haven QOL",
+            workshopUpdatedAt: "2026-07-27T00:00:00.000Z",
+            installedAt: "2026-07-26T00:00:00.000Z",
+            onWorkshop: true,
+            updateAvailable: true,
+          },
+        ],
+      }),
+    );
+    const { result, unmount } = await openConnection();
+    await waitFor(() => expect(result.current.modUpdates?.[0]?.updateAvailable).toBe(true));
+    expect(result.current.updatesError).toBeNull();
+    unmount();
+  });
+
+  it("keeps the mod list and the connection banner intact when Steam is unreachable", async () => {
+    stubFetch(() => ({
+      ok: false,
+      status: 502,
+      json: async () => ({ ok: false, error: "Steam did not respond within 10000ms" }),
+    }));
+    const { result, unmount } = await openConnection();
+
+    await waitFor(() => expect(result.current.updatesError).toMatch(/steam did not respond/i));
+    // The whole point of the separate endpoint: everything else still works.
+    expect(result.current.mods?.managed).toHaveLength(1);
+    expect(result.current.status).not.toBeNull();
+    expect(result.current.modUpdates).toBeNull();
+    // A Steam outage is not a daemon outage; the banner must stay clear.
+    expect(result.current.error).toBeNull();
+    unmount();
+  });
+
+  it("checks nothing at all when no mod is managed", async () => {
+    const updates = vi.fn(() => jsonResponse({ ok: true, checkedAt: "x", mods: [] }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.endsWith("/api/mods/updates")) return updates();
+        if (url.endsWith("/api/status")) return jsonResponse(statusPayload());
+        if (url.includes("/api/worlds")) {
+          return jsonResponse({ worlds: [], lastWorld: null, candidate: null });
+        }
+        if (url.endsWith("/api/mods")) return jsonResponse({ managed: [], untracked: [] });
+        return jsonResponse({});
+      }),
+    );
+    const { result, unmount } = await openConnection();
+    await waitFor(() => expect(result.current.mods).not.toBeNull());
+    expect(updates).not.toHaveBeenCalled();
+    expect(result.current.modUpdates).toBeNull();
     unmount();
   });
 });

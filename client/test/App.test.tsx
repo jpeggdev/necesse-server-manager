@@ -36,6 +36,10 @@ let serverState = "stopped";
 let releaseUpdate: (() => void) | null = null;
 /** How POST /api/server/stop answers. Null means "not exercised in this test". */
 let stopResponse: { ok: boolean; status: number; body: unknown } | null = null;
+/** How POST /api/mods answers. Null means "not exercised in this test". */
+let addModResponse: { ok: boolean; status: number; body: unknown } | null = null;
+/** The raw JSON body of the last POST /api/mods, so the name-optional wiring is checkable end to end. */
+let lastAddBody: string | null = null;
 
 function statusPayload() {
   return {
@@ -60,11 +64,22 @@ beforeEach(() => {
   serverState = "stopped";
   releaseUpdate = null;
   stopResponse = null;
+  addModResponse = null;
+  lastAddBody = null;
   FakeWebSocket.instances = [];
   vi.stubGlobal("WebSocket", FakeWebSocket as unknown as typeof WebSocket);
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (url: string) => {
+    vi.fn(async (url: string, init?: { method?: string; body?: string }) => {
+      // Keyed on the verb, not the path: GET /api/mods (the list) and
+      // POST /api/mods (the add) are the same url.
+      if (url.endsWith("/api/mods") && init?.method === "POST") {
+        lastAddBody = init.body ?? null;
+        if (addModResponse) {
+          return { ok: addModResponse.ok, status: addModResponse.status, json: async () => addModResponse!.body };
+        }
+        return jsonResponse({ ok: true, taskId: "t1" });
+      }
       if (url.endsWith("/api/server/stop") && stopResponse) {
         return { ok: stopResponse.ok, status: stopResponse.status, json: async () => stopResponse!.body };
       }
@@ -221,5 +236,35 @@ describe("App stop timeout", () => {
 
     expect(screen.getByText(/not running/i)).toBeTruthy();
     expect(screen.queryByRole("button", { name: /force kill/i })).toBeNull();
+  });
+});
+
+/*
+ * Adding by id alone only works if the whole chain holds: the panel lets an
+ * empty name through, api.addMod omits the key rather than sending "", and the
+ * daemon's 400 - the one case where the user MUST supply a name - reaches the
+ * banner instead of being swallowed into a silent no-op. A user who cannot see
+ * that message has no way to know what to do next.
+ */
+describe("App adding a mod by id alone", () => {
+  async function addById(id: string) {
+    await mountConnected();
+    const idBox = screen.getByLabelText(/mod id/i);
+    fireEvent.change(idBox, { target: { value: id } });
+    fireEvent.click(screen.getByRole("button", { name: /^add$/i }));
+    await settle();
+  }
+
+  it("posts the id with no name at all, leaving the title to Steam", async () => {
+    await addById("3603448084");
+    expect(JSON.parse(lastAddBody!)).toEqual({ id: "3603448084" });
+  });
+
+  it("shows the daemon's own message when Steam cannot resolve a name", async () => {
+    const message =
+      "Steam returned no title for 3603448084. Supply a name explicitly and try again.";
+    addModResponse = { ok: false, status: 400, body: { ok: false, error: message } };
+    await addById("3603448084");
+    expect(screen.getByText(message)).toBeTruthy();
   });
 });
