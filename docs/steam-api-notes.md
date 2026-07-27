@@ -167,10 +167,21 @@ a few characters at most rather than everything up to the next `]`.
 no such parameter** - confirmed against the live endpoint, whose entries carry
 `description` and no `short_description` at all. So `toItem` reads both and
 prefers whichever non-empty one it finds, and `toBlurb` truncates either to the
-same size. The flag is a bandwidth saving on Steam's side of the hop, not
-something the output shape depends on: if Steam ever ignores it, the full
-description arrives and is cut down exactly as it already is for the keyless
-path. Tests cover both branches.
+same size.
+
+**Verified live on 2026-07-27 with a real key**, closing what was previously an
+unverified assumption. Steam honours the flag: a `q=storage` search returned
+blurbs of exactly 256 characters, which is Steam's own short-description cap and
+well under our 280, so no truncation of ours was even reached. The keyless
+`GetPublishedFileDetails` path on the same run returned full descriptions cut to
+271-280 by `toBlurb`. Both branches are therefore exercised in production, not
+just in tests.
+
+The dual read still earns its place: had the flag been ignored or dropped,
+`QueryFiles` is opt-in per field and would have returned an **empty** blurb
+rather than a longer one, so search descriptions would have silently vanished
+rather than merely costing bandwidth. Adding `return_description=true` is the
+fallback if Steam ever changes this.
 
 ## Thumbnails for installed mods
 
