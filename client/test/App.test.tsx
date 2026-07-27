@@ -40,6 +40,25 @@ let stopResponse: { ok: boolean; status: number; body: unknown } | null = null;
 let addModResponse: { ok: boolean; status: number; body: unknown } | null = null;
 /** The raw JSON body of the last POST /api/mods, so the name-optional wiring is checkable end to end. */
 let lastAddBody: string | null = null;
+/** The raw JSON body of the last PUT of a world's settings, for the same reason. */
+let lastSettingsBody: string | null = null;
+
+const SETTINGS_BACKUP = "C:/worlds/Tulsa.zip.2026-07-27T05-01-02-003Z.bak";
+
+function settingsFields(allowCheats: string) {
+  return [
+    { key: "allowCheats", value: allowCheats, type: "boolean", editable: true },
+    {
+      key: "difficulty",
+      value: "CLASSIC",
+      type: "enum",
+      options: ["CASUAL", "CLASSIC", "BRUTAL"],
+      editable: true,
+    },
+    { key: "gameVersion", value: "1.2.0", type: "string", editable: false },
+    { key: "rpgskillsWorldStackLevel", value: "1", type: null, editable: false },
+  ];
+}
 
 function statusPayload() {
   return {
@@ -66,6 +85,7 @@ beforeEach(() => {
   stopResponse = null;
   addModResponse = null;
   lastAddBody = null;
+  lastSettingsBody = null;
   FakeWebSocket.instances = [];
   vi.stubGlobal("WebSocket", FakeWebSocket as unknown as typeof WebSocket);
   vi.stubGlobal(
@@ -89,8 +109,35 @@ beforeEach(() => {
         });
       }
       if (url.endsWith("/api/status")) return jsonResponse(statusPayload());
+      if (url.includes("/settings")) {
+        if (init?.method === "PUT") {
+          lastSettingsBody = init.body ?? null;
+          return jsonResponse({
+            ok: true,
+            world: "Tulsa",
+            entry: "Tulsa/worldSettings.cfg",
+            fields: settingsFields("true"),
+            backup: SETTINGS_BACKUP,
+            changed: ["allowCheats"],
+          });
+        }
+        return jsonResponse({
+          ok: true,
+          world: "Tulsa",
+          entry: "Tulsa/worldSettings.cfg",
+          fields: settingsFields("false"),
+        });
+      }
       if (url.includes("/api/worlds")) {
-        return jsonResponse({ worlds: [], lastWorld: "Tulsa", candidate: null });
+        // The candidate is echoed back for whatever name was asked about, so
+        // the header's real staleness gate runs instead of being bypassed.
+        const asked = /[?&]name=([^&]*)/.exec(url);
+        const name = asked === null ? null : decodeURIComponent(asked[1]);
+        return jsonResponse({
+          worlds: [],
+          lastWorld: "Tulsa",
+          candidate: name === null ? null : { name, valid: true, exists: name === "Tulsa" },
+        });
       }
       if (url.endsWith("/api/mods")) return jsonResponse({ managed: [], untracked: [] });
       return jsonResponse({});
@@ -246,6 +293,46 @@ describe("App stop timeout", () => {
  * banner instead of being swallowed into a silent no-op. A user who cannot see
  * that message has no way to know what to do next.
  */
+/*
+ * The world settings editor only works if the whole chain holds: the header's
+ * candidate gate has to open the button for a world that exists, the dialog
+ * has to load that world's own file, and the save has to carry ONLY what
+ * changed. A form that posted every field would rewrite lines nobody touched -
+ * in a zip that is the single copy of somebody's save.
+ */
+describe("App world settings editor", () => {
+  async function openEditor() {
+    await mountConnected();
+    const trigger = await screen.findByRole("button", { name: /world settings/i });
+    await waitFor(() => expect(trigger).toBeEnabled());
+    fireEvent.click(trigger);
+    await screen.findByRole("dialog");
+    return trigger;
+  }
+
+  it("opens on the world in the header and sends only the field that changed", async () => {
+    await openEditor();
+    expect(screen.getByRole("dialog")).toHaveAccessibleName(/tulsa/i);
+
+    fireEvent.click(screen.getByLabelText("allowCheats"));
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    await settle();
+
+    expect(JSON.parse(lastSettingsBody!)).toEqual({ allowCheats: true });
+    expect(screen.getByText(new RegExp(SETTINGS_BACKUP))).toBeTruthy();
+  });
+
+  it("stays shut, with a reason, while the server is running", async () => {
+    serverState = "running";
+    await mountConnected();
+    const trigger = await screen.findByRole("button", { name: /world settings/i });
+    expect(trigger).toBeDisabled();
+    expect(trigger.getAttribute("title")).toMatch(/stopped/i);
+    fireEvent.click(trigger);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+});
+
 describe("App adding a mod by id alone", () => {
   async function addById(id: string) {
     await mountConnected();

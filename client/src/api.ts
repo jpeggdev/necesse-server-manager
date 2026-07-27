@@ -4,6 +4,8 @@ import type {
   StatusPayload,
   WorkshopSearchResponse,
   WorldInfo,
+  WorldSettingsResponse,
+  WorldSettingsWriteResponse,
 } from "./types";
 
 export interface WorldsResponse {
@@ -33,6 +35,14 @@ export class DaemonError extends Error {
 
 /** The daemon answers a stop that ran past `stopTimeoutMs` with this. */
 export const STOP_TIMEOUT_STATUS = 504;
+
+/**
+ * A new value for one world setting, in the JSON shape the daemon validates:
+ * a boolean for a boolean field, a number for an int/float, a string for an
+ * enum. The daemon type-checks every one of them and answers 400 with the
+ * reason, so this type is a convenience for callers rather than the guard.
+ */
+export type WorldSettingValue = boolean | number | string;
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   let res: Response;
@@ -69,6 +79,25 @@ export function makeApi(base: string) {
         name === undefined
           ? `${base}/api/worlds`
           : `${base}/api/worlds?name=${encodeURIComponent(name)}`,
+      ),
+    /**
+     * A world's `worldSettings.cfg` as the daemon reads it: every line the file
+     * has, in file order, with the type and option set of each. Reading is
+     * allowed whatever the server is doing - only the write needs it stopped.
+     */
+    worldSettings: (world: string) =>
+      request<WorldSettingsResponse>(
+        `${base}/api/worlds/${encodeURIComponent(world)}/settings`,
+      ),
+    /**
+     * Applies a PARTIAL set of changes: every key sent is a line the daemon
+     * rewrites, so a caller that sent the whole form would rewrite lines the
+     * user never touched. Send only what changed.
+     */
+    saveWorldSettings: (world: string, changes: Record<string, WorldSettingValue>) =>
+      request<WorldSettingsWriteResponse>(
+        `${base}/api/worlds/${encodeURIComponent(world)}/settings`,
+        { method: "PUT", body: JSON.stringify(changes) },
       ),
     start: (world: string) => post<{ ok: true }>("/api/server/start", { world }),
     stop: () => post<{ ok: true }>("/api/server/stop"),

@@ -17,6 +17,7 @@ import { SteamCmd } from "../../daemon/src/steamcmd.js";
 import { SteamWorkshop } from "../../daemon/src/steam-workshop.js";
 import { DEFAULT_CONFIG } from "../../daemon/src/config.js";
 import { makeFakeSpawn } from "../../daemon/test/fixtures/fake-spawn.js";
+import { makeWorldZip } from "../../daemon/test/fixtures/world-zip.js";
 import { makeApi } from "../src/api";
 
 let app: ReturnType<typeof buildServer>;
@@ -80,5 +81,62 @@ describe("makeApi against a real daemon instance", () => {
     // Same root cause, same request() codepath, different verb: confirm the
     // fix isn't accidentally POST-specific.
     await expect(makeApi(baseUrl).removeMod("999")).rejects.toThrow(/not managed/i);
+  });
+});
+
+/*
+ * PUT is a verb no other call in this client uses, and the settings form is the
+ * only thing that sends a JSON body through `request()` on anything but POST.
+ * A mocked fetch would prove the header was set and nothing about whether
+ * Fastify accepts it, which is exactly the failure this file exists for - so
+ * this drives a real daemon over real HTTP against a real world zip in a temp
+ * directory.
+ */
+describe("world settings over a real daemon instance", () => {
+  it("reads the file's own keys, types and option sets", async () => {
+    await makeWorldZip(join(root, "worlds"), "Tulsa");
+    const res = await makeApi(baseUrl).worldSettings("Tulsa");
+
+    const difficulty = res.fields.find((f) => f.key === "difficulty");
+    // The option set the form renders comes from here, not from the client.
+    expect(difficulty?.options).toContain("BRUTAL");
+    expect(res.fields.find((f) => f.key === "gameVersion")?.editable).toBe(false);
+    const modKey = res.fields.find((f) => f.key === "rpgskillsWorldStackLevel");
+    expect(modKey?.type).toBeNull();
+    expect(modKey?.editable).toBe(false);
+  });
+
+  it("applies a partial change and reports where the backup went", async () => {
+    await makeWorldZip(join(root, "worlds"), "Tulsa");
+    const api = makeApi(baseUrl);
+    const res = await api.saveWorldSettings("Tulsa", { allowCheats: true, difficulty: "BRUTAL" });
+
+    expect(res.changed).toEqual(["allowCheats", "difficulty"]);
+    expect(res.backup).toMatch(/Tulsa/);
+    expect(res.fields.find((f) => f.key === "allowCheats")?.value).toBe("true");
+    // Untouched by this write, and still there: the whole point of sending a
+    // partial patch rather than the form.
+    expect(res.fields.find((f) => f.key === "survivalMode")?.value).toBe("true");
+    expect(res.fields.find((f) => f.key === "rpgskillsWorldStackLevel")?.value).toBe("1");
+  });
+
+  it("writes nothing, and takes no backup, when the values already match", async () => {
+    await makeWorldZip(join(root, "worlds"), "Tulsa");
+    const res = await makeApi(baseUrl).saveWorldSettings("Tulsa", { allowCheats: false });
+    expect(res.changed).toEqual([]);
+    expect(res.backup).toBeNull();
+  });
+
+  it("hands the daemon's refusal back to the client as its own text", async () => {
+    await makeWorldZip(join(root, "worlds"), "Tulsa");
+    await expect(
+      makeApi(baseUrl).saveWorldSettings("Tulsa", { gameVersion: "9.9.9" }),
+    ).rejects.toThrow(/never be changed/i);
+    await expect(
+      makeApi(baseUrl).saveWorldSettings("Tulsa", { difficulty: "IMPOSSIBLE" }),
+    ).rejects.toThrow(/must be one of/i);
+    await expect(
+      makeApi(baseUrl).saveWorldSettings("Tulsa", { dayTimeMod: 99 }),
+    ).rejects.toThrow(/at most 10/i);
   });
 });

@@ -101,6 +101,30 @@ describe("makeApi", () => {
     await expect(makeApi(BASE).workshopSearch("x")).rejects.toThrow(message);
   });
 
+  it("GETs a world's settings, with the name encoded into the path", async () => {
+    fetchMock.mockResolvedValue(ok({ ok: true, world: "Jeff and Eli", entry: "x", fields: [] }));
+    await makeApi(BASE).worldSettings("Jeff and Eli");
+    expect(fetchMock.mock.calls[0][0]).toBe(`${BASE}/api/worlds/Jeff%20and%20Eli/settings`);
+  });
+
+  it("PUTs only the changes it was given", async () => {
+    fetchMock.mockResolvedValue(ok({ ok: true, world: "Tulsa", entry: "x", fields: [], backup: null, changed: [] }));
+    await makeApi(BASE).saveWorldSettings("Tulsa", { allowCheats: true, dayTimeMod: 2.5 });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(`${BASE}/api/worlds/Tulsa/settings`);
+    expect(init.method).toBe("PUT");
+    expect(init.headers["content-type"]).toBe("application/json");
+    expect(JSON.parse(init.body)).toEqual({ allowCheats: true, dayTimeMod: 2.5 });
+  });
+
+  it("surfaces the daemon's refusal to write a settings file verbatim", async () => {
+    const message = '"gameVersion" is written by the game and can never be changed here.';
+    fetchMock.mockResolvedValue(err(400, { ok: false, error: message }));
+    await expect(makeApi(BASE).saveWorldSettings("Tulsa", { gameVersion: "9" })).rejects.toThrow(
+      message,
+    );
+  });
+
   it("DELETEs a mod by id", async () => {
     fetchMock.mockResolvedValue(ok({ ok: true }));
     await makeApi(BASE).removeMod("3731244177");

@@ -4,8 +4,9 @@ import { ModsPanel } from "./ModsPanel";
 import { ConsolePanel } from "./ConsolePanel";
 import { ErrorBanner } from "./ErrorBanner";
 import { Splitter } from "./Splitter";
+import { WorldSettingsDialog } from "./WorldSettingsDialog";
 import { useDaemon } from "./useDaemon";
-import { DaemonError, STOP_TIMEOUT_STATUS } from "./api";
+import { DaemonError, STOP_TIMEOUT_STATUS, type WorldSettingValue } from "./api";
 import "./App.css";
 
 const MODS_WIDTH_KEY = "necesse.modsWidth";
@@ -41,6 +42,10 @@ export default function App() {
   // one failure that leaves the header with no usable control, so it is what
   // unlocks Force kill.
   const [stopTimedOut, setStopTimedOut] = useState(false);
+  // The world whose settings dialog is open, or null for closed. The name
+  // comes from the header's own field, so the dialog always edits the world
+  // the header's candidate check just verified exists.
+  const [settingsWorld, setSettingsWorld] = useState<string | null>(null);
 
   const [modsWidth, setModsWidth] = useState(() => {
     const saved = Number(localStorage.getItem(MODS_WIDTH_KEY));
@@ -111,6 +116,16 @@ export default function App() {
     [api],
   );
 
+  // Neither goes through guard(): the dialog owns the whole load/change/save
+  // exchange, so its failures belong in the dialog beside the form that caused
+  // them rather than in the app-wide banner behind it. Stable identities
+  // because the dialog loads on mount off `load`.
+  const loadWorldSettings = useCallback((w: string) => api.worldSettings(w), [api]);
+  const saveWorldSettings = useCallback(
+    (w: string, changes: Record<string, WorldSettingValue>) => api.saveWorldSettings(w, changes),
+    [api],
+  );
+
   // Read-only, so it does not go through guard(): a search must not touch the
   // error banner or fire a refresh(), and it stays usable while the server is
   // running. Only the Install button a result carries is gated.
@@ -153,6 +168,7 @@ export default function App() {
         )}
         onKill={guard(() => api.kill())}
         onUpdateServer={guard(() => api.updateServer())}
+        onEditWorldSettings={(w) => setSettingsWorld(w)}
       />
       <div className="body">
         <div className="mods-pane" style={{ width: modsWidth }}>
@@ -176,6 +192,16 @@ export default function App() {
         />
         <ConsolePanel lines={lines} />
       </div>
+      {settingsWorld !== null && (
+        <WorldSettingsDialog
+          world={settingsWorld}
+          load={loadWorldSettings}
+          save={saveWorldSettings}
+          onClose={() => setSettingsWorld(null)}
+          // A write changes the zip's mtime, which the world list shows.
+          onSaved={() => void refresh()}
+        />
+      )}
     </main>
   );
 }

@@ -151,6 +151,97 @@ describe("ServerHeader", () => {
     });
   });
 
+  /*
+   * The world settings editor rewrites the zip that IS somebody's save, and
+   * the daemon will only do it with the server verifiably stopped and nothing
+   * else in flight. Finding that out from a 409 after filling in a form is not
+   * good enough, so the trigger is disabled up front - and never silently:
+   * every blocked case has to say which one it is.
+   */
+  describe("world settings trigger", () => {
+    const existing = { name: "Tulsa", valid: true, exists: true };
+    const openable = {
+      worlds: { ...worlds, lastWorld: "Tulsa" },
+      candidate: existing,
+      onEditWorldSettings: vi.fn(),
+    };
+
+    it("opens the editor for the world in the field", async () => {
+      const onEditWorldSettings = vi.fn();
+      setup({ ...openable, onEditWorldSettings });
+      const btn = screen.getByRole("button", { name: /world settings/i });
+      expect(btn).toBeEnabled();
+      await userEvent.click(btn);
+      expect(onEditWorldSettings).toHaveBeenCalledWith("Tulsa");
+    });
+
+    it("is not offered at all when no handler is supplied", () => {
+      setup({ worlds: { ...worlds, lastWorld: "Tulsa" }, candidate: existing });
+      expect(screen.queryByRole("button", { name: /world settings/i })).toBeNull();
+    });
+
+    it("is disabled, saying so, while the server is running", () => {
+      setup({ ...openable, status: running });
+      const btn = screen.getByRole("button", { name: /world settings/i });
+      expect(btn).toBeDisabled();
+      expect(btn.getAttribute("title")).toMatch(/stopped/i);
+      expect(btn.getAttribute("title")).toMatch(/running/i);
+    });
+
+    it("is disabled, saying so, for every state that is not a clean stop", () => {
+      // The daemon refuses `crashed` and `unmanaged` too: a crash is exactly
+      // the case where nobody can say what the server was doing to the zip.
+      for (const state of ["starting", "stopping", "crashed", "unmanaged"] as const) {
+        setup({ ...openable, status: { ...stopped, state } });
+        const btn = screen.getAllByRole("button", { name: /world settings/i }).pop()!;
+        expect(btn).toBeDisabled();
+        expect(btn.getAttribute("title")).toMatch(/stopped/i);
+      }
+    });
+
+    it("is disabled, saying so, while a task is in flight", () => {
+      setup({ ...openable, busy: true });
+      const btn = screen.getByRole("button", { name: /world settings/i });
+      expect(btn).toBeDisabled();
+      expect(btn.getAttribute("title")).toMatch(/task is already running/i);
+    });
+
+    it("is disabled, saying so, when the named world does not exist", () => {
+      setup({
+        ...openable,
+        worlds: { ...worlds, lastWorld: "Brand New" },
+        candidate: { name: "Brand New", valid: true, exists: false },
+      });
+      const btn = screen.getByRole("button", { name: /world settings/i });
+      expect(btn).toBeDisabled();
+      expect(btn.getAttribute("title")).toMatch(/no world named/i);
+    });
+
+    it("is disabled while the candidate for the typed name is still unresolved", async () => {
+      // Same staleness rule Start obeys: the verdict in hand may describe a
+      // name the user has already edited away from.
+      const onEditWorldSettings = vi.fn();
+      setup({ ...openable, onEditWorldSettings });
+      await userEvent.type(screen.getByLabelText(/world/i), "x");
+      const btn = screen.getByRole("button", { name: /world settings/i });
+      expect(btn).toBeDisabled();
+      expect(btn.getAttribute("title")).toMatch(/confirm/i);
+      fireEvent.click(btn);
+      expect(onEditWorldSettings).not.toHaveBeenCalled();
+    });
+
+    it("is disabled, saying so, on a name the daemon calls invalid", () => {
+      setup({
+        ...openable,
+        worlds: { ...worlds, lastWorld: "bad:name" },
+        candidate: { name: "bad:name", valid: false, exists: false },
+      });
+      const btn = screen.getByRole("button", { name: /world settings/i });
+      expect(btn).toBeDisabled();
+      expect(btn.getAttribute("title")).toMatch(/not a valid world name/i);
+    });
+  });
+
   it("does not fire onCandidateChange on every keystroke (debounced)", () => {
     vi.useFakeTimers();
     try {

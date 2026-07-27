@@ -13,6 +13,11 @@ export interface ServerHeaderProps {
   onKill: () => void;
   onUpdateServer: () => void;
   onCandidateChange: (name: string) => void;
+  /**
+   * Opens the world settings editor for the name currently in the field.
+   * Absent means the editor is not offered at all.
+   */
+  onEditWorldSettings?: (world: string) => void;
   /** True while a mod/server task is streaming, independent of the server's own run state. */
   busy?: boolean;
   /**
@@ -71,6 +76,36 @@ export function ServerHeader(props: ServerHeaderProps) {
   const stopStalled = (props.stopTimedOut ?? false) && status.state === "stopping";
   const canStart = !live && !taskBusy && world.trim().length > 0 && candidateIsCurrent && candidate!.valid;
 
+  /**
+   * Why the world settings editor cannot be opened right now, or null when it
+   * can. Three blockers, and the reason is always stated rather than left to a
+   * greyed-out button:
+   *
+   * - Not `stopped`. The daemon refuses anything but a clean, observed stop -
+   *   not stopping, not crashed, not a server it did not start - because a
+   *   world zip is the only copy of that save. Saying so here rather than
+   *   letting the operator find out from a 409 after filling the form in.
+   * - A task in flight, same rule as every other mutation.
+   * - A world that does not exist. Reusing `candidate`, which is already the
+   *   one thing that knows whether a typed name names a real world, rather
+   *   than adding a second source of truth that could disagree with the hint
+   *   sitting right beside it.
+   */
+  const settingsBlockedBecause =
+    status.state !== "stopped"
+      ? `The server must be confirmed stopped before a world zip can be edited; it is ${status.state}`
+      : taskBusy
+        ? "Another task is already running"
+        : world.trim().length === 0
+          ? "Type the name of the world to edit"
+          : !candidateIsCurrent
+            ? "Waiting to confirm the world name…"
+            : !candidate!.valid
+              ? "Not a valid world name"
+              : !candidate!.exists
+                ? `There is no world named "${world}" yet`
+                : null;
+
   const startTitle = taskBusy
     ? "Another task is already running"
     : world.trim().length === 0
@@ -111,6 +146,16 @@ export function ServerHeader(props: ServerHeaderProps) {
         ) : (
           <span className="hint">Checking world name&hellip;</span>
         ))}
+
+      {props.onEditWorldSettings !== undefined && (
+        <button
+          onClick={() => props.onEditWorldSettings?.(world)}
+          disabled={settingsBlockedBecause !== null}
+          title={settingsBlockedBecause ?? `Edit ${world}'s world settings`}
+        >
+          World Settings&hellip;
+        </button>
+      )}
 
       {live ? (
         <button onClick={props.onStop} disabled={status.state === "stopping"}>
