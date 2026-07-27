@@ -7,14 +7,26 @@ import { useDaemon } from "./useDaemon";
 import "./App.css";
 
 export default function App() {
-  const { api, status, worlds, mods, console: lines, connected, error: daemonError, busy: taskBusy, refresh } =
-    useDaemon();
+  const {
+    api,
+    status,
+    worlds,
+    mods,
+    console: lines,
+    connected,
+    error: daemonError,
+    busy: taskBusy,
+    registerTask,
+    refresh,
+  } = useDaemon();
   const [error, setError] = useState<string | null>(null);
   const [candidate, setCandidate] = useState<{ name: string; valid: boolean; exists: boolean } | null>(null);
   // Local in-flight counter closes the gap between "the fetch that kicks a
-  // task off has resolved" and "the websocket's first 'task' message has
-  // arrived" - useDaemon's busy flag alone would leave that window
-  // unprotected against a double-click.
+  // non-task action (start/stop/kill) off has resolved" and its refresh()
+  // landing - purely a click-spam guard for those, since they carry no
+  // taskId to track. Task-launching actions (addMod/updateAllMods/
+  // updateServer) are NOT covered by this: their real "busy" span is closed
+  // deterministically below via registerTask(), not by this counter.
   const [submitting, setSubmitting] = useState(0);
 
   // The daemon-connectivity error (from useDaemon's own refresh() failures)
@@ -38,6 +50,31 @@ export default function App() {
         .finally(() => setSubmitting((n) => n - 1));
     },
     [refresh],
+  );
+
+  // For addMod/updateAllMods/updateServer specifically: these resolve with
+  // {ok:true, taskId} the moment the daemon ACCEPTS the task, long before
+  // steamcmd/the installer actually finishes (or even emits its first
+  // console line). Registering the taskId here - on the resolved response,
+  // not on the first websocket "task" line - is what closes the window a
+  // reviewer found open: without it, `busy` read false for the whole span
+  // between "HTTP call returned" and "steamcmd wrote its first log line",
+  // during which Start would incorrectly re-enable. A rejected call (bad
+  // input, server not stopped, network failure) never reaches `.then()`, so
+  // a failed launch cannot register a phantom pending task.
+  const guardTask = useCallback(
+    (fn: () => Promise<{ ok: true; taskId: string }>) => () => {
+      setSubmitting((n) => n + 1);
+      fn()
+        .then((r) => {
+          registerTask(r.taskId);
+          setError(null);
+          return refresh();
+        })
+        .catch((e: Error) => setError(e.message))
+        .finally(() => setSubmitting((n) => n - 1));
+    },
+    [refresh, registerTask],
   );
 
   // Guards against out-of-order responses: if the user types quickly enough
@@ -89,16 +126,16 @@ export default function App() {
         onStart={(w) => guard(() => api.start(w))()}
         onStop={guard(() => api.stop())}
         onKill={guard(() => api.kill())}
-        onUpdateServer={guard(() => api.updateServer())}
+        onUpdateServer={guardTask(() => api.updateServer())}
       />
       <div className="body">
         <ModsPanel
           mods={mods}
           busy={busy}
           running={running}
-          onAdd={(id, name) => guard(() => api.addMod(id, name))()}
+          onAdd={(id, name) => guardTask(() => api.addMod(id, name))()}
           onRemove={(id) => guard(() => api.removeMod(id))()}
-          onUpdateAll={guard(() => api.updateAllMods())}
+          onUpdateAll={guardTask(() => api.updateAllMods())}
         />
         <ConsolePanel lines={lines} />
       </div>

@@ -23,6 +23,16 @@ export interface DaemonState {
   error: string | null;
   /** True while a server-update/mod-install/mod-update-all task is streaming over the websocket. */
   busy: boolean;
+  /**
+   * Marks a taskId as pending the instant its launching HTTP response
+   * arrives - addMod/updateAllMods/updateServer resolve with {ok:true,
+   * taskId} well before the daemon's first websocket "task" line for it, so
+   * relying solely on that first line leaves `busy` false for the whole
+   * window steamcmd/the installer is already running. Call this from the
+   * `.then()` of those three calls; the "task" handler below is then just
+   * confirming what this already registered (idempotent either way).
+   */
+  registerTask: (taskId: string) => void;
   refresh: () => Promise<void>;
 }
 
@@ -43,6 +53,10 @@ export function useDaemon(): DaemonState {
   // the work finishes), so status.state alone does not say whether one is
   // already running.
   const [pendingTasks, setPendingTasks] = useState<Set<string>>(new Set());
+
+  const registerTask = useCallback((taskId: string) => {
+    setPendingTasks((prev) => (prev.has(taskId) ? prev : new Set(prev).add(taskId)));
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -109,7 +123,11 @@ export function useDaemon(): DaemonState {
           setStatus(msg.status);
         } else if (msg.type === "task") {
           append({ line: msg.line, ts: new Date().toISOString(), kind: "task" });
-          setPendingTasks((prev) => (prev.has(msg.taskId) ? prev : new Set(prev).add(msg.taskId)));
+          // Usually a no-op: registerTask() already marked this taskId
+          // pending from the HTTP response before the first line could
+          // possibly arrive. Kept as a fallback for any future task kind
+          // that isn't registered synchronously from a response.
+          registerTask(msg.taskId);
         } else if (msg.type === "task-done") {
           const summary = msg.ok ? `--- ${msg.kind} finished` : `--- ${msg.kind} FAILED: ${msg.error ?? ""}`;
           append({ line: summary, ts: new Date().toISOString(), kind: "task" });
@@ -137,7 +155,7 @@ export function useDaemon(): DaemonState {
       if (retry) clearTimeout(retry);
       ws?.close();
     };
-  }, [append, refresh]);
+  }, [append, refresh, registerTask]);
 
   return {
     api,
@@ -149,6 +167,7 @@ export function useDaemon(): DaemonState {
     connected,
     error,
     busy: pendingTasks.size > 0,
+    registerTask,
     refresh,
   };
 }

@@ -152,3 +152,78 @@ describe("useDaemon busy tracking", () => {
     unmount();
   });
 });
+
+// registerTask() exists specifically to close the window between "the
+// task-launching HTTP response resolved with a taskId" and "the daemon's
+// first websocket 'task' line for it arrives" - relying on the "task"
+// message alone (the previous fix round) left `busy` false for that whole
+// span, during which Start would incorrectly re-enable while steamcmd/the
+// installer was already running.
+describe("useDaemon registerTask - closes the HTTP-response-to-first-line gap", () => {
+  it("is busy immediately once a task is registered, before any websocket message at all", async () => {
+    const { result, unmount } = await openConnection();
+    expect(result.current.busy).toBe(false);
+
+    act(() => {
+      result.current.registerTask("t1");
+    });
+    expect(result.current.busy).toBe(true);
+    unmount();
+  });
+
+  it("stays busy across the registered-but-no-line-yet window, through to task-done", async () => {
+    const { result, ws, unmount } = await openConnection();
+
+    act(() => {
+      result.current.registerTask("t1");
+    });
+    expect(result.current.busy).toBe(true); // registered; steamcmd hasn't logged anything yet
+
+    // The first real console line eventually arrives - must be a no-op
+    // (already tracked), not a second, separately-cleared entry.
+    send(ws, { type: "task", taskId: "t1", kind: "server-update", line: "Updating app..." });
+    expect(result.current.busy).toBe(true);
+
+    await act(async () => {
+      ws.onmessage?.({
+        data: JSON.stringify({ type: "task-done", taskId: "t1", kind: "server-update", ok: true }),
+      });
+      await Promise.resolve();
+    });
+    expect(result.current.busy).toBe(false);
+    unmount();
+  });
+
+  it("leaves busy false when a task launch is never registered (the failed-call case)", async () => {
+    const { result, unmount } = await openConnection();
+    // Mirrors App's guardTask(): a rejected fn() never reaches the .then()
+    // that calls registerTask, so nothing here should ever mark this busy.
+    expect(result.current.busy).toBe(false);
+    unmount();
+  });
+
+  it("ignores a task-done for a taskId it never registered, without throwing or clearing an unrelated task", async () => {
+    const { result, ws, unmount } = await openConnection();
+
+    act(() => {
+      result.current.registerTask("t1");
+    });
+    expect(result.current.busy).toBe(true);
+
+    expect(() => {
+      act(() => {
+        ws.onmessage?.({
+          data: JSON.stringify({ type: "task-done", taskId: "unknown-id", kind: "mod-install", ok: true }),
+        });
+      });
+    }).not.toThrow();
+    expect(result.current.busy).toBe(true); // t1 is unaffected by the unrelated task-done
+
+    await act(async () => {
+      ws.onmessage?.({ data: JSON.stringify({ type: "task-done", taskId: "t1", kind: "mod-install", ok: true }) });
+      await Promise.resolve();
+    });
+    expect(result.current.busy).toBe(false);
+    unmount();
+  });
+});
