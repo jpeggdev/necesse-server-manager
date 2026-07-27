@@ -1,4 +1,4 @@
-import { copyFile, readdir, rm, stat } from "node:fs/promises";
+import { copyFile, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { ModRegistry } from "./mod-registry.js";
 import type { SteamCmd } from "./steamcmd.js";
@@ -29,12 +29,19 @@ export class ModInstaller {
   }
 
   async install(id: string, name: string, onLine: (line: string) => void): Promise<InstallResult> {
+    const dir = this.steam.workshopItemDir(id);
+    // Clear the item's download dir first so a stale jar from a previous version
+    // (under a different filename) can never be mistaken for this download's
+    // output. This forfeits steamcmd's incremental re-download for this item,
+    // which is the right trade: an update is precisely when we want a clean
+    // fetch, and correctness of which jar gets installed dominates download time.
+    await rm(dir, { recursive: true, force: true });
+
     const result = await this.steam.downloadWorkshopItem(id, onLine);
     if (!result.ok) {
       return { id, name, jar: null, ok: false, error: result.output };
     }
 
-    const dir = this.steam.workshopItemDir(id);
     let dirFiles: string[] = [];
     try {
       dirFiles = await readdir(dir);
@@ -56,17 +63,19 @@ export class ModInstaller {
         error: `steamcmd reported success but no .jar was found in ${dir}`,
       };
     }
-    // steamcmd's workshop content dir can retain a stale jar left over from a
-    // previous version download under a different filename; the most
-    // recently written jar is the one this download just produced.
-    let jar = jarNames[0];
     if (jarNames.length > 1) {
-      const withMtime = await Promise.all(
-        jarNames.map(async (f) => ({ f, mtimeMs: (await stat(join(dir, f))).mtimeMs })),
-      );
-      withMtime.sort((a, b) => b.mtimeMs - a.mtimeMs);
-      jar = withMtime[0].f;
+      // The item dir was cleared before this download, so more than one jar here
+      // means the workshop item itself shipped multiple jars. That's rare enough,
+      // and choosing wrong is bad enough, that this must fail loudly rather than guess.
+      return {
+        id,
+        name,
+        jar: null,
+        ok: false,
+        error: `steamcmd produced more than one .jar in ${dir}: ${jarNames.join(", ")}`,
+      };
     }
+    const jar = jarNames[0];
 
     try {
       await copyFile(join(dir, jar), join(this.cfg.modsDir, jar));

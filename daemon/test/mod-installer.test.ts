@@ -101,18 +101,55 @@ describe("install", () => {
   it("propagates a non-ENOENT error reading steamcmd's download dir instead of a generic no-jar result", async () => {
     const inst = build({});
     const dir = steam.workshopItemDir("777");
-    // A *file* at the download-dir path (rather than a missing dir) forces ENOTDIR, not ENOENT.
-    await mkdir(dirname(dir), { recursive: true });
-    await writeFile(dir, "not a directory");
-    vi.spyOn(steam, "downloadWorkshopItem").mockResolvedValue({
-      ok: true,
-      exitCode: 0,
-      output: "Success.",
+    // install() clears `dir` before calling steamcmd, so a file placed there beforehand
+    // would just be wiped away. Simulate the download itself leaving a *file* at the
+    // dir path (rather than a directory) instead, which forces ENOTDIR, not ENOENT,
+    // when install() reads it back afterward.
+    vi.spyOn(steam, "downloadWorkshopItem").mockImplementation(async () => {
+      await mkdir(dirname(dir), { recursive: true });
+      await writeFile(dir, "not a directory");
+      return { ok: true, exitCode: 0, output: "Success." };
     });
     const r = await inst.install("777", "Weird", () => {});
     expect(r.ok).toBe(false);
     expect(r.error).toMatch(/cannot read/i);
     expect(r.error).not.toMatch(/no \.jar/i);
+  });
+
+  it("clears the item's previous download output before fetching again, so a stale jar under the old filename can't be mistaken for the new one", async () => {
+    const inst = build({ "42": "NewName-2.0.jar" });
+    const dir = steam.workshopItemDir("42");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "OldName-1.0.jar"), "stale");
+    const r = await inst.install("42", "Thing", () => {});
+    expect(r.ok).toBe(true);
+    expect(r.jar).toBe("NewName-2.0.jar");
+    expect(await readdir(dir)).toEqual(["NewName-2.0.jar"]);
+    expect(await readdir(modsDir)).toEqual(["NewName-2.0.jar"]);
+  });
+
+  it("tolerates a first-time install with no pre-existing workshop item directory", async () => {
+    const inst = build({ "42": "Something-1.0.jar" });
+    await expect(readdir(steam.workshopItemDir("42"))).rejects.toThrow();
+    const r = await inst.install("42", "Thing", () => {});
+    expect(r.ok).toBe(true);
+  });
+
+  it("fails clearly, touching neither the mods folder nor the registry, when steamcmd's download produces more than one jar", async () => {
+    const inst = build({});
+    vi.spyOn(steam, "downloadWorkshopItem").mockImplementation(async (id: string) => {
+      const dir = steam.workshopItemDir(id);
+      await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, "One.jar"), "a");
+      await writeFile(join(dir, "Two.jar"), "b");
+      return { ok: true, exitCode: 0, output: "Success." };
+    });
+    const r = await inst.install("88", "Weird", () => {});
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("One.jar");
+    expect(r.error).toContain("Two.jar");
+    expect(await readdir(modsDir)).toEqual([]);
+    expect(await registry.get("88")).toBeUndefined();
   });
 });
 
