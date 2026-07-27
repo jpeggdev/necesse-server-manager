@@ -64,6 +64,18 @@ describe("start", () => {
     expect(pm.status.state).toBe("running");
   });
 
+  it("drives the real coloured stdout, and strips the colour out of the backlog", () => {
+    pm.start("Tulsa");
+    child().child.emitLine(F.REAL_DEBUG);
+    child().child.emitLine(F.REAL_READY);
+    expect(pm.status.state).toBe("running");
+    expect(pm.status.port).toBe(14159);
+    // What the operator reads must not contain the escape.
+    const backlog = pm.backlog.map((l) => l.line);
+    expect(backlog[0]).toBe("[2026-07-27 03:27:26] (DEBUG) Initializing DesktopPlatform");
+    expect(backlog.some((l) => l.includes(String.fromCharCode(27)))).toBe(false);
+  });
+
   it("records port, slots, and version from the ready line", () => {
     pm.start("Infected Toenail");
     child().child.emitLine(F.READY_LINE_WITH_TS);

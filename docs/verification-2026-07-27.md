@@ -1,0 +1,462 @@
+# Live verification against SERVER — 2026-07-27
+
+First time the daemon has driven a real Necesse server. Everything before this
+task was unit-tested against fakes: 122 daemon tests, 53 client tests, no game
+process anywhere in the loop.
+
+- **SERVER** `192.168.1.106`, user `jeffp`, daemon on `:8710`, run by the
+  `NecesseDaemon` scheduled task.
+- **Branch** `feat/necesse-gui-v1`.
+- **Method** HTTP calls from the workstation plus a WebSocket observer
+  (`ws://192.168.1.106:8710/ws`) logging every frame with a local receive
+  timestamp. All console output below is verbatim from that observer.
+- **Result** two defects found and fixed (one of them real and load-bearing),
+  every other exercised path behaved as designed. Read the
+  [Not verified](#not-verified) section before treating this as coverage.
+
+> The observer prints each line through `JSON.stringify`, so `\u001b` in the
+> transcripts below is a real escape byte on the wire, not a rendering of one.
+
+---
+
+## Step 0 — Redeploy (hard prerequisite)
+
+The build running on SERVER predated round 4 and had no `activeTasks` field at
+all, so client busy-gating read permanently false and the server-side
+start-during-task interlock did not exist. Verifying against it would have
+measured nothing.
+
+Status before redeploy — note the absent field:
+
+```
+$ Invoke-RestMethod http://192.168.1.106:8710/api/status
+{"state":"stopped","world":null,"pid":null,"startedAt":null,"port":null,
+ "slots":null,"gameVersion":null,"lastError":null}
+```
+
+`scripts/02-deploy.ps1` ran clean and left live state alone, which is the
+property that matters most in that script:
+
+```
+config.json already exists on SERVER -- left untouched.
+mods.json already exists on SERVER -- left untouched.
+INSTALL_OK
+Deployed.
+```
+
+**Defect (tooling, fixed):** the task brief's restart command does not work.
+`Restart-ScheduledTask` is not a cmdlet on SERVER's PowerShell 5.1:
+
+```
+Restart-ScheduledTask : The term 'Restart-ScheduledTask' is not recognized as
+the name of a cmdlet, function, script file, or operable program.
+```
+
+Added `scripts/04-restart-daemon.ps1`, which does Stop, waits for the task to
+actually leave `Running`, then Starts. The wait is not decoration —
+`Start-ScheduledTask` against a still-terminating task is a silent no-op, which
+would have left the *old* daemon serving `:8710` while every check below
+appeared to pass.
+
+```
+$ .\scripts\04-restart-daemon.ps1
+STOPPED_STATE=Ready
+STARTED_STATE=Running
+{"state":"stopped",...,"lastError":null,"activeTasks":[]}
+```
+
+`activeTasks: []` present. Prerequisite met.
+
+---
+
+## Step 1 — Timestamp format
+
+This was the one genuine unknown in the plan. `log-lines.ts` tolerated server
+output both with and without a leading `[YYYY-MM-DD HH:MM:SS] ` prefix because
+nobody had ever seen which one stdout produces.
+
+**It produces neither.** The real format carries an ANSI SGR colour escape
+*before* the timestamp. First lines off the live server:
+
+```
+console line="\u001b[34m[2026-07-27 03:27:25] (DEBUG) Started logging to: C:\Users\jeffp\AppData\Roaming\Necesse\latest-server-log.txt"
+console line="\u001b[39m[2026-07-27 03:27:25] Launched game with arguments: -nogui -world Tulsa -owner Jeff -owner Eli"
+console line="\u001b[34m[2026-07-27 03:27:26] (DEBUG) Initializing DesktopPlatform"
+console line="\u001b[39m[2026-07-27 03:27:28] Loading dedicated server on version 1.2.0."
+console line="\u001b[39m[2026-07-27 03:27:28] Found mod: Advanced Starter Kit (eryr.starter.kit, 1.1) from ModsFolderModProvider"
+console line="\u001b[33m[2026-07-27 03:27:28] (WARN) Invalid mod jar located at C:\Users\jeffp\AppData\Roaming\Necesse\mods\torvians-qol.cfg"
+```
+
+Three colours, one per severity: `ESC[39m` normal, `ESC[34m` `(DEBUG)`,
+`ESC[33m` `(WARN)`. The escape is always first, ahead of the timestamp.
+
+### Why this was a real defect, not a cosmetic one
+
+`stripTimestamp` anchored on `^\[\d{4}-...`. With an escape in front, the anchor
+never matched, so the timestamp was never removed, so every parser that compares
+against a *whole* or *leading* string silently failed:
+
+| Parser | Test | Against the real line | Consequence |
+|---|---|---|---|
+| `parseReady` | unanchored `RegExp.exec` | **worked by luck** | none — the pattern is a substring search |
+| `isStopped` | `=== "Server has stopped"` | **always false** | see below |
+| `isLoadingExistingWorld` | `.startsWith(...)` | **always false** | new-vs-existing world detection dead |
+
+`isStopped` drives `process-manager.ts:166`:
+
+```ts
+if (isStopped(line) && this.state === "running") this.setState("stopping");
+```
+
+That is the path for a shutdown the daemon did *not* initiate — an in-game admin
+issuing stop. With `isStopped` never firing, `state` stays `running` until the
+process exits, `onExit` sees `wasStopping === false`, and the daemon reports a
+clean, fully-saved shutdown as **`crashed`** with
+`lastError: "Server process exited with code 0"`.
+
+This did **not** break the API-initiated stop, because `ProcessManager.stop()`
+sets `stopping` itself before writing to stdin. That is exactly why the bug was
+survivable enough to reach live testing — the common path masks it.
+
+### Fix
+
+- `daemon/src/log-lines.ts`: added `stripAnsi` and a composed `normalize()`
+  (ANSI, then timestamp); `isStopped` / `isLoadingExistingWorld` / `parseReady`
+  now go through `normalize`. `stripTimestamp` keeps its original narrow meaning.
+- The ESC is built with `String.fromCharCode(27)` rather than written as a regex
+  literal. A raw control byte in source is invisible in every editor and diff and
+  cannot be matched by a later search-and-replace; that hazard bit twice while
+  writing this fix.
+- `daemon/src/process-manager.ts`: strips ANSI once at ingest, so the recorded
+  backlog and the parsers see identical text. Without it the client — which
+  renders console lines as plain text with no terminal emulator behind it — would
+  show the operator a literal `[39m` before every message.
+- `daemon/test/fixtures/log-fixtures.ts`: six `REAL_*` fixtures captured from the
+  transcript above.
+- `daemon/test/log-lines.test.ts`, `daemon/test/process-manager.test.ts`: new
+  cases. Every one of them fails against the pre-fix parsers.
+
+```
+$ npx vitest run
+ Test Files  9 passed (9)
+      Tests  128 passed (128)
+```
+
+122 → 128. Rebuilt, redeployed, daemon restarted; everything from Step 3 onward
+ran against the fixed build. Console lines after the fix, same server:
+
+```
+console line="[2026-07-27 03:33:23] AphoreaMod started"
+console line="[2026-07-27 03:34:20] Loading existing world at C:\Users\jeffp\AppData\Roaming\Necesse\saves\worlds\Tulsa.zip"
+```
+
+---
+
+## Step 2 — Start an existing world (`Tulsa`)
+
+```
+$ POST /api/server/start  {"world":"Tulsa"}
+{"ok":true,"status":{"state":"starting","world":"Tulsa","pid":13296,
+ "startedAt":"2026-07-27T08:27:24.887Z","port":null,...,"activeTasks":[]}}
+```
+
+State `starting` → `running` on the ready line, 16s later:
+
+```
+console "Loading existing world at C:\Users\jeffp\AppData\Roaming\Necesse\saves\worlds\Tulsa.zip"
+console "Started server using port 14159 with 5 slots on world "Tulsa.zip", game version 1.2.0."
+status  {"state":"running","world":"Tulsa","pid":13296,"port":14159,"slots":5,
+         "gameVersion":"1.2.0","lastError":null,"activeTasks":[]}
+```
+
+Confirmed: port **14159**, 5 slots, version 1.2.0, `.zip` stripped from the world
+name, `Loading existing world at` present. Mod loading streamed live — all 8
+managed mods enumerated, plus the two expected `(WARN) Invalid mod jar` lines for
+`torvians-qol.cfg` and `torvians-qol-settlements.txt`, which are config files the
+game finds in the mods folder and is right to skip.
+
+## Step 3 — Create a new world (`Claude Test World`)
+
+Pre-check:
+
+```
+$ GET /api/worlds?name=Claude%20Test%20World
+"candidate":{"name":"Claude Test World","valid":true,"exists":false}
+```
+
+Also confirms world listing filters correctly: the five `LATEST_BACKUP*.zip`
+files in the worlds folder are excluded, leaving the four real worlds.
+
+After starting, the console shows creation rather than load:
+
+```
+console "Creating new world at C:\Users\jeffp\AppData\Roaming\Necesse\saves\worlds\Claude Test World.zip"
+console "Creating save with name: Claude Test World.zip"
+console "Could not find world file, creating new one: Claude Test World.zip"
+console "Finding spawn position..."
+console "Started server using port 14159 with 5 slots on world "Claude Test World.zip", game version 1.2.0."
+```
+
+**`Loading existing world` did not appear** — grepped the whole session log for
+it, zero hits during this run. Afterwards:
+
+```
+$ GET /api/worlds
+{"name":"Claude Test World","modifiedAt":"2026-07-27T08:33:43.958Z","sizeBytes":26433}
+$ GET /api/worlds?name=Claude%20Test%20World
+"candidate":{"name":"Claude Test World","valid":true,"exists":true}
+```
+
+`exists` flipped false → true. World generation to ready took ~16s.
+
+## Step 4 — Graceful stop
+
+The single most important behaviour in the project — the only thing between the
+user and a corrupted save. Exercised twice (once per world), both clean.
+
+```
+$ curl.exe -X POST http://192.168.1.106:8710/api/server/stop
+{"ok":true,"status":{"state":"stopped","world":"Tulsa",...,"lastError":null}}
+HTTP=200
+```
+
+```
+status  {"state":"stopping",...}
+console "> stop"
+console "Starting world save"
+console "Completed world save before stopping server"
+console "Stopped server on 2026/07/27 03:29:27 with code: SERVER_STOPPED"
+console "World time: 172, day 1"
+console "Server has stopped"
+console "Exiting in 2 seconds..."
+status  {"state":"stopped","world":"Tulsa","pid":null,"lastError":null,"activeTasks":[]}
+```
+
+Both required lines present, `SERVER_STOPPED` exit code, state back to
+`stopped`, `lastError` null, no `crashed`.
+
+**Note on how the request must be sent.** PowerShell's `Invoke-WebRequest`
+attaches a default `Content-Type` to a bodyless POST, and Fastify rejects it
+before the handler runs:
+
+```
+POST /api/server/stop -> HTTP 415
+{"statusCode":415,"code":"FST_ERR_CTP_INVALID_MEDIA_TYPE",...}
+```
+
+This is **not** a daemon defect — `client/src/api.ts:14-18` deliberately omits
+the header when there is no body, and a `curl.exe -X POST` (which also omits it)
+returns 200 as shown above. Recorded because it will look like a broken Stop
+button to anyone reaching for `Invoke-RestMethod` to test by hand.
+
+## Step 5 — Install a mod
+
+`3603448084` / `Admin Tools`, server stopped.
+
+```
+$ POST /api/mods  {"id":"3603448084","name":"Admin Tools"}
+{"ok":true,"taskId":"t1"}
+$ GET /api/status
+{"state":"stopped",...,"activeTasks":["t1"]}
+```
+
+`activeTasks` populated — the round-4 field working end to end for the first
+time. steamcmd streamed over the WebSocket:
+
+```
+task[t1/mod-install] "Steam Console Client (c) Valve Corporation - version 1784919641"
+task[t1/mod-install] "Loading Steam API...OK"
+task[t1/mod-install] "Connecting anonymously to Steam Public...OK"
+task[t1/mod-install] "Downloading item 3603448084 ..."
+task[t1/mod-install] "Success. Downloaded item 3603448084 to "C:\Users\jeffp\steam\steamapps\workshop\content\1169040\3603448084" (339205 bytes) Unloading Steam API...OK"
+task-done {"taskId":"t1","kind":"mod-install","ok":true}
+status    {...,"activeTasks":[]}
+```
+
+Jar landed in the mods folder and registered:
+
+```
+$ dir /b ...\Necesse\mods
+AdminTools-1.2.0-3.0.0.jar        <- new
+AdvancedStarterKit-1.2.0-1.1.jar
+... (the other 7 originals)
+
+$ GET /api/mods
+{"id":"3603448084","name":"Admin Tools","jar":"AdminTools-1.2.0-3.0.0.jar",
+ "lastUpdated":"2026-07-27T08:34:06.422Z"}
+```
+
+Whole install, request to `task-done`: ~6 seconds.
+
+## Step 6 — Stale-jar replacement
+
+Installed `3603448084` a second time. The entire mod feature exists to stop the
+mods folder accumulating two versions of one mod, which is what the game loads
+badly.
+
+```
+$ POST /api/mods  {"id":"3603448084","name":"Admin Tools"}
+{"ok":true,"taskId":"t2"}
+task-done {"taskId":"t2","kind":"mod-install","ok":true}
+
+$ dir /b ...\Necesse\mods\AdminTools*.jar
+AdminTools-1.2.0-3.0.0.jar
+```
+
+Exactly one. Nine jars total, no duplicates.
+
+## Step 7 — The running-state guard
+
+With `Tulsa` running, both mutations refused, HTTP 409, message names the fix:
+
+```
+POST /api/mods -> HTTP 409
+{"ok":false,"error":"Cannot change mods while the server is running. Stop it first."}
+
+DELETE /api/mods/3532423990 -> HTTP 409
+{"ok":false,"error":"Cannot change mods while the server is running. Stop it first."}
+```
+
+Refused outright, not silently queued — nothing appeared in `activeTasks` and the
+mods folder was untouched.
+
+### Bonus: the start-during-task interlock, exercised for real
+
+A first attempt to start the server during install `t1` **succeeded** (HTTP 200).
+That is not a defect: correcting for the ~0.7s daemon-to-workstation clock skew
+visible throughout the log, `t1` had already settled before the request landed. A
+green result here would have been a false positive, so it was re-run as a
+deliberate race — start and delete fired immediately after the `t2` install
+accepted:
+
+```
+POST /api/server/start -> HTTP 409
+{"ok":false,"error":"Cannot start the server while a background task (mod install,
+ mod update, or server update) is still running. Those tasks rewrite the server
+ install and the mods folder, so overlapping them - or launching the game against
+ a half-written one - risks corruption. Wait for it to finish. In flight: t2."}
+
+DELETE /api/mods/3532423990 -> HTTP 409
+{"ok":false,"error":"Cannot remove a mod while a background task ... In flight: t2."}
+```
+
+Both interlocks enforced server-side against a real in-flight steamcmd run.
+
+## Step 8 — Cleanup and restoration
+
+```
+$ DELETE /api/mods/3603448084
+{"ok":true}
+HTTP=200
+```
+
+Mods folder, after — compare against the pre-verification snapshot:
+
+```
+07/26/2026  05:38 PM            26,781 AdvancedStarterKit-1.2.0-1.1.jar
+07/26/2026  11:42 AM         3,375,375 AphoreaMod-1.2.0-1.0.38.jar
+07/26/2026  06:09 AM           213,022 AutoTorch-1.0.jar
+07/26/2026  05:55 AM           149,810 CorruptedRaidMod.jar
+07/26/2026  10:40 PM             9,826 ExtendedRange-1.2.0-1.3.jar
+07/26/2026  05:55 AM            53,017 FishingOverhaul-1.2.0-1.0.1.jar
+07/27/2026  03:36 AM               751 modlist.data
+07/26/2026  05:55 AM            43,819 NPCShopsExpanded-1.2.0-1.7.jar
+07/26/2026  05:55 AM         3,684,575 SafeHavenQOL-1.2.0-2.6.jar
+07/26/2026  09:08 PM                98 torvians-qol-settlements.txt
+07/25/2026  04:15 PM            10,308 torvians-qol.cfg
+              11 File(s)      7,567,382 bytes
+```
+
+All 8 original jars carry their original **size and mtime** — untouched, not
+rewritten. Directory total `7,567,382` bytes matches the pre-verification total
+exactly. `mods.json` maps all 8, `untracked` empty.
+
+One residual needed chasing: `modlist.data` is the *game's* own enabled-mods
+record, not the daemon's, and the game had rewritten it (751 → 839 bytes) to
+include `admintools.menu` while the jar was present. Removing the mod left a
+stale entry pointing at a jar that no longer exists. Necesse regenerates that
+file from the jars it actually finds, so one more `Tulsa` start/stop cleaned it —
+`findstr /i admintools modlist.data` now returns nothing and the file is back to
+its original 751 bytes.
+
+Worlds folder restored:
+
+```
+Goober Goof.zip       5704866 7/26/2026 5:35:06 PM
+Infected Toenail.zip  1162220 7/26/2026 11:18:22 PM
+Jeff and Eli.zip     12460572 7/24/2026 2:21:40 AM
+LATEST_BACKUP1..5.zip                (untouched)
+Tulsa.zip              183038 7/27/2026 3:34:33 AM
+```
+
+`Claude Test World.zip` deleted. The other three real worlds are untouched.
+`Tulsa.zip` is 183038 bytes, up from 182865 — it was loaded and cleanly re-saved
+three times during testing, which is the expected and unavoidable cost of using
+it as the load-test world.
+
+**Final state:** server `stopped`, daemon running, `activeTasks: []`.
+
+---
+
+## Defects found
+
+| # | Severity | Where | Status |
+|---|---|---|---|
+| 1 | **High** | ANSI escape before the timestamp defeats `isStopped` and `isLoadingExistingWorld`; an externally-initiated shutdown gets reported as `crashed`, and console output reaches the client full of raw escape bytes | Fixed, 6 new tests, redeployed, re-verified live |
+| 2 | Low (tooling) | `Restart-ScheduledTask` does not exist on SERVER; the documented redeploy step fails | Fixed — `scripts/04-restart-daemon.ps1` |
+
+Neither was reachable by unit tests. Both required a real server.
+
+---
+
+## Not verified
+
+Nothing below was exercised. A green result above says nothing about any of it.
+
+### Deliberately skipped — awaiting user authorization
+
+- **Update All Mods** (`POST /api/mods/update-all`). **Not run.** It would replace
+  all 8 installed jars with current Workshop versions and delete the originals,
+  which Steam Workshop cannot serve back. The user has not authorized this. The
+  only thing touched was its refusal path, and even that only incidentally: a
+  bodyless POST was rejected at HTTP 415 before reaching the handler, so no task
+  was ever created. Its guard logic is unit-tested but **unexercised live**.
+- **Update Server** (`POST /api/server/update`). **Not run**, same reason — not
+  authorized. Not even its refusal-while-running path was probed, to remove any
+  chance of a mistimed call finding the server stopped and starting a real
+  `app_update`. Entirely unverified live.
+
+### Structurally out of reach in this session
+
+- **The `unmanaged` path.** Needs a Necesse server started outside the daemon so
+  there is no stdin pipe. Never entered — `state` was never `unmanaged` at any
+  point. `refreshUnmanaged`, the unmanaged branch of `kill()`, and the "must be
+  shut down before starting a new one" error are all unit-tested only.
+- **The `crashed` path.** Needs a deliberately broken mod or a server that dies on
+  its own. Never entered. `lastError` was `null` in every status read here. Note
+  that defect 1 above meant the daemon *would* have mislabelled a clean external
+  shutdown as `crashed` — that specific misbehaviour is fixed and unit-tested, but
+  no genuine crash was ever observed live.
+- **The stop-timeout path.** Needs a server that refuses to exit within
+  `stopTimeoutMs` (90000 on SERVER). Every real stop completed in 2-3 seconds. The
+  504 response, the timeout's waiter-nulling, and the "process was left running"
+  message are unit-tested only.
+- **The 60-minute task expiry** (`TASK_EXPIRY_MS`). Cannot be waited out. The
+  longest real task here was ~6 seconds. Untested against a genuinely hung
+  steamcmd; the logic is covered by fake timers in `http.test.ts` only.
+- **Concurrent clients.** Exactly one WebSocket observer was connected throughout.
+  Broadcast fan-out to multiple sockets, the dead-socket collection in
+  `broadcast`, and two clients racing the same mutation are all unverified.
+- **The Tauri client UI.** No GUI was ever launched. **All verification here was
+  API-level**, against HTTP and the raw WebSocket. Nothing is known live about the
+  status pill, the busy-gating on `activeTasks`, the "Will create a new world"
+  header, console rendering, or any button. The client's 53 tests are the only
+  evidence for any of it. In particular, the ANSI fix was verified by reading the
+  bytes on the wire, *not* by looking at a rendered console pane.
+- **Daemon restart while the server is running.** Not attempted. Known limitation
+  rather than a bug: the daemon loses the stdin pipe and can only report
+  `unmanaged`. Fixing it needs a detached child plus a named pipe, out of scope
+  for v1. Every restart in this session was done with the game stopped.
+- **A world whose name needs escaping**, an invalid world name reaching `start`, a
+  full disk, a mods folder that is read-only, and steamcmd failing (bad workshop
+  id, no network) — all unit-tested, none exercised against the real thing.

@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { parseReady, isStopped } from "./log-lines.js";
+import { parseReady, isStopped, stripAnsi } from "./log-lines.js";
 import type { ConsoleLine, DaemonConfig, ServerState, ServerStatus } from "./types.js";
 
 const BACKLOG_LIMIT = 2000;
@@ -140,7 +140,11 @@ export class ProcessManager extends EventEmitter {
     const parts = this.pending.split("\n");
     this.pending = parts.pop() ?? "";
     for (const raw of parts) {
-      const line = raw.replace(/\r$/, "");
+      // Colour escapes are stripped once, here, so both the recorded backlog
+      // and the parsers see the same plain text. The client renders console
+      // lines as text with no terminal emulator behind it, so an unstripped
+      // line shows the operator a literal "[39m" before every message.
+      const line = stripAnsi(raw.replace(/\r$/, ""));
       this.record(line);
       this.inspect(line);
     }
