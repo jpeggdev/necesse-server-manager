@@ -202,6 +202,69 @@ describe("WorldSettingsDialog", () => {
     expect(save).not.toHaveBeenCalled();
   });
 
+  /*
+   * An emptied number box is the one input state that can silently rewrite a
+   * world. `Number("")` is 0, and 0 is inside the daemon's range for every
+   * numeric field, so a form that treated an empty box as a value would turn
+   * maxSettlersPerSettlement from -1 (no limit) into 0 (none at all) - a real
+   * change to somebody's world, made through a gesture that looks like leaving
+   * the field alone. The stored value below is negative precisely so that a
+   * leaked 0 would be ACCEPTED by the daemon rather than bounced.
+   */
+  describe("a number box left empty", () => {
+    async function clearTheInt() {
+      const opened = await openDialog();
+      fireEvent.change(screen.getByLabelText("maxSettlersPerSettlement"), { target: { value: "" } });
+      return opened;
+    }
+
+    it("blocks the save and puts nothing in the payload", async () => {
+      const { save } = await clearTheInt();
+      const saveBtn = screen.getByRole("button", { name: /^save$/i });
+      expect(saveBtn).toBeDisabled();
+      fireEvent.click(saveBtn);
+      expect(save).not.toHaveBeenCalled();
+    });
+
+    it("blocks the save even when another field has a real edit to make", async () => {
+      // The dangerous shape: the user changes something legitimately, empties
+      // another box, and saves. Nothing may go out for the empty one.
+      const { save } = await clearTheInt();
+      await userEvent.click(screen.getByLabelText("allowCheats"));
+      const saveBtn = screen.getByRole("button", { name: /^save$/i });
+      expect(saveBtn).toBeDisabled();
+      fireEvent.click(saveBtn);
+      expect(save).not.toHaveBeenCalled();
+    });
+
+    it("says which field is empty, on the field and on the button", async () => {
+      await clearTheInt();
+      expect(screen.getByLabelText("maxSettlersPerSettlement")).toHaveAttribute(
+        "aria-invalid",
+        "true",
+      );
+      // Names the stored value, so the way back is on screen.
+      expect(screen.getByText(/left empty.*put back the stored -1/i)).toBeTruthy();
+      expect(screen.getByRole("button", { name: /^save$/i }).getAttribute("title")).toMatch(
+        /maxSettlersPerSettlement/,
+      );
+    });
+
+    it("recovers the moment a number is typed back in", async () => {
+      const { save } = await clearTheInt();
+      fireEvent.change(screen.getByLabelText("maxSettlersPerSettlement"), { target: { value: "5" } });
+      await userEvent.click(screen.getByRole("button", { name: /^save$/i }));
+      await waitFor(() => expect(save).toHaveBeenCalledWith("Tulsa", { maxSettlersPerSettlement: 5 }));
+    });
+
+    it("is not confused with a field genuinely set to zero", async () => {
+      const { save } = await openDialog();
+      fireEvent.change(screen.getByLabelText("maxSettlersPerSettlement"), { target: { value: "0" } });
+      await userEvent.click(screen.getByRole("button", { name: /^save$/i }));
+      await waitFor(() => expect(save).toHaveBeenCalledWith("Tulsa", { maxSettlersPerSettlement: 0 }));
+    });
+  });
+
   it("cannot be saved before anything is changed", async () => {
     await openDialog();
     const saveBtn = screen.getByRole("button", { name: /^save$/i });
@@ -294,9 +357,60 @@ describe("WorldSettingsDialog", () => {
 
   it("takes focus on open and gives it back to the trigger on close", async () => {
     const { trigger } = await openDialog();
-    expect(document.activeElement).toBe(screen.getByRole("dialog"));
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    expect(document.activeElement).not.toBe(document.body);
     await userEvent.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(document.activeElement).toBe(trigger);
+  });
+
+  /*
+   * `aria-modal="true"` is a promise to a screen reader that nothing outside
+   * this dialog is reachable. Focus opens on a control that is neither the
+   * first nor the last of anything, so the interesting direction is Shift+Tab
+   * from the state the dialog actually opens in - and once focus is out, a
+   * handler bound to the dialog is no longer in the event path and can never
+   * pull it back, so the escape is permanent rather than a one-key detour.
+   */
+  describe("focus containment", () => {
+    it("keeps Shift+Tab inside, from the very state it opens in", async () => {
+      const { trigger } = await openDialog();
+      const dialog = screen.getByRole("dialog");
+      await userEvent.tab({ shift: true });
+      expect(dialog.contains(document.activeElement)).toBe(true);
+      expect(document.activeElement).not.toBe(trigger);
+      expect(document.activeElement).not.toBe(document.body);
+    });
+
+    it("keeps Tab inside for a full cycle in both directions", async () => {
+      await openDialog();
+      const dialog = screen.getByRole("dialog");
+      // More presses than there are controls, so the wrap at each end is
+      // crossed rather than just approached.
+      for (let i = 0; i < 14; i++) {
+        await userEvent.tab();
+        expect(dialog.contains(document.activeElement)).toBe(true);
+      }
+      for (let i = 0; i < 14; i++) {
+        await userEvent.tab({ shift: true });
+        expect(dialog.contains(document.activeElement)).toBe(true);
+      }
+    });
+
+    it("pulls focus back when something outside takes it", async () => {
+      // Tab is not the only way out: a click, or script, can move focus too.
+      const { trigger } = await openDialog();
+      trigger.focus();
+      expect(screen.getByRole("dialog").contains(document.activeElement)).toBe(true);
+    });
+
+    it("makes the rest of the page inert while it is open, and lets it go on close", async () => {
+      const { trigger } = await openDialog();
+      expect(trigger).toHaveAttribute("inert");
+      await userEvent.keyboard("{Escape}");
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      expect(trigger).not.toHaveAttribute("inert");
+    });
   });
 });

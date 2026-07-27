@@ -1,11 +1,4 @@
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type KeyboardEvent as ReactKeyboardEvent,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { WorldSettingValue } from "./api";
 import type {
   WorldSettingField,
@@ -60,6 +53,7 @@ export function WorldSettingsDialog({
   const [result, setResult] = useState<WorldSettingsWriteResponse | null>(null);
 
   const dialogRef = useRef<HTMLDivElement>(null);
+  const backdropRef = useRef<HTMLDivElement>(null);
 
   const adopt = useCallback((next: WorldSettingField[]) => {
     setFields(next);
@@ -83,27 +77,114 @@ export function WorldSettingsDialog({
     };
   }, [load, world, adopt]);
 
-  // Focus moves into the dialog on open and back to whatever opened it on
-  // close. The container itself takes it rather than the first control,
-  // because the fields do not exist yet while the load is in flight.
+  /**
+   * Keyboard and focus containment, declared BEFORE the effect that restores
+   * focus so that on unmount these listeners are gone before that one moves
+   * focus back - otherwise the focusin guard below would drag focus back into
+   * a dialog that is being removed.
+   *
+   * Both listeners are on the document, not on the dialog element. A handler
+   * bound to the dialog only runs while focus is already inside it, which is
+   * exactly the state that stops being true the moment focus escapes: once it
+   * is out, nothing on the dialog is in the event path any more and it can
+   * never pull it back. Shift+Tab from the element focus opens on used to walk
+   * straight out to the page behind, which made `aria-modal` a claim this
+   * component did not honour.
+   */
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      // Escape cancels - but not mid-save. The request is already with the
+      // daemon, so closing would only hide the outcome of a write that is
+      // still happening to a world zip.
+      if (e.key === "Escape") {
+        if (saving) return;
+        e.preventDefault();
+        onClose();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      const dialog = dialogRef.current;
+      if (dialog === null) return;
+      // Recomputed on every keypress rather than cached: which controls are
+      // focusable changes as the fields load, as Save enables, and as a save
+      // in flight disables the lot.
+      const focusable = focusableIn(dialog);
+      if (focusable.length === 0) {
+        e.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (!dialog.contains(active)) {
+        e.preventDefault();
+        (e.shiftKey ? last : first).focus();
+      } else if (e.shiftKey && (active === first || active === dialog)) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    // Focus can also be taken by a click or by script, not only by Tab.
+    const onFocusIn = (e: FocusEvent) => {
+      const dialog = dialogRef.current;
+      if (dialog === null || dialog.contains(e.target as Node | null)) return;
+      (focusableIn(dialog)[0] ?? dialog).focus();
+    };
+    document.addEventListener("keydown", onKeyDown, true);
+    document.addEventListener("focusin", onFocusIn);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown, true);
+      document.removeEventListener("focusin", onFocusIn);
+    };
+  }, [onClose, saving]);
+
+  /**
+   * Focus into the dialog on open, back to whatever opened it on close, and
+   * the rest of the page made `inert` in between - a second defence that does
+   * not depend on a key handler seeing the event, and which also stops the
+   * header's Start/Stop and the mod panel being clicked while a modal is up.
+   *
+   * The order inside matters both ways round. The element to restore to is
+   * read BEFORE the background goes inert, because a browser blurs whatever it
+   * was focusing when an ancestor becomes inert, and inert is lifted BEFORE
+   * focus is handed back, because focus cannot land on an inert element.
+   */
   useEffect(() => {
     const restore = document.activeElement as HTMLElement | null;
-    dialogRef.current?.focus();
-    return () => restore?.focus();
+    const inerted = makeSurroundingsInert(backdropRef.current);
+    const dialog = dialogRef.current;
+    // The first control, falling back to the container while the fields are
+    // still loading and there is nothing else yet. Not the container itself:
+    // it is neither the first focusable nor the last, so Shift+Tab from it
+    // matches no wrap rule and walks straight out of the dialog.
+    (dialog === null ? null : (focusableIn(dialog)[0] ?? dialog))?.focus();
+    return () => {
+      for (const el of inerted) el.removeAttribute("inert");
+      restore?.focus();
+    };
   }, []);
 
-  // Escape cancels - but not mid-save. The request is already with the daemon
-  // at that point, so closing would only hide the outcome of a write that is
-  // still happening to a world zip.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape" || saving) return;
-      e.preventDefault();
-      onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose, saving]);
+  /**
+   * Number boxes holding no number. An `input[type=number]` reports an empty
+   * string both for a box the user cleared and for one they typed nonsense
+   * into, and an empty string is NOT a value: `Number("")` is 0, so treating
+   * it as one would send 0 for a field the user probably meant to leave alone.
+   * On `maxSettlersPerSettlement` or `droppedItemsLifeMinutes`, whose stored -1
+   * means "no limit", that 0 is in range, the daemon accepts it, and somebody's
+   * world silently goes from unlimited to none. So a blank box blocks the save
+   * and sends nothing, rather than being guessed at from either end.
+   */
+  const blockedKeys = useMemo(
+    () =>
+      (fields ?? [])
+        .filter((f) => f.editable && isBlankNumber(f, draft[f.key] ?? f.value))
+        .map((f) => f.key),
+    [fields, draft],
+  );
 
   /**
    * Exactly the fields whose value differs from the file's, in the JSON shape
@@ -119,6 +200,9 @@ export function WorldSettingsDialog({
     for (const f of fields ?? []) {
       if (!f.editable) continue;
       const text = draft[f.key] ?? f.value;
+      // A blank number box contributes nothing at all - not the old value,
+      // which the box no longer shows, and certainly not a made-up one.
+      if (isBlankNumber(f, text)) continue;
       if (isSameAsFile(f, text)) continue;
       out[f.key] = toWire(f, text);
     }
@@ -144,28 +228,10 @@ export function WorldSettingsDialog({
       .finally(() => setSaving(false));
   };
 
-  // aria-modal claims focus is confined to the dialog, so it is.
-  const onKeyDown = (e: ReactKeyboardEvent) => {
-    if (e.key !== "Tab") return;
-    const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(
-      "button:not(:disabled), select:not(:disabled), input:not([disabled])",
-    );
-    if (focusable === undefined || focusable.length === 0) return;
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    if (e.shiftKey && document.activeElement === first) {
-      e.preventDefault();
-      last.focus();
-    } else if (!e.shiftKey && document.activeElement === last) {
-      e.preventDefault();
-      first.focus();
-    }
-  };
-
   return (
     // No click-to-dismiss on the backdrop: a stray click next to a form of
     // unsaved edits should not discard them. Escape and Cancel are the ways out.
-    <div className="modal-backdrop">
+    <div className="modal-backdrop" ref={backdropRef}>
       <div
         className="modal"
         role="dialog"
@@ -173,7 +239,6 @@ export function WorldSettingsDialog({
         aria-labelledby="world-settings-title"
         tabIndex={-1}
         ref={dialogRef}
-        onKeyDown={onKeyDown}
       >
         <div className="modal-head">
           <h2 id="world-settings-title">World settings &mdash; {world}</h2>
@@ -201,6 +266,7 @@ export function WorldSettingsDialog({
                   field={f}
                   text={draft[f.key] ?? f.value}
                   disabled={saving}
+                  blank={blockedKeys.includes(f.key)}
                   onChange={(v) => setDraft((d) => ({ ...d, [f.key]: v }))}
                 />
               ))}
@@ -224,13 +290,15 @@ export function WorldSettingsDialog({
           </button>
           <button
             onClick={onSave}
-            disabled={saving || fields === null || changedKeys.length === 0}
+            disabled={saving || fields === null || blockedKeys.length > 0 || changedKeys.length === 0}
             title={
               saving
                 ? "Saving…"
-                : changedKeys.length === 0
-                  ? "Nothing has been changed yet"
-                  : `Writes ${changedKeys.join(", ")}`
+                : blockedKeys.length > 0
+                  ? `Left empty: ${blockedKeys.join(", ")}. An empty box is not a value - type a number, or restore the stored one.`
+                  : changedKeys.length === 0
+                    ? "Nothing has been changed yet"
+                    : `Writes ${changedKeys.join(", ")}`
             }
           >
             {saving ? "Saving…" : "Save"}
@@ -245,17 +313,26 @@ interface FieldRowProps {
   field: WorldSettingField;
   text: string;
   disabled: boolean;
+  /** This field's number box is empty, so it holds no value to save. */
+  blank: boolean;
   onChange: (value: string) => void;
 }
 
-function FieldRow({ field, text, disabled, onChange }: FieldRowProps) {
+function FieldRow({ field, text, disabled, blank, onChange }: FieldRowProps) {
   const id = `ws-${field.key}`;
   const note = fieldNote(field);
   return (
     <div className={field.type === null ? "ws-row ws-row-mod" : "ws-row"}>
       <label htmlFor={id}>{field.key}</label>
-      {renderControl(field, id, text, disabled, onChange)}
-      {note !== null && <p className="hint ws-note">{note}</p>}
+      {renderControl(field, id, text, disabled, blank, onChange)}
+      {blank ? (
+        <p className="hint hint-bad ws-note">
+          Left empty, so there is nothing to save for it. Type a number, or put back the stored{" "}
+          {field.value}.
+        </p>
+      ) : (
+        note !== null && <p className="hint ws-note">{note}</p>
+      )}
     </div>
   );
 }
@@ -265,14 +342,18 @@ function renderControl(
   id: string,
   text: string,
   disabled: boolean,
+  blank: boolean,
   onChange: (value: string) => void,
 ) {
-  // `editable` is the daemon's verdict, and it covers both things this form
-  // must never write: a key a mod owns (type null - nothing here knows its
-  // legal values) and gameVersion, which the game writes to record the build
-  // that last saved the world. Shown either way, so nobody is surprised by
-  // what is in their file, and never as an input that accepts typing.
-  if (!field.editable || field.type === null || field.type === "string") {
+  // `editable` is the daemon's verdict and the only thing that decides this.
+  // It covers both things this form must never write: a key a mod owns
+  // (nothing here knows its legal values) and gameVersion, which the game
+  // writes to record the build that last saved the world. Shown either way, so
+  // nobody is surprised by what is in their file, and never as an input that
+  // accepts typing. The TYPE below only picks which control to draw - keeping
+  // the two separate means an editable field of a new type renders as an
+  // editable control rather than silently as a read-only one.
+  if (!field.editable) {
     return <input id={id} className="ws-readonly" value={text} readOnly aria-readonly="true" />;
   }
   switch (field.type) {
@@ -314,18 +395,26 @@ function renderControl(
           max={field.max}
           step={field.type === "int" ? 1 : "any"}
           disabled={disabled}
+          aria-invalid={blank}
           onChange={(e) => onChange(e.target.value)}
         />
+      );
+    case "string":
+    case null:
+      // Only reachable if the daemon ever reports an editable field of a type
+      // with no richer control than a text box. Plain text is the honest
+      // rendering; the daemon still validates whatever is typed.
+      return (
+        <input id={id} type="text" value={text} disabled={disabled} onChange={(e) => onChange(e.target.value)} />
       );
   }
 }
 
 function fieldNote(field: WorldSettingField): string | null {
-  if (field.type === null) {
-    return "Written by a mod. Shown so you can see it is there; it is preserved exactly and cannot be changed here.";
-  }
   if (!field.editable) {
-    return "Written by the game and never changed here.";
+    return field.type === null
+      ? "Written by a mod. Shown so you can see it is there; it is preserved exactly and cannot be changed here."
+      : "Written by the game and never changed here.";
   }
   // The bounds are the daemon's, which is what will enforce them - including
   // the max of 10 on the day/night modifiers, which the file documents in its
@@ -334,6 +423,61 @@ function fieldNote(field: WorldSettingField): string | null {
   if (field.min !== undefined) return `At least ${field.min}`;
   if (field.max !== undefined) return `At most ${field.max}`;
   return null;
+}
+
+/**
+ * Whether a numeric field's box currently holds no number at all.
+ *
+ * This is the whole of the empty-box problem, and it is not a theoretical one:
+ * `Number("")` is 0, and an `input[type=number]` reports "" both for a cleared
+ * box and for anything unparseable typed into it. So the drafted text has to be
+ * inspected as TEXT. A caller that only asked `Number.isFinite(Number(text))`
+ * would be told an empty box holds zero.
+ */
+function isBlankNumber(field: WorldSettingField, text: string): boolean {
+  if (field.type !== "int" && field.type !== "float") return false;
+  const trimmed = text.trim();
+  return trimmed.length === 0 || !Number.isFinite(Number(trimmed));
+}
+
+/**
+ * Every element inside the dialog that can take focus right now, in tab order.
+ * Read-only inputs belong here (they are focusable, and a value you cannot copy
+ * out is a worse dialog); disabled ones do not.
+ */
+function focusableIn(root: HTMLElement): HTMLElement[] {
+  return [
+    ...root.querySelectorAll<HTMLElement>(
+      "button:not([disabled]), select:not([disabled]), input:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex='-1'])",
+    ),
+  ];
+}
+
+/**
+ * Marks everything that is not the dialog `inert`, by walking up from it and
+ * inerting each level's other children. Returns what it touched so the same
+ * set, and only that set, is released again.
+ *
+ * The walk exists because the dialog renders inside the app's own tree rather
+ * than in a portal, so "the rest of the page" is not one element - it is the
+ * header and the body pane, then whatever sits beside their parent, and so on
+ * up. Anything already inert for its own reasons is left alone.
+ */
+function makeSurroundingsInert(from: HTMLElement | null): Element[] {
+  const marked: Element[] = [];
+  let node: HTMLElement | null = from;
+  while (node !== null && node !== document.body) {
+    const parent: HTMLElement | null = node.parentElement;
+    if (parent === null) break;
+    for (const sibling of parent.children) {
+      if (sibling !== node && !sibling.hasAttribute("inert")) {
+        sibling.setAttribute("inert", "");
+        marked.push(sibling);
+      }
+    }
+    node = parent;
+  }
+  return marked;
 }
 
 /** Whether the drafted text would leave this field's line as the file already has it. */
@@ -347,10 +491,12 @@ function isSameAsFile(field: WorldSettingField, text: string): boolean {
 }
 
 /**
- * The drafted text as JSON of the type the daemon expects for that field. A
- * number box that has been emptied or typed into becomes NaN here, which
- * serialises as null and comes back as the daemon's own "must be a whole
- * number, not null" - the authority on what is acceptable stays in one place.
+ * The drafted text as JSON of the type the daemon expects for that field.
+ *
+ * Only ever called for text that `isBlankNumber` has already cleared, which is
+ * what makes the `Number(text)` here safe: on an empty box it would return 0,
+ * a value the daemon accepts and would happily write. Whether a box holds a
+ * number is decided before this point, not here.
  */
 function toWire(field: WorldSettingField, text: string): WorldSettingValue {
   if (field.type === "boolean") return text === "true";
