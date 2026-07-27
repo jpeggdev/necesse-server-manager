@@ -10,8 +10,12 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
     res = await fetch(url, {
-      headers: { "content-type": "application/json" },
       ...init,
+      // Only claim a JSON body when one is actually being sent - Fastify's
+      // default JSON parser rejects an empty body under this header with
+      // FST_ERR_CTP_EMPTY_JSON_BODY (400), which broke every bodyless
+      // mutation (stop/kill/updateServer/updateAllMods/removeMod).
+      ...(init?.body === undefined ? {} : { headers: { "content-type": "application/json" } }),
     });
   } catch (e) {
     throw new Error(`Could not reach the daemon at ${url}: ${(e as Error).message}`);
