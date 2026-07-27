@@ -1,6 +1,12 @@
 {
   "compilerOptions": {
     "target": "ES2022",
+    // Emit ES2022 syntax, but type-check against the ES2020 library. The
+    // client's integration test imports the daemon's sources, so every file
+    // here is checked a second time under client/tsconfig.json's ES2020 lib.
+    // Without this, an ES2022 library call (Object.hasOwn, Array.at,
+    // findLast) passes here and breaks `tsc` over in client/ instead.
+    "lib": ["ES2020"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "strict": true,
