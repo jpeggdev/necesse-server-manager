@@ -25,17 +25,30 @@ function setup(overrides = {}) {
 }
 
 describe("ModsPanel", () => {
-  it("lists managed mods with id and jar", () => {
+  it("lists managed mods by name, keeping the row scannable", () => {
     setup();
     expect(screen.getByText("Safe Haven QOL")).toBeTruthy();
-    expect(screen.getByText("3731244177")).toBeTruthy();
-    expect(screen.getByText("SafeHavenQOL-1.2.0-2.6.jar")).toBeTruthy();
+  });
+
+  it("exposes the workshop id and jar filename in the row's tooltip", () => {
+    setup();
+    const row = screen.getByText("Safe Haven QOL").closest("li");
+    const title = row?.getAttribute("title") ?? "";
+    expect(title).toContain("Safe Haven QOL");
+    expect(title).toContain("3731244177");
+    expect(title).toContain("SafeHavenQOL-1.2.0-2.6.jar");
   });
 
   it("shows untracked jars labelled as not updatable", () => {
     setup();
     expect(screen.getByText("MysteryMod.jar")).toBeTruthy();
     expect(screen.getByText(/untracked/i)).toBeTruthy();
+  });
+
+  it("explains in the tooltip why an untracked jar cannot be updated", () => {
+    setup();
+    const row = screen.getByText("MysteryMod.jar").closest("li");
+    expect(row?.getAttribute("title")).toMatch(/no workshop id/i);
   });
 
   it("adds a mod from the id and name inputs", async () => {

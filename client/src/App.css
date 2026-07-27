@@ -18,16 +18,13 @@ button.danger { background: #5a2020; border-color: #7a2a2a; }
 .splitter:hover, .splitter:focus-visible { background: #4a7fb5; outline: none; }
 .mods-head { display: flex; justify-content: space-between; align-items: center; }
 .mod-list { list-style: none; padding: 0; }
-/* One row per mod: [X] name  id  jar. The row carries a title with all three,
-   so a panel too narrow to show them still exposes the full text on hover. */
+/* One row per mod: [X] name. Workshop id and jar filename live in the row's
+   title, so the list stays scannable at any panel width. */
 .mod-list li { display: flex; align-items: center; gap: .5rem; padding: .3rem 0; border-bottom: 1px solid #23282e; }
 .mod-list li.untracked { padding-left: calc(32px + .5rem); }
-.mod-name { flex: 0 1 auto; min-width: 4rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.mod-id { flex: 0 0 auto; font-size: .78rem; color: #8d99a5; }
-/* The jar absorbs the slack, so it is the first thing to truncate. */
-.mod-jar { flex: 1 1 auto; min-width: 0; font-size: .78rem; color: #8d99a5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mod-name { flex: 1 1 auto; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mod-tag { flex: 0 0 auto; font-size: .7rem; text-transform: uppercase; letter-spacing: .04em; color: #e0b25c; border: 1px solid #5a4a1a; border-radius: 3px; padding: .05rem .35rem; }
 .mod-list li.untracked .mod-name { color: #e0b25c; }
-.mod-list li.untracked .mod-id { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .x {
   flex: 0 0 32px; width: 32px; height: 26px; padding: 0;
   background: #6b3434; border-color: #8a4444; font-size: 1.1rem; line-height: 1;
