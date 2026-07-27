@@ -32,15 +32,25 @@ export interface KnownField {
 const bool = (): KnownField => ({ type: "boolean", editable: true });
 
 /**
- * The numeric bounds below deserve a word, because only one of them is
- * verified. `dayTimeMod`/`nightTimeMod` are capped at 10 by the file's own
- * comment, which the game wrote. Everything else is a sanity guard chosen here:
- * these are guards against a value that is obviously nonsense (a negative
- * lifetime, a settler cap in the millions), not a claim about where the game's
- * real limits sit. They are deliberately generous so that a legitimate value is
- * never refused, and the floor on the time modifiers excludes 0 because a
- * zero-length day is not a setting anybody means and its in-game behaviour is
- * unverified.
+ * The numeric bounds below deserve a word, because exactly one of them is
+ * verified ground truth and the rest are judgement.
+ *
+ * VERIFIED: `max: 10` on `dayTimeMod` and `nightTimeMod`, from the comment the
+ * game itself writes into the file.
+ *
+ * JUDGEMENT, and marked as such on each field: everything else. These are
+ * guards against a value that is obviously nonsense, not claims about where the
+ * game's real limits sit, and they are deliberately generous so a legitimate
+ * value is never refused. Two specifics worth knowing:
+ *
+ * - The floor of 0.1 on the time modifiers excludes 0, because a zero-length
+ *   day is not a setting anybody means and its in-game behaviour is unverified.
+ * - The int fields allow -1, which is not an oversight. Necesse's `server.cfg`
+ *   documents the sibling settlement caps as "-1 or less means infinite", so -1
+ *   is a real value a person will type, and refusing it would be this daemon
+ *   inventing a restriction the game does not have. Values below -1 mean the
+ *   same thing as -1 and are refused, on the grounds that a stray minus sign is
+ *   likelier than a deliberate -7.
  */
 export const WORLD_SETTING_FIELDS: Readonly<Record<string, KnownField>> = {
   allowCheats: bool(),
@@ -70,18 +80,38 @@ export const WORLD_SETTING_FIELDS: Readonly<Record<string, KnownField>> = {
     editable: true,
   },
 
+  // max: verified from the file's own comment. min: judgement.
   dayTimeMod: { type: "float", min: 0.1, max: 10, editable: true },
   nightTimeMod: { type: "float", min: 0.1, max: 10, editable: true },
 
-  droppedItemsLifeMinutes: { type: "int", min: 0, max: 10080, editable: true },
-  maxSettlementsPerPlayer: { type: "int", min: 0, max: 1000, editable: true },
-  maxSettlersPerSettlement: { type: "int", min: 0, max: 1000, editable: true },
+  // Both bounds judgement. -1 is the documented "infinite" sentinel.
+  droppedItemsLifeMinutes: { type: "int", min: -1, max: 10080, editable: true },
+  maxSettlementsPerPlayer: { type: "int", min: -1, max: 1000, editable: true },
+  maxSettlersPerSettlement: { type: "int", min: -1, max: 1000, editable: true },
 
   // Written by the game to record which build last saved the world. Editing it
   // would tell the game a lie about its own save format, so it is reported and
   // never accepted.
   gameVersion: { type: "string", editable: false },
 };
+
+/**
+ * Looks a key up without walking the prototype chain.
+ *
+ * Plain property access would report a mod key called `constructor`,
+ * `toString` or `__proto__` as a field this daemon knows, because
+ * `Object.prototype` supplies one. Keys in this file come from a mod author and
+ * from a request body, so neither is a place to assume nobody will ever pick
+ * one of those names.
+ */
+export function knownField(key: string): KnownField | undefined {
+  // `hasOwnProperty.call` rather than `Object.hasOwn`: the client's integration
+  // test compiles this file under lib ES2020, where `Object.hasOwn` does not
+  // exist. Daemon source has to stay ES2020-compatible for that typecheck.
+  return Object.prototype.hasOwnProperty.call(WORLD_SETTING_FIELDS, key)
+    ? WORLD_SETTING_FIELDS[key]
+    : undefined;
+}
 
 export type ChangeCheck = { ok: true; text: string } | { ok: false; error: string };
 
@@ -94,7 +124,7 @@ export type ChangeCheck = { ok: true; text: string } | { ok: false; error: strin
  * re-emitted with a `.0` when it is whole, matching how the game writes them.
  */
 export function checkChange(key: string, value: unknown): ChangeCheck {
-  const field = WORLD_SETTING_FIELDS[key];
+  const field = knownField(key);
   if (field === undefined) {
     return {
       ok: false,

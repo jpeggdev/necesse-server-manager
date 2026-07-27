@@ -5,7 +5,7 @@ import { saveConfig } from "./config.js";
 import { listWorlds, worldExists, worldZipPath, isValidWorldName } from "./worlds.js";
 import { openWorldSettings, WorldSettingsError } from "./world-settings.js";
 import type { WorldSettingsFile } from "./world-settings-file.js";
-import { WORLD_SETTING_FIELDS, checkChange, isSameValue } from "./world-settings-schema.js";
+import { knownField, checkChange, isSameValue } from "./world-settings-schema.js";
 import type { ModInstaller } from "./mod-installer.js";
 import type { ProcessManager } from "./process-manager.js";
 import type { SteamCmd } from "./steamcmd.js";
@@ -19,6 +19,7 @@ import type {
   TaskKind,
   WorkshopItem,
   WorldSettingField,
+  WorldSettingType,
   WorldSettingsResponse,
   WorldSettingsWriteResponse,
   WsMessage,
@@ -137,6 +138,34 @@ export function buildServer(deps: Deps): FastifyInstance {
   };
 
   /**
+   * Claims a slot in `activeTasks` and returns its id.
+   *
+   * Split out of `runTask` because not every operation that must serialize
+   * against the others streams over the websocket. A world settings write runs
+   * to completion inside its own request - the client is waiting on the
+   * response, so there is nothing to stream - but it rewrites a world zip for
+   * about a third of a second, and during that time a second write, or a
+   * `POST /api/server/start` launching the game against the file being
+   * replaced, must be refused exactly as they would be during a steamcmd run.
+   * Reusing the same set is what makes that one rule rather than two.
+   *
+   * Callers MUST release in a `finally`, and MUST NOT await between checking
+   * `requireNoActiveTask` and calling this: the check and the claim are only an
+   * interlock if nothing can run between them.
+   */
+  const reserveTask = (): string => {
+    const taskId = `t${++taskSeq}`;
+    activeTasks.add(taskId);
+    broadcastStatus();
+    return taskId;
+  };
+
+  const releaseTask = (taskId: string): void => {
+    activeTasks.delete(taskId);
+    broadcastStatus();
+  };
+
+  /**
    * Registers the task as active, runs it, and guarantees the entry is removed
    * again on every exit path - resolve, reject, or a synchronous throw out of
    * `fn` (the async IIFE turns that into a rejection too), plus the expiry
@@ -150,10 +179,8 @@ export function buildServer(deps: Deps): FastifyInstance {
       onLine: (l: string) => void,
     ) => Promise<{ ok: boolean; error?: string; results?: InstallResult[] }>,
   ): string => {
-    const taskId = `t${++taskSeq}`;
+    const taskId = reserveTask();
     const onLine = (line: string) => broadcast({ type: "task", taskId, kind, line });
-    activeTasks.add(taskId);
-    broadcastStatus();
 
     // Exactly one terminal task-done per id is part of the contract clients
     // read, so whichever of the two paths (expiry, real completion) arrives
@@ -228,10 +255,11 @@ export function buildServer(deps: Deps): FastifyInstance {
     reply.code(409).send({
       ok: false,
       error:
-        `Cannot ${action} while a background task (mod install, mod update, or server ` +
-        `update) is still running. Those tasks rewrite the server install and the mods ` +
-        `folder, so overlapping them - or launching the game against a half-written one - ` +
-        `risks corruption. Wait for it to finish. In flight: ${[...activeTasks].join(", ")}.`,
+        `Cannot ${action} while a background task (mod install, mod update, server update, ` +
+        `or a world settings write) is still running. Those rewrite the server install, the ` +
+        `mods folder, or a world zip, so overlapping them - or launching the game against a ` +
+        `half-written one - risks corruption. Wait for it to finish. In flight: ` +
+        `${[...activeTasks].join(", ")}.`,
     });
     return false;
   };
@@ -336,7 +364,7 @@ export function buildServer(deps: Deps): FastifyInstance {
   /** One settings file rendered for a client, in the file's own key order. */
   const settingsFields = (file: WorldSettingsFile): WorldSettingField[] =>
     file.entries().map(({ key, value }) => {
-      const known = WORLD_SETTING_FIELDS[key];
+      const known = knownField(key);
       // A key this daemon does not know is a mod's. It is reported so nobody
       // is surprised by what is in their file, and it is not editable, because
       // nothing here knows what values that mod accepts.
@@ -420,23 +448,29 @@ export function buildServer(deps: Deps): FastifyInstance {
     const patch = body as Record<string, unknown>;
     if (!requireVerifiedStopped(reply, "change world settings")) return reply;
     if (!requireNoActiveTask(reply, "change world settings")) return reply;
-
-    const zipPath = await worldZipPath(cfg.worldsDir, name);
-    if (zipPath === null) {
-      return reply.code(404).send({ ok: false, error: `No world named ${JSON.stringify(name)}.` });
-    }
-
-    // Validation before the zip is opened, not during the edit. An unknown
-    // key, a wrong type, an out-of-range number or a value outside an enum's
-    // real option set all fail here, with the file still unread.
-    const wanted = new Map<string, string>();
-    for (const [key, value] of Object.entries(patch)) {
-      const check = checkChange(key, value);
-      if (!check.ok) return reply.code(400).send({ ok: false, error: check.error });
-      wanted.set(key, check.text);
-    }
-
+    // Claimed here, with nothing awaited since the check above, because the
+    // check and the claim are only an interlock if they are atomic. Two clients
+    // saving the same world at once otherwise both pass the guard, both rebuild
+    // from the same starting text, and the second rename silently discards the
+    // first one's edit. Released in the `finally` at the bottom, on every path
+    // including the 400s and 404s below.
+    const reservation = reserveTask();
     try {
+      const zipPath = await worldZipPath(cfg.worldsDir, name);
+      if (zipPath === null) {
+        return reply.code(404).send({ ok: false, error: `No world named ${JSON.stringify(name)}.` });
+      }
+
+      // Validation before the zip is opened, not during the edit. An unknown
+      // key, a wrong type, an out-of-range number or a value outside an enum's
+      // real option set all fail here, with the file still unread.
+      const wanted = new Map<string, string>();
+      for (const [key, value] of Object.entries(patch)) {
+        const check = checkChange(key, value);
+        if (!check.ok) return reply.code(400).send({ ok: false, error: check.error });
+        wanted.set(key, check.text);
+      }
+
       const open = await openWorldSettings(zipPath);
       // A key this daemon knows but this world's file does not have is still a
       // refusal: writing it would add a field the game left out, which is a
@@ -455,7 +489,9 @@ export function buildServer(deps: Deps): FastifyInstance {
       const changed: string[] = [];
       for (const [key, text] of wanted) {
         const current = open.file.get(key) as string;
-        const type = WORLD_SETTING_FIELDS[key].type;
+        // Non-null: `checkChange` above already refused every key this daemon
+        // does not know, which is the only way `knownField` returns undefined.
+        const type = (knownField(key) as { type: WorldSettingType }).type;
         if (isSameValue(current, text, type)) continue;
         open.file.set(key, text);
         changed.push(key);
@@ -476,6 +512,10 @@ export function buildServer(deps: Deps): FastifyInstance {
       } satisfies WorldSettingsWriteResponse;
     } catch (e) {
       return settingsFailure(reply, e);
+    } finally {
+      // A leaked entry wedges Start and every other mutation for the life of
+      // the daemon, so this runs on every path out of the block above.
+      releaseTask(reservation);
     }
   });
 

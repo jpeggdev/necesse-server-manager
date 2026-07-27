@@ -44,6 +44,13 @@ interface Span {
  * The value ends before any trailing comma, trailing whitespace, and any `//`
  * comment. The format has no string literals, so the first `//` on a line is
  * always the comment - the game's own parser treats it the same way.
+ *
+ * A line that assigns nothing - `IncreasedStackSize = ` - is a key with an
+ * empty value, not an absence of a key. Mods really do write these, and
+ * dropping the line here would make GET report 18 fields for a 19-key file
+ * while quietly claiming to list everything in it. The span is empty, which is
+ * exactly right: it means "the value occupies no characters yet", and writing
+ * one inserts at that point without disturbing the comma or the comment.
  */
 function valueSpan(body: string): Span | null {
   const commentAt = body.indexOf("//");
@@ -55,10 +62,6 @@ function valueSpan(body: string): Span | null {
   while (end > start && /\s/.test(code[end - 1])) end--;
   if (end > start && code[end - 1] === ",") end--;
   while (end > start && /\s/.test(code[end - 1])) end--;
-  // `key = ,` or `key =` - an assignment with nothing assigned. Left as an
-  // uninterpreted line rather than recorded as a key with an empty value,
-  // which nothing downstream could do anything sensible with.
-  if (end === start) return null;
   return { key: m[2], line: -1, start, end };
 }
 

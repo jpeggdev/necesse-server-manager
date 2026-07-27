@@ -53,6 +53,17 @@ export interface WorldZipOptions {
   cfg?: string;
   /** Omit the settings entry entirely, for the "this is not an editable world" case. */
   omitSettings?: boolean;
+  /**
+   * Add explicit directory entries. Real world zips carry 8-10 of them; a zip
+   * built purely from file entries has none, which leaves the whole
+   * directory-entry half of verification unexercised.
+   */
+  directoryEntries?: boolean;
+  /**
+   * Extra incompressible payload, in bytes. Used where a test needs the save to
+   * take long enough to still be in flight when a second request arrives.
+   */
+  bulkBytes?: number;
 }
 
 /**
@@ -78,6 +89,11 @@ export async function makeWorldZip(
       ...(store ? { compression: "STORE" as const } : {}),
     });
   };
+  if (options.directoryEntries === true) {
+    for (const folder of ["", "levels/", "players/"]) {
+      zip.file(`${world}/${folder}`, null, { dir: true, createFolders: false });
+    }
+  }
   if (options.omitSettings !== true) {
     put("worldSettings.cfg", Buffer.from(options.cfg ?? WORLD_SETTINGS_CFG, "utf8"));
   }
@@ -85,6 +101,7 @@ export async function makeWorldZip(
   put("levels/0_0.dat", blob(2, 32 * 1024));
   put("levels/0_1.dat", blob(3, 32 * 1024), true);
   put("players/76561198000000000.dat", blob(4, 4 * 1024));
+  if (options.bulkBytes !== undefined) put("bulk.dat", blob(5, options.bulkBytes));
 
   const path = join(dir, `${world}.zip`);
   await writeFile(path, await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" }));

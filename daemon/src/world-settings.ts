@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, open, readdir, readFile, rename, rm } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import JSZip from "jszip";
 import { WorldSettingsFile } from "./world-settings-file.js";
@@ -27,6 +27,23 @@ const SETTINGS_BASENAME = "worldsettings.cfg";
 /** Where a replaced zip's predecessor is kept. A directory, so `listWorlds` - which
  *  only looks at files - can never mistake a backup for a world. */
 export const BACKUP_DIR_NAME = "settings-backups";
+
+/**
+ * How many backups of one world are kept. Every edit leaves a full copy of the
+ * zip, so at ~12MB a world this grows without bound if nothing prunes it.
+ * Deletion is the one thing this feature does that destroys data on purpose,
+ * so every removal is logged by name and only ever touches files this feature
+ * wrote, in its own subdirectory, matching its own naming exactly.
+ */
+export const BACKUP_RETENTION = 10;
+
+/**
+ * What follows `<world>-` in a name this module wrote: the timestamp, then the
+ * random tail that stops two backups from ever landing on one name. Nothing
+ * else in the backup directory is a candidate for pruning, whoever put it
+ * there.
+ */
+const BACKUP_TAIL = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-[0-9a-f]{8}\.zip$/;
 
 export type WorldSettingsErrorKind =
   /** The zip opened, but carries no worldSettings.cfg, or more than one. */
@@ -81,6 +98,32 @@ export interface OpenWorldSettings {
 const sha256 = (b: Buffer): string => createHash("sha256").update(b).digest("hex");
 
 const stamp = (): string => new Date().toISOString().replace(/[:.]/g, "-");
+
+/**
+ * Writes a file and does not come back until the bytes are on the disk.
+ *
+ * A resolved `writeFile` means the data reached the OS page cache. It says
+ * nothing about the platter. Without the fsync below, a power loss or a BSOD
+ * in the seconds around a save can leave NTFS having journalled the rename
+ * while the replacement's data blocks were never written - and the backup,
+ * written the same way, is just as unflushed. That is the one sequence that
+ * can leave a world with neither a good original nor a good replacement. A
+ * process crash was always survivable; hardware loss was not.
+ *
+ * This is not redundant with the write above it and must not be removed as
+ * such. (There is no matching fsync of the directory: Windows cannot open one
+ * for syncing, so the rename's own metadata durability is left to the NTFS
+ * journal, which is what orders it against the data writes this forces.)
+ */
+async function writeDurable(path: string, data: Buffer): Promise<void> {
+  const handle = await open(path, "w");
+  try {
+    await handle.writeFile(data);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
 
 /** Every non-directory entry's name mapped to the hash of its *uncompressed* bytes. */
 async function hashEntries(zip: JSZip): Promise<Map<string, string>> {
@@ -186,10 +229,15 @@ export async function openWorldSettings(zipPath: string): Promise<OpenWorldSetti
       date: zip.files[entryName].date,
     });
 
-    const tempPath = join(dirname(zipPath), `.${basename(zipPath)}.${stamp()}.tmp`);
+    // A uuid, not a timestamp: `stamp()` has millisecond resolution and two
+    // saves close enough together would name the same temp file and interleave
+    // inside it. The route-level interlock is what actually serializes writes;
+    // this is the second line of defence, so that anything which ever slips
+    // past that interlock still cannot corrupt another writer's build.
+    const tempPath = join(dirname(zipPath), `.${basename(zipPath)}.${randomUUID()}.tmp`);
     let placed = false;
     try {
-      await writeFile(tempPath, await build(zip));
+      await writeDurable(tempPath, await build(zip));
 
       // Read the replacement back off disk rather than trusting the buffer
       // that was just written: what matters is that the file now sitting on
@@ -204,6 +252,15 @@ export async function openWorldSettings(zipPath: string): Promise<OpenWorldSetti
 
       await rename(tempPath, zipPath);
       placed = true;
+
+      // After the world is safely replaced, never before: a prune that failed
+      // must not be able to fail the save, and a prune that ran must not be
+      // able to remove the backup for a replacement that never happened.
+      try {
+        await pruneBackups(dirname(backupPath), basename(zipPath, ".zip"));
+      } catch (e) {
+        console.error(`Failed to prune old backups in ${dirname(backupPath)}: ${(e as Error).message}`);
+      }
       return { backupPath };
     } finally {
       // On every failure path the temp file goes and the original is still
@@ -254,15 +311,25 @@ async function verifyRebuild(
 /**
  * Writes the pre-edit zip aside and proves it landed by reading it back and
  * hashing it. "Confirmed written" has to mean read back and compared: a
- * successful `writeFile` says the call returned, not that a complete file
- * exists, and this copy is the only thing standing between a bad replacement
- * and a lost world.
+ * successful write says the call returned, not that a complete and correct
+ * file exists, and this copy is the only thing standing between a bad
+ * replacement and a lost world.
+ *
+ * The two checks answer different questions and both are needed. The read-back
+ * proves the bytes are the right bytes - but it is served from the page cache,
+ * so it proves nothing about the disk. `writeDurable`'s fsync is what makes
+ * them survive a power cut.
  */
 async function writeBackup(zipPath: string, original: Buffer): Promise<string> {
   const dir = join(dirname(zipPath), BACKUP_DIR_NAME);
   await mkdir(dir, { recursive: true });
-  const backupPath = join(dir, `${basename(zipPath, ".zip")}-${stamp()}.zip`);
-  await writeFile(backupPath, original);
+  // Timestamp first so a plain name sort is an age sort, then a random tail so
+  // two backups can never collide on a name and silently overwrite each other.
+  const backupPath = join(
+    dir,
+    `${basename(zipPath, ".zip")}-${stamp()}-${randomUUID().slice(0, 8)}.zip`,
+  );
+  await writeDurable(backupPath, original);
   const readBack = await readFile(backupPath);
   if (sha256(readBack) !== sha256(original)) {
     // Deliberately not deleted: something is wrong with this disk, and a
@@ -274,4 +341,37 @@ async function writeBackup(zipPath: string, original: Buffer): Promise<string> {
     );
   }
   return backupPath;
+}
+
+/**
+ * Keeps the most recent `BACKUP_RETENTION` backups of one world and deletes the
+ * rest, naming every file it removes.
+ *
+ * This is the only place the feature destroys data on purpose, so it is
+ * deliberately timid about what it will touch: only files inside its own
+ * backup directory, only ones whose name matches what `writeBackup` produces
+ * exactly, and only for the world being saved. Anything else in that folder -
+ * a copy somebody made by hand, another world's backups - is not a candidate,
+ * and a silent prune is how a person loses the copy they were counting on.
+ */
+async function pruneBackups(dir: string, worldBase: string): Promise<void> {
+  const prefix = `${worldBase}-`;
+  const entries = await readdir(dir, { withFileTypes: true });
+  const mine = entries
+    .filter(
+      (e) => e.isFile() && e.name.startsWith(prefix) && BACKUP_TAIL.test(e.name.slice(prefix.length)),
+    )
+    .map((e) => e.name)
+    // The timestamp leads the name, so sorting by name sorts by age.
+    .sort()
+    .reverse();
+
+  for (const name of mine.slice(BACKUP_RETENTION)) {
+    const path = join(dir, name);
+    await rm(path);
+    console.log(
+      `Deleted world settings backup ${path}: keeping the ${BACKUP_RETENTION} most recent ` +
+        `backups of "${worldBase}".`,
+    );
+  }
 }

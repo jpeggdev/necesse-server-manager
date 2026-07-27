@@ -131,6 +131,44 @@ describe("WorldSettingsFile refuses files it cannot edit safely", () => {
     expect(() => WorldSettingsFile.parse(dup)).toThrow(/more than once/);
   });
 
+  /*
+   * Real and observed: `Test Ville.zip` on this box ends with a mod-written
+   * `IncreasedStackSize = ` and nothing after the equals. Dropping the line
+   * left GET reporting 18 fields for a 19-key file - the round trip stayed
+   * byte-exact, because the splice editor never touched a line it had not
+   * recorded, but "every key in the file" was quietly untrue.
+   */
+  it("keeps a key whose value is empty rather than dropping the line", () => {
+    const withEmpty = [
+      "WORLDSETTINGS = {",
+      "\tallowCheats = false,",
+      "\tIncreasedStackSize = ",
+      "}",
+    ].join("\n");
+    const file = WorldSettingsFile.parse(withEmpty);
+
+    expect(file.keys()).toEqual(["allowCheats", "IncreasedStackSize"]);
+    expect(file.get("IncreasedStackSize")).toBe("");
+    expect(file.has("IncreasedStackSize")).toBe(true);
+    expect(file.text()).toBe(withEmpty);
+  });
+
+  it("keeps an empty value that still has its comma and its comment", () => {
+    const withEmpty = [
+      "WORLDSETTINGS = {",
+      "\tIncreasedStackSize = , // set by the mod on first load",
+      "\tallowCheats = false",
+      "}",
+    ].join("\n");
+    const file = WorldSettingsFile.parse(withEmpty);
+    expect(file.get("IncreasedStackSize")).toBe("");
+    expect(file.text()).toBe(withEmpty);
+
+    // And writing into that empty span inserts, leaving the comma and comment.
+    file.set("IncreasedStackSize", "64");
+    expect(file.text()).toContain("\tIncreasedStackSize = 64, // set by the mod on first load");
+  });
+
   it("does not read assignments outside the block", () => {
     const framed = ["allowCheats = true", "WORLDSETTINGS = {", "\tsurvivalMode = true", "}", "difficulty = HARD"].join(
       "\n",

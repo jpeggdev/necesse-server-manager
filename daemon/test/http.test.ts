@@ -1020,6 +1020,23 @@ describe("world settings", () => {
       }
     });
 
+    // Observed on a real world on this box: a mod writes a key and leaves the
+    // value blank. GET has to report it, or the field count silently disagrees
+    // with the file.
+    it("reports a key a mod left with an empty value", async () => {
+      const cfgText = `${WORLD_SETTINGS_CFG.slice(0, -2)},\n\tIncreasedStackSize = \n}`;
+      await makeWorldZip(cfg.worldsDir, "Test Ville", { cfg: cfgText });
+
+      const fields = await fieldsOf("Test Ville");
+      expect(fields).toHaveLength(19);
+      expect(fields[18]).toMatchObject({
+        key: "IncreasedStackSize",
+        value: "",
+        type: null,
+        editable: false,
+      });
+    });
+
     it("404s a world that is not there", async () => {
       const res = await settings("No Such World");
       expect(res.statusCode).toBe(404);
@@ -1110,6 +1127,59 @@ describe("world settings", () => {
       const res = await put({ allowCheats: true });
       expect(res.statusCode).toBe(409);
       expect(res.json().error).toMatch(/unmanaged/);
+    });
+
+    /*
+     * Two clients saving the same world at once used to both get a 200 with one
+     * edit silently gone: both passed the guard, both rebuilt from the same
+     * starting text, and the second rename discarded the first one's work. The
+     * write now claims a slot in the same `activeTasks` set every other
+     * mutation consults, so the second caller is refused with the same 409.
+     *
+     * The world here carries several megabytes of incompressible payload so the
+     * save is genuinely still running when the second request arrives - the
+     * point is to catch a real overlap, not to assert against a save that had
+     * already finished.
+     */
+    it("refuses a second write while one is still in flight, losing no edit", async () => {
+      const busyWorld = "Busy World";
+      const busyZip = await makeWorldZip(cfg.worldsDir, busyWorld, { bulkBytes: 6 * 1024 * 1024 });
+
+      const first = put({ difficulty: "HARD" }, busyWorld);
+      await vi.waitFor(async () => {
+        const status = await app.inject({ method: "GET", url: "/api/status" });
+        expect(status.json().activeTasks).toHaveLength(1);
+      });
+
+      // Mid-save: a second write is refused, and so is launching the game
+      // against the world being replaced.
+      const second = await put({ difficulty: "BRUTAL" }, busyWorld);
+      expect(second.statusCode).toBe(409);
+      expect(second.json().error).toMatch(/world settings write/);
+      const start = await app.inject({
+        method: "POST",
+        url: "/api/server/start",
+        payload: { world: "Tulsa" },
+      });
+      expect(start.statusCode).toBe(409);
+      expect(spawn.calls).toHaveLength(0);
+
+      expect((await first).statusCode).toBe(200);
+      // Exactly one edit survived, and it is the one that was accepted.
+      const open = await openWorldSettings(busyZip);
+      expect(open.file.get("difficulty")).toBe("HARD");
+      // The slot is released, so the next write goes through normally.
+      expect((await app.inject({ method: "GET", url: "/api/status" })).json().activeTasks).toEqual([]);
+      expect((await put({ difficulty: "BRUTAL" }, busyWorld)).statusCode).toBe(200);
+    });
+
+    it("releases its slot even when the write is refused", async () => {
+      for (const payload of [{ notAField: 1 }, { maxSettlersPerSettlement: 5 }]) {
+        expect((await put(payload)).statusCode).toBe(400);
+        expect((await app.inject({ method: "GET", url: "/api/status" })).json().activeTasks).toEqual([]);
+      }
+      expect((await put({ allowCheats: true }, "No Such World")).statusCode).toBe(404);
+      expect((await app.inject({ method: "GET", url: "/api/status" })).json().activeTasks).toEqual([]);
     });
 
     it("refuses while a background task is in flight", async () => {

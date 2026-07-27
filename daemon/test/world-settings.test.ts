@@ -1,13 +1,14 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { createHash } from "node:crypto";
-import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import JSZip from "jszip";
 import {
   openWorldSettings,
   WorldSettingsError,
   BACKUP_DIR_NAME,
+  BACKUP_RETENTION,
   type ZipBuilder,
 } from "../src/world-settings.js";
 import { makeWorldZip, WORLD_SETTINGS_CFG } from "./fixtures/world-zip.js";
@@ -34,6 +35,15 @@ async function entriesOf(path: string): Promise<Map<string, string>> {
     out.set(name, sha(await entry.async("nodebuffer")));
   }
   return out;
+}
+
+/** Directory entry names, which a rebuild has to preserve as exactly as files. */
+async function dirsOf(path: string): Promise<string[]> {
+  const zip = await JSZip.loadAsync(await readFile(path), { createFolders: false });
+  return Object.entries(zip.files)
+    .filter(([, e]) => e.dir)
+    .map(([name]) => name)
+    .sort();
 }
 
 async function entryText(path: string, name: string): Promise<string> {
@@ -138,6 +148,151 @@ describe("saving a world zip", () => {
     open.file.set("creativeMode", "false");
     await open.save();
     expect((await readdir(dir)).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+  });
+});
+
+/*
+ * Real world zips carry 8-10 explicit directory entries. Every fixture above
+ * has none, so until these existed the whole directory half of verification had
+ * never run against anything.
+ */
+describe("directory entries", () => {
+  let dirZip: string;
+
+  beforeEach(async () => {
+    dirZip = await makeWorldZip(dir, "Dir World", { directoryEntries: true });
+  });
+
+  it("carries them through a rebuild unchanged", async () => {
+    const before = await dirsOf(dirZip);
+    expect(before.length).toBeGreaterThan(0);
+
+    const open = await openWorldSettings(dirZip);
+    open.file.set("difficulty", "HARD");
+    await open.save();
+
+    expect(await dirsOf(dirZip)).toEqual(before);
+    expect(await entryText(dirZip, "Dir World/worldSettings.cfg")).toBe(
+      WORLD_SETTINGS_CFG.replace("difficulty = CLASSIC", "difficulty = HARD"),
+    );
+  });
+
+  it("refuses a rebuild that dropped one", async () => {
+    const original = await readFile(dirZip);
+    const open = await openWorldSettings(dirZip);
+    open.file.set("difficulty", "HARD");
+    await expect(
+      open.save(async (zip) => {
+        zip.remove("Dir World/players/");
+        return zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+      }),
+    ).rejects.toThrow(/directory entry "Dir World\/players\/" is missing/);
+    expect(sha(await readFile(dirZip))).toBe(sha(original));
+  });
+
+  it("refuses a rebuild that invented one", async () => {
+    const original = await readFile(dirZip);
+    const open = await openWorldSettings(dirZip);
+    open.file.set("difficulty", "HARD");
+    await expect(
+      open.save(async (zip) => {
+        zip.file("Dir World/uninvited/", null, { dir: true, createFolders: false });
+        return zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+      }),
+    ).rejects.toThrow(/gained a directory entry/);
+    expect(sha(await readFile(dirZip))).toBe(sha(original));
+  });
+});
+
+/*
+ * Pruning is the one thing this feature does that destroys data on purpose, so
+ * what it will and will not touch is pinned tightly, and every deletion has to
+ * announce itself.
+ */
+describe("backup pruning", () => {
+  const backupDir = (): string => join(dir, BACKUP_DIR_NAME);
+
+  /** A name shaped exactly like one `writeBackup` produces. */
+  const backupName = (base: string, n: number): string =>
+    `${base}-2020-01-${String(n).padStart(2, "0")}T00-00-00-000Z-0000000${(n % 10).toString(16)}.zip`;
+
+  const save = async (value: string): Promise<string> => {
+    const open = await openWorldSettings(zipPath);
+    open.file.set("difficulty", value);
+    return (await open.save()).backupPath;
+  };
+
+  it("keeps only the most recent backups and names every file it deletes", async () => {
+    await mkdir(backupDir(), { recursive: true });
+    for (let n = 1; n <= 15; n++) {
+      await writeFile(join(backupDir(), backupName(WORLD, n)), `old backup ${n}`);
+    }
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const fresh = await save("HARD");
+
+      const left = (await readdir(backupDir())).sort();
+      expect(left).toHaveLength(BACKUP_RETENTION);
+      // The one just written survives, and so do the newest of the old ones.
+      expect(left).toContain(basename(fresh));
+      expect(left).toContain(backupName(WORLD, 15));
+      // The oldest are gone...
+      expect(left).not.toContain(backupName(WORLD, 1));
+      expect(left).not.toContain(backupName(WORLD, 6));
+      // ...and every one of them said so.
+      const deleted = log.mock.calls.map((c) => String(c[0]));
+      expect(deleted).toHaveLength(16 - BACKUP_RETENTION);
+      for (const line of deleted) expect(line).toMatch(/Deleted world settings backup .+\.zip/);
+      expect(deleted.join("\n")).toContain(backupName(WORLD, 1));
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("never touches a file it did not write", async () => {
+    await mkdir(backupDir(), { recursive: true });
+    const bystanders = [
+      "keep-me.txt",
+      `${WORLD}.zip`,
+      `${WORLD}-not-a-stamp.zip`,
+      `${WORLD}-2020-01-01T00-00-00-000Z-0000000a.zip.bak`,
+      "Some Other World-2020-01-01T00-00-00-000Z-0000000b.zip",
+    ];
+    for (const name of bystanders) await writeFile(join(backupDir(), name), "not mine");
+    for (let n = 1; n <= 15; n++) {
+      await writeFile(join(backupDir(), backupName(WORLD, n)), `old backup ${n}`);
+    }
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await save("HARD");
+    } finally {
+      log.mockRestore();
+    }
+
+    const left = await readdir(backupDir());
+    for (const name of bystanders) expect(left, name).toContain(name);
+  });
+
+  it("gives two saves two distinct backups rather than overwriting one", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const first = await save("HARD");
+      const second = await save("BRUTAL");
+      expect(first).not.toBe(second);
+      expect((await readdir(backupDir())).sort()).toEqual([basename(first), basename(second)].sort());
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("does not prune when there is nothing to prune", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await save("HARD");
+      expect(log).not.toHaveBeenCalled();
+    } finally {
+      log.mockRestore();
+    }
   });
 });
 
