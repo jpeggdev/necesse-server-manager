@@ -53,6 +53,12 @@ export function ModsPanel({
   const canAdd = !locked && /^\d+$/.test(id.trim());
 
   const updateById = new Map((updates ?? []).map((u) => [u.id, u]));
+  // The thumbnail slot is reserved for every managed row, or for none: a
+  // per-row `previewUrl.length > 0` would leave names ragged, since Steam has
+  // no entry for some ids. Reserved only once the check has actually landed,
+  // so a Steam outage leaves the list exactly as it was before this existed
+  // rather than adding a column of empty boxes.
+  const showThumbs = updates !== null;
 
   return (
     <section className="mods">
@@ -90,20 +96,24 @@ export function ModsPanel({
             <p className="hint">Update check unavailable: {updatesError}</p>
           )}
 
-          <ul className="mod-list">
+          <ul className={showThumbs ? "mod-list with-thumbs" : "mod-list"}>
             {mods.managed.map((m) => {
               const u = updateById.get(m.id);
               const rowTitle = [
                 m.name,
                 `Workshop id: ${m.id}`,
                 `Jar: ${m.jar}`,
+                // Kept in the tooltip rather than on the row: the list is for
+                // scanning, and a description under every name is exactly the
+                // squished list this layout exists to avoid.
+                ...(u !== undefined && u.description.length > 0 ? ["", u.description] : []),
                 ...(u === undefined
                   ? []
                   : u.updateAvailable
-                    ? [UPDATE_HINT]
+                    ? ["", UPDATE_HINT]
                     : u.onWorkshop
                       ? []
-                      : ["Steam has no usable entry for this id, so it cannot be checked for updates."]),
+                      : ["", "Steam has no usable entry for this id, so it cannot be checked for updates."]),
               ].join("\n");
               return (
                 <li key={m.id} title={rowTitle}>
@@ -115,6 +125,13 @@ export function ModsPanel({
                   >
                     &times;
                   </button>
+                  {showThumbs &&
+                    (u !== undefined && u.previewUrl.length > 0 ? (
+                      // Decorative: the name is right beside it.
+                      <img className="mod-thumb" src={u.previewUrl} alt="" loading="lazy" />
+                    ) : (
+                      <span className="mod-thumb mod-thumb-empty" />
+                    ))}
                   <span className="mod-name">{m.name}</span>
                   {u?.updateAvailable === true && (
                     <span className="mod-tag mod-tag-update" title={UPDATE_HINT}>

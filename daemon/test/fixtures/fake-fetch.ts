@@ -89,6 +89,7 @@ export function detailsBody(
     result?: number;
     subscriptions?: number;
     previewUrl?: string;
+    description?: string;
     banned?: boolean;
   }>,
 ): unknown {
@@ -100,7 +101,7 @@ export function detailsBody(
         publishedfileid: i.id,
         result: i.result ?? 1,
         title: i.title ?? `Mod ${i.id}`,
-        description: "whatever",
+        description: i.description ?? "whatever",
         preview_url: i.previewUrl ?? `https://images.example/${i.id}.jpg`,
         time_updated: i.timeUpdated ?? 1_700_000_000,
         file_size: "12345",

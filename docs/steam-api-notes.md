@@ -75,6 +75,7 @@ that was not probed.
 | `numperpage` | clamped to 50 by the daemon |
 | `cursor` | start at `*`; feed `response.next_cursor` back for the next page |
 | `return_metadata` | `true`, or the entries come back without titles etc. |
+| `return_short_description` | `true`. Asks Steam for its own trimmed blurb (`short_description`) instead of the full BBCode `description`. |
 
 Response shape matches the keyless endpoint: `response.publishedfiledetails[]`,
 plus `response.total` and `response.next_cursor`. Entries here have no `result`
@@ -135,6 +136,55 @@ hold an HTTP handler open for the life of the daemon. A test asserts the signal
 is attached, because a fake fetch always answers and would otherwise never
 notice its removal.
 
+## Descriptions, and why they are truncated in the daemon
+
+`WorkshopItem.description` is **not** what Steam sent. Both endpoints' raw
+descriptions are large, and `GET /api/mods/updates` fetches every managed mod's
+at once. Measured against the live server's eight mods:
+
+| | chars |
+| --- | --- |
+| total across all 8 | 19,053 |
+| largest single mod | 7,825 (Safe Haven Qol) |
+| median | ~1,800 |
+
+Every badge poll would carry that. `steam-workshop.ts` therefore strips BBCode,
+collapses whitespace and truncates to `DESCRIPTION_LIMIT` (**280 chars**, cut on
+a word boundary where one is within 40 chars of the end) before the item leaves
+the module. 280 is sized to the two places it is consumed - one ellipsised line
+in a search result, and a native `title` tooltip - and cuts the live payload by
+roughly 90%. Truncating in the daemon rather than the client is the point: it is
+the only place that can stop the bytes before they cross the wire.
+
+`toBlurb` is exported and unit-tested directly, including the case of a stray
+`[` in prose: the BBCode pattern is length-bounded so an unmatched bracket eats
+a few characters at most rather than everything up to the next `]`.
+
+### The short-description flag
+
+`QueryFiles` takes `return_short_description=true` and then sends
+`short_description` in place of the full body. **`GetPublishedFileDetails` has
+no such parameter** - confirmed against the live endpoint, whose entries carry
+`description` and no `short_description` at all. So `toItem` reads both and
+prefers whichever non-empty one it finds, and `toBlurb` truncates either to the
+same size. The flag is a bandwidth saving on Steam's side of the hop, not
+something the output shape depends on: if Steam ever ignores it, the full
+description arrives and is cut down exactly as it already is for the keyless
+path. Tests cover both branches.
+
+## Thumbnails for installed mods
+
+`GET /api/mods/updates` already fetches the full `WorkshopItem` for every
+managed mod in order to compare `time_updated`, so `ModUpdateInfo` carries
+`previewUrl` and `description` straight off it. **This costs zero extra Steam
+traffic** - dropping them and fetching them again later would be pure waste.
+Both are `""` when Steam has no usable entry, which is the same condition as
+`onWorkshop: false`, so a client renders nothing rather than `undefined`.
+
+The consequence worth remembering: mod-list thumbnails share the update check's
+fate. A Steam outage costs badges *and* thumbnails, and the mod list still
+renders from disk without either.
+
 ## Thumbnails and the Tauri CSP
 
 `preview_url` points at Steam's own image CDN, which is a different origin from
@@ -143,15 +193,18 @@ both the app and the daemon. `client/src-tauri/tauri.conf.json` sets
 visible symptom other than empty boxes. An explicit `img-src` was added:
 
 ```
-img-src 'self' data: https://images.steamusercontent.com
-        https://*.steamusercontent.com https://*.steamstatic.com
-        https://*.akamaihd.net
+img-src 'self' data: https://*.steamusercontent.com
+        https://*.steamstatic.com https://steamuserimages-a.akamaihd.net
 ```
 
 `images.steamusercontent.com` is what live `QueryFiles` responses actually
-return; the wildcards cover the older `steamuserimages-a.akamaihd.net` and
-`*.steamstatic.com` forms Steam still hands out for some items. `connect-src` is
-untouched - nothing fetches these, they are only ever `<img src>`.
+return, covered by the first wildcard. The legacy host is named **exactly**
+rather than as `*.akamaihd.net`: that is Akamai's shared multi-tenant domain, so
+a wildcard there would allow images from every Akamai customer, unlike
+`*.steamstatic.com` and `*.steamusercontent.com` which are Valve-scoped.
+
+`connect-src` is untouched - nothing fetches these, they are only ever
+`<img src>`.
 
 ## Design constraints worth keeping
 

@@ -43,6 +43,51 @@ export const REQUEST_TIMEOUT_MS = 10_000;
 /** How many chars of an upstream error body to quote back. */
 const BODY_SNIPPET = 300;
 
+/**
+ * How much of a workshop description survives the trip to a client.
+ *
+ * Steam sends the description in full, and it is large: the eight mods on the
+ * live server total ~19,000 characters, one of them 7,800 on its own. Every
+ * badge check fetches all of them, so shipping them whole would mean tens of
+ * kilobytes per poll to render a tooltip and a one-line blurb. 280 is sized to
+ * the two places it is actually consumed - one ellipsised line in a search
+ * result (~110 chars even at the widest the mods pane can be dragged) and a
+ * native title tooltip, which becomes a wall of text well before this - and
+ * cuts the live payload by roughly 90%.
+ *
+ * Truncating here rather than in the client is deliberate: it is the only
+ * place that can stop the bytes before they cross the wire.
+ */
+export const DESCRIPTION_LIMIT = 280;
+
+/**
+ * BBCode tags: `[h1]`, `[/hr]`, `[*]`, `[url=https://...]`. Bounded length so
+ * an unmatched `[` in prose swallows a few characters at most instead of
+ * everything up to the next bracket, and so the pattern cannot backtrack.
+ */
+const BBCODE_TAG = /\[\/?[a-z0-9*][^\]]{0,40}\]/gi;
+
+/** Nothing nearer the cap than this is worth cutting a word in half for. */
+const WORD_BOUNDARY_SLACK = 40;
+
+/**
+ * A workshop description reduced to something a tooltip or a single line can
+ * hold: markup stripped, whitespace collapsed, cut at the limit on a word
+ * boundary where one is close enough to the end to be worth using.
+ */
+export function toBlurb(raw: unknown): string {
+  if (typeof raw !== "string" || raw.length === 0) return "";
+  const text = raw.replace(BBCODE_TAG, " ").replace(/\s+/g, " ").trim();
+  if (text.length <= DESCRIPTION_LIMIT) return text;
+  const cut = text.slice(0, DESCRIPTION_LIMIT);
+  const space = cut.lastIndexOf(" ");
+  const kept = space > DESCRIPTION_LIMIT - WORD_BOUNDARY_SLACK ? cut.slice(0, space) : cut;
+  // Written as an escape, not a literal: this file is edited by tools that
+  // match exact bytes, and a pasted ellipsis is the one character that cannot
+  // be retyped reliably.
+  return `${kept.trimEnd()}\u2026`;
+}
+
 export type WorkshopFailureKind =
   /** No Steam Web API key is set, and the operation needs one. */
   | "not-configured"
@@ -88,6 +133,15 @@ interface RawDetail {
   publishedfileid?: unknown;
   result?: unknown;
   title?: unknown;
+  description?: unknown;
+  /**
+   * Only QueryFiles produces this, and only when asked
+   * (`return_short_description`). GetPublishedFileDetails has no such
+   * parameter and never sends the field - confirmed against the live endpoint,
+   * whose entries carry `description` alone - so both are read and whichever
+   * turns up is used.
+   */
+  short_description?: unknown;
   preview_url?: unknown;
   time_updated?: unknown;
   file_size?: unknown;
@@ -118,10 +172,18 @@ function toItem(raw: RawDetail): WorkshopItem | null {
   if (raw.banned === true || raw.banned === 1) return null;
   const updated = raw.time_updated;
   const updatedMs = typeof updated === "number" || typeof updated === "string" ? num(updated) : 0;
+  // The short form when Steam sent one, else the full description - which is
+  // then cut down to the same size anyway, so a client cannot tell which
+  // endpoint it came from or be handed a wall of BBCode by either.
+  const shortDesc = raw.short_description;
+  const description = toBlurb(
+    typeof shortDesc === "string" && shortDesc.length > 0 ? shortDesc : raw.description,
+  );
   return {
     id,
     title: typeof raw.title === "string" ? raw.title : "",
     previewUrl: typeof raw.preview_url === "string" ? raw.preview_url : "",
+    description,
     // Reported as null rather than the unix epoch when Steam sent no
     // timestamp, so "we do not know" never reads as "updated in 1970".
     updatedAt: updatedMs > 0 ? new Date(updatedMs * 1000).toISOString() : null,
@@ -194,6 +256,13 @@ export class SteamWorkshop {
       numperpage: String(opts.count ?? 20),
       cursor: opts.cursor ?? "*",
       return_metadata: "true",
+      // Asks Steam to send its own trimmed blurb instead of the full BBCode
+      // description. `toBlurb` truncates either one to the same size, so this
+      // is a bandwidth saving on Steam's side of the hop rather than something
+      // the output shape depends on - if Steam ignores the flag, the full
+      // description arrives and is cut down exactly as it is for the details
+      // endpoint, which never sends a short form at all.
+      return_short_description: "true",
     });
     if (text.length > 0) params.set("search_text", text);
     const label = "Steam's QueryFiles endpoint";

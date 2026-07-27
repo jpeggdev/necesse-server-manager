@@ -24,6 +24,13 @@ button.danger { background: #5a2020; border-color: #7a2a2a; }
    title, so the list stays scannable at any panel width. */
 .mod-list li { display: flex; align-items: center; gap: .5rem; padding: .3rem 0; border-bottom: 1px solid #23282e; }
 .mod-list li.untracked { padding-left: calc(32px + .5rem); }
+/* 24px, not the search view's 32px: it has to sit inside the existing row
+   height so adding thumbnails never turns one line into two. */
+.mod-thumb { flex: 0 0 24px; width: 24px; height: 24px; object-fit: cover; border-radius: 3px; background: #1f242a; }
+.mod-thumb-empty { background: #1c2126; }
+/* Untracked rows have no X and no thumb, so they indent past both to keep
+   every name on the list starting at the same place. */
+.mod-list.with-thumbs li.untracked { padding-left: calc(32px + .5rem + 24px + .5rem); }
 .mod-name { flex: 1 1 auto; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mod-tag { flex: 0 0 auto; font-size: .7rem; text-transform: uppercase; letter-spacing: .04em; color: #e0b25c; border: 1px solid #5a4a1a; border-radius: 3px; padding: .05rem .35rem; }
 .mod-list li.untracked .mod-name { color: #e0b25c; }
@@ -47,6 +54,10 @@ button.danger { background: #5a2020; border-color: #7a2a2a; }
 .workshop-list li { display: flex; align-items: center; gap: .5rem; padding: .3rem 0; border-bottom: 1px solid #23282e; }
 /* Fixed box so a thumbnail that fails to load cannot reflow the row. */
 .workshop-thumb { flex: 0 0 32px; width: 32px; height: 32px; object-fit: cover; border-radius: 3px; background: #1f242a; }
+/* Title over blurb, both clamped to one line each, so a result row is a fixed
+   two lines however long the description is. */
+.workshop-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+.workshop-blurb { font-size: .72rem; color: #9aa6b2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .workshop-subs { flex: 0 0 auto; font-size: .75rem; color: #9aa6b2; }
 .workshop-more { margin-top: .6rem; width: 100%; }
 .console { flex: 1; display: flex; flex-direction: column; min-width: 0; }

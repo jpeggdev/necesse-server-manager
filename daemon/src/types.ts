@@ -101,6 +101,14 @@ export interface WorkshopItem {
   id: string;
   title: string;
   previewUrl: string;
+  /**
+   * A short plain-text blurb, NOT the workshop description verbatim. Steam
+   * returns thousands of characters of BBCode per item; `steam-workshop.ts`
+   * strips the markup and truncates to DESCRIPTION_LIMIT before this leaves the
+   * daemon, so no caller ever has to defend against the full payload. Empty
+   * when Steam sent no description at all.
+   */
+  description: string;
   updatedAt: string | null;
   fileSize: number;
   subscriptions: number;
@@ -127,6 +135,15 @@ export interface ModUpdateInfo {
   id: string;
   /** The workshop title when Steam knew the item, else the registry's name. */
   title: string;
+  /**
+   * The workshop thumbnail, or "" when Steam has no usable entry. Carried here
+   * rather than fetched separately because this route already holds the full
+   * WorkshopItem: the client gets mod-list thumbnails for no extra Steam
+   * traffic at all, and a Steam outage costs them along with the badges.
+   */
+  previewUrl: string;
+  /** The same truncated blurb as WorkshopItem.description; "" when unknown. */
+  description: string;
   workshopUpdatedAt: string | null;
   /** ModEntry.lastUpdated: when this daemon last installed it. */
   installedAt: string;

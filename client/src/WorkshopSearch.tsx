@@ -20,10 +20,37 @@ export interface WorkshopSearchProps {
   installedIds: string[];
 }
 
+/**
+ * A cursor is only meaningful against the query that produced it. Steam ranks
+ * a typed search by vote and an empty one by trend (`query_type` 0 vs 9), so
+ * replaying a cursor against different text pages through a differently
+ * ordered result set entirely. They travel together for that reason.
+ */
+interface NextPage {
+  cursor: string;
+  query: string;
+}
+
 /** 29581 -> "30k". The exact figure lives in the row's tooltip. */
 function formatSubs(n: number): string {
   if (n < 1000) return String(n);
   return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`;
+}
+
+/**
+ * Steam's cursor paging walks a result set that can shift between pages, so
+ * the same id can legitimately arrive twice. Two rows for one mod would also
+ * be two identical React keys.
+ */
+function dedupeById(items: WorkshopItem[]): WorkshopItem[] {
+  const seen = new Set<string>();
+  const out: WorkshopItem[] = [];
+  for (const item of items) {
+    if (seen.has(item.id)) continue;
+    seen.add(item.id);
+    out.push(item);
+  }
+  return out;
 }
 
 function rowTitle(item: WorkshopItem): string {
@@ -34,13 +61,14 @@ function rowTitle(item: WorkshopItem): string {
   ];
   if (item.updatedAt !== null) parts.push(`Updated ${item.updatedAt.slice(0, 10)}`);
   if (item.fileSize > 0) parts.push(`${Math.round(item.fileSize / 1024)} KB`);
+  if (item.description.length > 0) parts.push("", item.description);
   return parts.join("\n");
 }
 
 export function WorkshopSearch({ search, onInstall, busy, running, installedIds }: WorkshopSearchProps) {
   const [query, setQuery] = useState("");
   const [items, setItems] = useState<WorkshopItem[]>([]);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [nextPage, setNextPage] = useState<NextPage | null>(null);
   const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -54,17 +82,27 @@ export function WorkshopSearch({ search, onInstall, busy, running, installedIds 
   // search cannot append a previous query's items onto the new list.
   const seq = useRef(0);
 
-  const runSearch = (cursor?: string) => {
+  /**
+   * `page` absent means a fresh search for whatever is in the box; present
+   * means the next page of the query that cursor was minted for, which is NOT
+   * necessarily what the box says now - the user is free to retype without
+   * submitting, and paging must not silently adopt the new text.
+   */
+  const runSearch = (page?: NextPage) => {
+    const text = page?.query ?? query;
     const mine = ++seq.current;
     setLoading(true);
     setSearched(true);
-    search(query, cursor)
+    // Cleared as the request goes out, not when it lands: otherwise a 503 or a
+    // Steam outage message sits under "Searching..." for the daemon's full
+    // 10s timeout, describing a request that is already over.
+    setError(null);
+    search(text, page?.cursor)
       .then((r) => {
         if (mine !== seq.current) return;
-        setItems((prev) => (cursor === undefined ? r.items : [...prev, ...r.items]));
-        setNextCursor(r.nextCursor);
+        setItems((prev) => dedupeById(page === undefined ? r.items : [...prev, ...r.items]));
+        setNextPage(r.nextCursor === null ? null : { cursor: r.nextCursor, query: text });
         setTotal(r.total);
-        setError(null);
       })
       .catch((e: Error) => {
         if (mine !== seq.current) return;
@@ -73,9 +111,11 @@ export function WorkshopSearch({ search, onInstall, busy, running, installedIds 
         // replacing it with "search failed" would throw away the only
         // actionable thing in the response.
         setError(e.message);
-        if (cursor === undefined) {
+        // A failed *page* keeps what is already on screen; only a failed fresh
+        // search clears the list it was replacing.
+        if (page === undefined) {
           setItems([]);
-          setNextCursor(null);
+          setNextPage(null);
           setTotal(0);
         }
       })
@@ -141,7 +181,12 @@ export function WorkshopSearch({ search, onInstall, busy, running, installedIds 
               {item.previewUrl.length > 0 && (
                 <img className="workshop-thumb" src={item.previewUrl} alt="" loading="lazy" />
               )}
-              <span className="mod-name">{item.title}</span>
+              <span className="workshop-text">
+                <span className="mod-name">{item.title}</span>
+                {item.description.length > 0 && (
+                  <span className="workshop-blurb">{item.description}</span>
+                )}
+              </span>
               <span className="workshop-subs" title={`${item.subscriptions.toLocaleString()} subscribers`}>
                 {formatSubs(item.subscriptions)}
               </span>
@@ -166,12 +211,8 @@ export function WorkshopSearch({ search, onInstall, busy, running, installedIds 
         })}
       </ul>
 
-      {nextCursor !== null && (
-        <button
-          className="workshop-more"
-          disabled={loading}
-          onClick={() => runSearch(nextCursor)}
-        >
+      {nextPage !== null && (
+        <button className="workshop-more" disabled={loading} onClick={() => runSearch(nextPage)}>
           Load more
         </button>
       )}

@@ -712,6 +712,34 @@ describe("GET /api/mods/updates", () => {
     expect(res.json().mods).toEqual([]);
     expect(net.calls).toHaveLength(0);
   });
+
+  it("carries the thumbnail and a blurb through, for no extra Steam traffic", async () => {
+    // The WorkshopItem fetched to compare timestamps already holds both, so
+    // dropping them and refetching later would be pure waste.
+    await installed("111", "A", "2026-01-01T00:00:00.000Z");
+    net.respondJson(
+      detailsBody([
+        {
+          id: "111",
+          previewUrl: "https://images.example/thumb.jpg",
+          description: "[h1]Title[/h1] Adds a thing.",
+        },
+      ]),
+    );
+    const [mod] = (await app.inject({ method: "GET", url: "/api/mods/updates" })).json().mods;
+    expect(mod.previewUrl).toBe("https://images.example/thumb.jpg");
+    expect(mod.description).toBe("Title Adds a thing.");
+    expect(net.calls).toHaveLength(1);
+  });
+
+  it("reports an empty thumbnail and blurb for an id Steam does not know", async () => {
+    // Same condition as onWorkshop: false. An empty string, never undefined,
+    // so the client renders nothing rather than "undefined".
+    await installed("999", "Locally Known", "2026-01-01T00:00:00.000Z");
+    net.respondJson(detailsBody([{ id: "999", result: 9 }]));
+    const [mod] = (await app.inject({ method: "GET", url: "/api/mods/updates" })).json().mods;
+    expect(mod).toMatchObject({ onWorkshop: false, previewUrl: "", description: "" });
+  });
 });
 
 describe("GET /api/workshop/search", () => {
@@ -753,6 +781,7 @@ describe("GET /api/workshop/search", () => {
       id: "3731244177",
       title: "Safe Haven QOL",
       previewUrl: "https://images.example/a.jpg",
+      description: "",
       subscriptions: 4242,
       fileSize: 0,
       updatedAt: new Date(1_700_000_000 * 1000).toISOString(),

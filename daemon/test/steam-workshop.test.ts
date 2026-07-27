@@ -5,6 +5,8 @@ import {
   DETAILS_URL,
   QUERY_FILES_URL,
   REQUEST_TIMEOUT_MS,
+  DESCRIPTION_LIMIT,
+  toBlurb,
 } from "../src/steam-workshop.js";
 import { DEFAULT_CONFIG } from "../src/config.js";
 import { makeFakeFetch, detailsBody, type FakeFetch } from "./fixtures/fake-fetch.js";
@@ -28,6 +30,40 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+describe("toBlurb", () => {
+  it("leaves a description shorter than the cap exactly as it is", () => {
+    expect(toBlurb("Adds a fishing rod.")).toBe("Adds a fishing rod.");
+  });
+
+  it("collapses the CRLF runs Steam's descriptions are full of", () => {
+    expect(toBlurb("One\r\n\r\nTwo   Three")).toBe("One Two Three");
+  });
+
+  it("cuts on a word boundary rather than mid-word", () => {
+    const text = `${"alpha ".repeat(60)}omega`;
+    const out = toBlurb(text);
+    expect(out.endsWith("…")).toBe(true);
+    // Nothing half-typed: every word before the ellipsis is whole.
+    expect(out.slice(0, -1).trim().split(" ").every((w) => w === "alpha")).toBe(true);
+  });
+
+  it("still cuts at the cap when there is no word boundary to fall back on", () => {
+    const out = toBlurb("x".repeat(DESCRIPTION_LIMIT * 2));
+    expect(out.length).toBe(DESCRIPTION_LIMIT + 1);
+  });
+
+  it("treats a missing or non-string description as empty", () => {
+    expect(toBlurb(undefined)).toBe("");
+    expect(toBlurb(42)).toBe("");
+    expect(toBlurb("")).toBe("");
+  });
+
+  it("does not let an unmatched bracket eat the rest of the text", () => {
+    // Bounded tag pattern: prose containing a stray "[" keeps its words.
+    expect(toBlurb("Costs [ 5 gold and adds a shop")).toContain("gold and adds a shop");
+  });
 });
 
 /*
@@ -77,6 +113,32 @@ describe("getDetails", () => {
     expect(item).toMatchObject({ id: "111", title: "Safe Haven QOL", subscriptions: 42 });
     expect(item.updatedAt).toBe(new Date(1_700_000_000 * 1000).toISOString());
     expect(item.previewUrl).toMatch(/^https:/);
+  });
+
+  it("truncates the description before it can leave the daemon", async () => {
+    // The live server's eight mods carry ~19,000 chars of description between
+    // them, one of them 7,800 alone, and every badge check fetches all of them.
+    const huge = `${"word ".repeat(4000)}end`;
+    net.respondJson(detailsBody([{ id: "111", description: huge }]));
+    const [item] = await workshop.getDetails(["111"]);
+    expect(item.description.length).toBeLessThanOrEqual(DESCRIPTION_LIMIT + 1);
+    expect(item.description).not.toContain("end");
+  });
+
+  it("strips BBCode so the blurb is prose rather than markup", async () => {
+    net.respondJson(
+      detailsBody([{ id: "111", description: "[h1]Safe Haven[/h1]\r\n[hr][/hr]\r\n[*] Adds bars" }]),
+    );
+    const [item] = await workshop.getDetails(["111"]);
+    expect(item.description).toBe("Safe Haven Adds bars");
+  });
+
+  it("reports an empty description when Steam sent none", async () => {
+    net.respondJson({
+      response: { publishedfiledetails: [{ publishedfileid: "111", result: 1, title: "A" }] },
+    });
+    const [item] = await workshop.getDetails(["111"]);
+    expect(item.description).toBe("");
   });
 
   it("drops an id Steam reports a non-1 result for rather than inventing a blank entry", async () => {
@@ -176,8 +238,46 @@ describe("search", () => {
     expect(u.searchParams.get("numperpage")).toBe("5");
     expect(u.searchParams.get("cursor")).toBe("*");
     expect(u.searchParams.get("return_metadata")).toBe("true");
+    // Asks Steam for its own trimmed blurb rather than the full BBCode body.
+    expect(u.searchParams.get("return_short_description")).toBe("true");
     // 0 = ranked by vote, which is what a typed query should rank by.
     expect(u.searchParams.get("query_type")).toBe("0");
+  });
+
+  it("prefers Steam's short_description when it sends one", async () => {
+    cfg.steamApiKey = FAKE_KEY;
+    net.respondJson({
+      response: {
+        total: 1,
+        publishedfiledetails: [
+          {
+            publishedfileid: "1",
+            title: "A",
+            short_description: "The short one.",
+            description: "[h1]The very long one[/h1]",
+          },
+        ],
+      },
+    });
+    const { items } = await workshop.search({ text: "a" });
+    expect(items[0].description).toBe("The short one.");
+  });
+
+  it("falls back to the full description if Steam ignores the short flag", async () => {
+    // The flag is a bandwidth saving on Steam's side, not something the output
+    // shape depends on - GetPublishedFileDetails never sends a short form at
+    // all, and that path has to produce the same kind of blurb.
+    cfg.steamApiKey = FAKE_KEY;
+    net.respondJson({
+      response: {
+        total: 1,
+        publishedfiledetails: [
+          { publishedfileid: "1", title: "A", description: "[h1]Only the long one[/h1]" },
+        ],
+      },
+    });
+    const { items } = await workshop.search({ text: "a" });
+    expect(items[0].description).toBe("Only the long one");
   });
 
   it("ranks by trend and omits search_text when browsing with no query", async () => {

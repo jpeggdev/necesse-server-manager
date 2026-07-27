@@ -14,6 +14,8 @@ const updateAvailable = [
   {
     id: "3731244177",
     title: "Safe Haven QOL",
+    previewUrl: "https://images.steamusercontent.com/ugc/1/abc.jpg",
+    description: "Custom stat bars, cooldown icons and a better map.",
     workshopUpdatedAt: "2026-07-27T00:00:00.000Z",
     installedAt: "2026-07-26T00:00:00.000Z",
     onWorkshop: true,
@@ -144,6 +146,51 @@ describe("ModsPanel update badges", () => {
     // The id and jar stay in the tooltip rather than growing the row.
     expect(row?.textContent).not.toContain("3731244177");
     expect(row?.textContent).not.toContain("SafeHavenQOL-1.2.0-2.6.jar");
+  });
+});
+
+describe("ModsPanel thumbnails and descriptions", () => {
+  it("shows the workshop thumbnail on the mod's row", () => {
+    setup({ updates: updateAvailable });
+    const img = screen.getByText("Safe Haven QOL").closest("li")?.querySelector("img");
+    expect(img?.getAttribute("src")).toBe(updateAvailable[0].previewUrl);
+    // Decorative - the name is right beside it.
+    expect(img?.getAttribute("alt")).toBe("");
+  });
+
+  it("puts the description in the row's tooltip, never on the row itself", () => {
+    // The user asked twice for a less squished list. A description under every
+    // name is exactly what that ruled out.
+    setup({ updates: updateAvailable });
+    const row = screen.getByText("Safe Haven QOL").closest("li");
+    expect(row?.getAttribute("title")).toContain(updateAvailable[0].description);
+    expect(row?.textContent).not.toContain(updateAvailable[0].description);
+  });
+
+  it("keeps the row one line: the thumbnail is a fixed box beside the name", () => {
+    setup({ updates: updateAvailable });
+    const row = screen.getByText("Safe Haven QOL").closest("li");
+    // X button, thumb, name, badge - and no description or id text.
+    expect(row?.textContent).not.toContain("3731244177");
+    expect(row?.querySelectorAll("img")).toHaveLength(1);
+  });
+
+  it("reserves the thumbnail slot for a mod Steam has no entry for, keeping names aligned", () => {
+    setup({
+      updates: [{ ...updateAvailable[0], onWorkshop: false, previewUrl: "", description: "" }],
+    });
+    const row = screen.getByText("Safe Haven QOL").closest("li");
+    expect(row?.querySelector("img")).toBeNull();
+    expect(row?.querySelector(".mod-thumb-empty")).toBeTruthy();
+  });
+
+  it("adds no thumbnail column at all when the update check has not landed", () => {
+    // A Steam outage must leave the list exactly as it was before thumbnails
+    // existed, not add a column of empty boxes.
+    setup({ updates: null });
+    const row = screen.getByText("Safe Haven QOL").closest("li");
+    expect(row?.querySelector(".mod-thumb")).toBeNull();
+    expect(screen.getByText("Safe Haven QOL").closest("ul")?.className).not.toContain("with-thumbs");
   });
 });
 

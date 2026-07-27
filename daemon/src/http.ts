@@ -443,6 +443,12 @@ export function buildServer(deps: Deps): FastifyInstance {
       return {
         id: m.id,
         title: item !== undefined && item.title.length > 0 ? item.title : m.name,
+        // Free: the WorkshopItem this route already fetched to compare
+        // timestamps carries both, so the client gets mod-list thumbnails and
+        // descriptions for no additional Steam traffic. Empty when Steam had
+        // no usable entry, which is the same condition as onWorkshop: false.
+        previewUrl: item?.previewUrl ?? "",
+        description: item?.description ?? "",
         workshopUpdatedAt: item?.updatedAt ?? null,
         installedAt: m.lastUpdated,
         onWorkshop: item !== undefined,
