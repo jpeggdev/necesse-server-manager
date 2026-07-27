@@ -10,7 +10,10 @@ export async function listWorlds(worldsDir: string): Promise<WorldInfo[]> {
   let entries;
   try {
     entries = await readdir(worldsDir, { withFileTypes: true });
-  } catch {
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw new Error(`Failed to read worlds directory at ${worldsDir}: ${(e as Error).message}`);
+    }
     return [];
   }
   const out: WorldInfo[] = [];
