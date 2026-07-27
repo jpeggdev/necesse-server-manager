@@ -6,7 +6,7 @@
 // with the real makeApi() over real HTTP. Never point this at the live
 // daemon on the LAN - temp dirs + a fake spawn only.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, mkdir } from "node:fs/promises";
+import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildServer } from "../../daemon/src/http.js";
@@ -20,9 +20,10 @@ import { makeApi } from "../src/api";
 
 let app: ReturnType<typeof buildServer>;
 let baseUrl: string;
+let root: string;
 
 beforeEach(async () => {
-  const root = await mkdtemp(join(tmpdir(), "necesse-client-http-"));
+  root = await mkdtemp(join(tmpdir(), "necesse-client-http-"));
   const modsDir = join(root, "mods");
   const worldsDir = join(root, "worlds");
   await mkdir(modsDir, { recursive: true });
@@ -38,7 +39,13 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await app.close();
+  // try/finally so a throwing app.close() can't strand the temp dir, and a
+  // failing rm() can't skip closing the listener.
+  try {
+    await app.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 describe("makeApi against a real daemon instance", () => {
