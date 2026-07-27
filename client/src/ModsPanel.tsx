@@ -33,8 +33,10 @@ export function ModsPanel({ mods, busy, running, onAdd, onRemove, onUpdateAll }:
         {mods.managed.map((m) => (
           <li key={m.id}>
             <span className="mod-name">{m.name}</span>
-            <span className="mod-id">{m.id}</span>
-            <span className="mod-jar">{m.jar}</span>
+            <div className="mod-meta">
+              <span className="mod-id">{m.id}</span>
+              <span className="mod-jar">{m.jar}</span>
+            </div>
             <button
               className="x"
               aria-label={`Remove ${m.name}`}
@@ -48,7 +50,9 @@ export function ModsPanel({ mods, busy, running, onAdd, onRemove, onUpdateAll }:
         {mods.untracked.map((u) => (
           <li key={u.jar} className="untracked">
             <span className="mod-name">{u.jar}</span>
-            <span className="mod-id">untracked &mdash; no workshop id, cannot be updated</span>
+            <div className="mod-meta">
+              <span className="mod-id">untracked &mdash; no workshop id, cannot be updated</span>
+            </div>
           </li>
         ))}
       </ul>

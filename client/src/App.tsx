@@ -3,9 +3,15 @@ import { ServerHeader } from "./ServerHeader";
 import { ModsPanel } from "./ModsPanel";
 import { ConsolePanel } from "./ConsolePanel";
 import { ErrorBanner } from "./ErrorBanner";
+import { Splitter } from "./Splitter";
 import { useDaemon } from "./useDaemon";
 import { DaemonError, STOP_TIMEOUT_STATUS } from "./api";
 import "./App.css";
+
+const MODS_WIDTH_KEY = "necesse.modsWidth";
+const MODS_WIDTH_DEFAULT = 432;
+const MODS_WIDTH_MIN = 300;
+const MODS_WIDTH_MAX = 900;
 
 export default function App() {
   const {
@@ -33,6 +39,15 @@ export default function App() {
   // one failure that leaves the header with no usable control, so it is what
   // unlocks Force kill.
   const [stopTimedOut, setStopTimedOut] = useState(false);
+
+  const [modsWidth, setModsWidth] = useState(() => {
+    const saved = Number(localStorage.getItem(MODS_WIDTH_KEY));
+    return Number.isFinite(saved) && saved > 0 ? saved : MODS_WIDTH_DEFAULT;
+  });
+  const resizeMods = useCallback((w: number) => {
+    setModsWidth(w);
+    localStorage.setItem(MODS_WIDTH_KEY, String(w));
+  }, []);
 
   // Cleared the moment the daemon leaves `stopping`, however it got there: the
   // server finally finished saving, the kill landed, or a new run started. A
@@ -130,13 +145,21 @@ export default function App() {
         onUpdateServer={guard(() => api.updateServer())}
       />
       <div className="body">
-        <ModsPanel
-          mods={mods}
-          busy={busy}
-          running={running}
-          onAdd={(id, name) => guard(() => api.addMod(id, name))()}
-          onRemove={(id) => guard(() => api.removeMod(id))()}
-          onUpdateAll={guard(() => api.updateAllMods())}
+        <div className="mods-pane" style={{ width: modsWidth }}>
+          <ModsPanel
+            mods={mods}
+            busy={busy}
+            running={running}
+            onAdd={(id, name) => guard(() => api.addMod(id, name))()}
+            onRemove={(id) => guard(() => api.removeMod(id))()}
+            onUpdateAll={guard(() => api.updateAllMods())}
+          />
+        </div>
+        <Splitter
+          width={modsWidth}
+          min={MODS_WIDTH_MIN}
+          max={MODS_WIDTH_MAX}
+          onResize={resizeMods}
         />
         <ConsolePanel lines={lines} />
       </div>
