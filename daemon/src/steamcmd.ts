@@ -63,23 +63,29 @@ export class SteamCmd {
     }
     return new Promise<SteamCmdResult>((resolve) => {
       const collected: string[] = [];
-      let pending = "";
-      const ingest = (buf: Buffer | string) => {
-        pending += buf.toString();
-        const parts = pending.split("\n");
-        pending = parts.pop() ?? "";
+      // stdout and stderr arrive with no ordering guarantee between them, so
+      // each needs its own partial-line buffer or an incomplete line on one
+      // stream can absorb a chunk that arrived on the other.
+      const pending = { out: "", err: "" };
+      const ingest = (stream: "out" | "err") => (buf: Buffer | string) => {
+        pending[stream] += buf.toString();
+        const parts = pending[stream].split("\n");
+        pending[stream] = parts.pop() ?? "";
         for (const raw of parts) {
           const line = raw.replace(/\r$/, "");
           collected.push(line);
           onLine(line);
         }
       };
-      child.stdout.on("data", ingest);
-      child.stderr.on("data", ingest);
+      child.stdout.on("data", ingest("out"));
+      child.stderr.on("data", ingest("err"));
       child.on("exit", (code) => {
-        if (pending.length > 0) {
-          collected.push(pending);
-          onLine(pending);
+        for (const leftover of [pending.out, pending.err]) {
+          if (leftover.length > 0) {
+            const line = leftover.replace(/\r$/, "");
+            collected.push(line);
+            onLine(line);
+          }
         }
         resolve({ ok: code === 0, exitCode: code, output: collected.join("\n") });
       });

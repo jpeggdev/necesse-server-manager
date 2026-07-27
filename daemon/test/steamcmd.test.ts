@@ -82,4 +82,42 @@ describe("downloadWorkshopItem", () => {
       /steamcmd.exe.*ENOENT/s,
     );
   });
+
+  it("keeps stdout and stderr partial lines separate", async () => {
+    const seen: string[] = [];
+    const p = steam.downloadWorkshopItem("123", (l) => seen.push(l));
+    const c = spawn.calls[0].child;
+    c.stdout.emit("data", Buffer.from("Downloading item 123"));
+    c.stderr.emit("data", Buffer.from("Redirecting stderr to log\r\n"));
+    c.stdout.emit("data", Buffer.from(" complete\r\n"));
+    c.exit(0);
+    const r = await p;
+    expect(seen).toContain("Redirecting stderr to log");
+    expect(seen).toContain("Downloading item 123 complete");
+    expect(seen).not.toContain("Downloading item 123Redirecting stderr to log");
+    expect(r.output).not.toContain("Downloading item 123Redirecting stderr to log");
+  });
+
+  it("strips a trailing carriage return from an unterminated final line", async () => {
+    const seen: string[] = [];
+    const p = steam.downloadWorkshopItem("123", (l) => seen.push(l));
+    const c = spawn.calls[0].child;
+    c.stdout.emit("data", Buffer.from("Final line\r"));
+    c.exit(0);
+    const r = await p;
+    expect(seen).toContain("Final line");
+    expect(r.output).toContain("Final line");
+    expect(r.output).not.toContain("Final line\r");
+  });
+
+  it("emits the final line even when the process exits with no trailing newline", async () => {
+    const seen: string[] = [];
+    const p = steam.downloadWorkshopItem("123", (l) => seen.push(l));
+    const c = spawn.calls[0].child;
+    c.stdout.emit("data", Buffer.from("Success without newline"));
+    c.exit(0);
+    const r = await p;
+    expect(seen).toContain("Success without newline");
+    expect(r.output).toContain("Success without newline");
+  });
 });
