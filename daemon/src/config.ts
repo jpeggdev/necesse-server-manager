@@ -29,6 +29,17 @@ export const DEFAULT_CONFIG: DaemonConfig = {
   steamApiKey: "",
 };
 
+/**
+ * A BOM is compared by code point rather than written as a string literal:
+ * an invisible character in source is unreadable, and an escape for one is
+ * easy to mangle into a literal backslash while editing.
+ */
+const BOM_CODE_POINT = 0xfeff;
+
+function stripBom(text: string): string {
+  return text.charCodeAt(0) === BOM_CODE_POINT ? text.slice(1) : text;
+}
+
 export async function loadConfig(file: string): Promise<DaemonConfig> {
   let raw: string;
   try {
@@ -43,7 +54,10 @@ export async function loadConfig(file: string): Promise<DaemonConfig> {
   }
   let parsed: Partial<DaemonConfig>;
   try {
-    parsed = JSON.parse(raw);
+    // Hand-editing this file on Windows is the documented way to set the Steam
+    // key, and Notepad, VS Code and PowerShell's Set-Content -Encoding UTF8 all
+    // add a BOM that JSON.parse rejects. Tolerate it rather than refuse to boot.
+    parsed = JSON.parse(stripBom(raw));
   } catch (e) {
     throw new Error(`Failed to parse config at ${file}: ${(e as Error).message}`);
   }

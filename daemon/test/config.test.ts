@@ -46,6 +46,19 @@ describe("config", () => {
     expect((await loadConfig(file)).lastWorld).toBe("Infected Toenail");
   });
 
+  it("loads a config written with a UTF-8 BOM, as Windows editors produce", async () => {
+    // Notepad, VS Code and PowerShell's `Set-Content -Encoding UTF8` all emit a
+    // BOM. Hand-editing this file on the server is the documented way to set the
+    // Steam key, and a BOM used to stop the daemon booting at all.
+    const file = join(await tmp(), "config.json");
+    const bom = String.fromCharCode(0xfeff);
+    await writeFile(file, bom + JSON.stringify({ owners: ["Jeff"], steamApiKey: "abc" }), "utf8");
+    const cfg = await loadConfig(file);
+    expect(cfg.owners).toEqual(["Jeff"]);
+    expect(cfg.steamApiKey).toBe("abc");
+    expect(cfg.port).toBe(DEFAULT_CONFIG.port);
+  });
+
   it("throws with the file path in the message on malformed JSON", async () => {
     const file = join(await tmp(), "config.json");
     await writeFile(file, "{ not json");
