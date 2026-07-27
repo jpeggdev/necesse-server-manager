@@ -169,19 +169,31 @@ export function WorldSettingsDialog({
   }, []);
 
   /**
-   * Number boxes holding no number. An `input[type=number]` reports an empty
-   * string both for a box the user cleared and for one they typed nonsense
-   * into, and an empty string is NOT a value: `Number("")` is 0, so treating
-   * it as one would send 0 for a field the user probably meant to leave alone.
-   * On `maxSettlersPerSettlement` or `droppedItemsLifeMinutes`, whose stored -1
+   * Number boxes the USER has emptied. An `input[type=number]` reports an empty
+   * string both for a box that was cleared and for one typed nonsense into, and
+   * an empty string is NOT a value: `Number("")` is 0, so treating it as one
+   * would send 0 for a field the user probably meant to leave alone. On
+   * `maxSettlersPerSettlement` or `droppedItemsLifeMinutes`, whose stored -1
    * means "no limit", that 0 is in range, the daemon accepts it, and somebody's
-   * world silently goes from unlimited to none. So a blank box blocks the save
-   * and sends nothing, rather than being guessed at from either end.
+   * world silently goes from unlimited to none.
+   *
+   * `!storedIsUnreadable` is what keeps this from punishing the operator for
+   * their own file. `value` is the file's raw text and `type` comes from the
+   * key name, so a line a mod or an old hand-edit left as
+   * `maxSettlersPerSettlement = ` arrives as an int holding "". Blocking on
+   * that would disable Save for the whole dialog on open, over a field nobody
+   * touched - and the only way out would be typing a number into it, which
+   * writes a value the operator never chose. The escape hatch would be worse
+   * than the bug. A box can only block the save if it HAD a readable number and
+   * no longer does, which is exactly the case where the user emptied it.
    */
   const blockedKeys = useMemo(
     () =>
       (fields ?? [])
-        .filter((f) => f.editable && isBlankNumber(f, draft[f.key] ?? f.value))
+        .filter(
+          (f) =>
+            f.editable && isBlankNumber(f, draft[f.key] ?? f.value) && !storedIsUnreadable(f),
+        )
         .map((f) => f.key),
     [fields, draft],
   );
@@ -201,7 +213,9 @@ export function WorldSettingsDialog({
       if (!f.editable) continue;
       const text = draft[f.key] ?? f.value;
       // A blank number box contributes nothing at all - not the old value,
-      // which the box no longer shows, and certainly not a made-up one.
+      // which the box no longer shows, and certainly not a made-up one. This
+      // covers the file's own unreadable lines too: they are left untouched
+      // rather than "corrected" into whatever Number() makes of them.
       if (isBlankNumber(f, text)) continue;
       if (isSameAsFile(f, text)) continue;
       out[f.key] = toWire(f, text);
@@ -266,7 +280,7 @@ export function WorldSettingsDialog({
                   field={f}
                   text={draft[f.key] ?? f.value}
                   disabled={saving}
-                  blank={blockedKeys.includes(f.key)}
+                  blocking={blockedKeys.includes(f.key)}
                   onChange={(v) => setDraft((d) => ({ ...d, [f.key]: v }))}
                 />
               ))}
@@ -313,25 +327,36 @@ interface FieldRowProps {
   field: WorldSettingField;
   text: string;
   disabled: boolean;
-  /** This field's number box is empty, so it holds no value to save. */
-  blank: boolean;
+  /** The user emptied a box that held a readable number, so the save is blocked on it. */
+  blocking: boolean;
   onChange: (value: string) => void;
 }
 
-function FieldRow({ field, text, disabled, blank, onChange }: FieldRowProps) {
+function FieldRow({ field, text, disabled, blocking, onChange }: FieldRowProps) {
   const id = `ws-${field.key}`;
-  const note = fieldNote(field);
+  // A numeric line the FILE itself leaves blank or unreadable, still showing
+  // exactly what the file has. Distinct from `blocking` in both directions:
+  // this one never blocks a save, and it must never be worded as though the
+  // user had emptied something or could put something back.
+  const unreadableInFile = storedIsUnreadable(field) && isBlankNumber(field, text);
   return (
     <div className={field.type === null ? "ws-row ws-row-mod" : "ws-row"}>
       <label htmlFor={id}>{field.key}</label>
-      {renderControl(field, id, text, disabled, blank, onChange)}
-      {blank ? (
+      {renderControl(field, id, text, disabled, blocking, onChange)}
+      {blocking ? (
         <p className="hint hint-bad ws-note">
           Left empty, so there is nothing to save for it. Type a number, or put back the stored{" "}
           {field.value}.
         </p>
+      ) : unreadableInFile ? (
+        <p className="hint hint-warn ws-note">
+          This world&apos;s file has no readable number here (
+          {field.value.trim().length === 0 ? "the line is empty" : `it says "${field.value}"`}). It
+          is left exactly as it is unless you type a number, and a number you type is a new value
+          rather than a restored one.
+        </p>
       ) : (
-        note !== null && <p className="hint ws-note">{note}</p>
+        fieldNote(field) !== null && <p className="hint ws-note">{fieldNote(field)}</p>
       )}
     </div>
   );
@@ -342,7 +367,7 @@ function renderControl(
   id: string,
   text: string,
   disabled: boolean,
-  blank: boolean,
+  blocking: boolean,
   onChange: (value: string) => void,
 ) {
   // `editable` is the daemon's verdict and the only thing that decides this.
@@ -395,7 +420,9 @@ function renderControl(
           max={field.max}
           step={field.type === "int" ? 1 : "any"}
           disabled={disabled}
-          aria-invalid={blank}
+          // Only when the user emptied it. A line the file itself left
+          // unreadable is not the operator's error to be flagged for.
+          aria-invalid={blocking}
           onChange={(e) => onChange(e.target.value)}
         />
       );
@@ -438,6 +465,20 @@ function isBlankNumber(field: WorldSettingField, text: string): boolean {
   if (field.type !== "int" && field.type !== "float") return false;
   const trimmed = text.trim();
   return trimmed.length === 0 || !Number.isFinite(Number(trimmed));
+}
+
+/**
+ * Whether the FILE's own text for a numeric field is not a number.
+ *
+ * `value` is raw file text and `type` is looked up by key name, so the daemon
+ * will report `maxSettlersPerSettlement = ` as an int whose value is "". That
+ * is a pre-existing state of somebody's world, not something the operator did,
+ * and the editor's job is to leave it alone and say so - never to block the
+ * dialog over it, and never to invite the user to "restore" a value that was
+ * never there.
+ */
+function storedIsUnreadable(field: WorldSettingField): boolean {
+  return isBlankNumber(field, field.value);
 }
 
 /**

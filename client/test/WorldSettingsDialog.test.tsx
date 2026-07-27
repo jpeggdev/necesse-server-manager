@@ -257,6 +257,76 @@ describe("WorldSettingsDialog", () => {
       await waitFor(() => expect(save).toHaveBeenCalledWith("Tulsa", { maxSettlersPerSettlement: 5 }));
     });
 
+    /*
+     * The daemon reports `value` as raw file text and `type` from the schema by
+     * key name, so a cfg line a mod or an old hand-edit left as
+     * `maxSettlersPerSettlement = ` arrives as an int holding "". Blocking on
+     * that would disable Save on open over a field nobody touched, and the only
+     * way out would be typing a number into it - writing a value the operator
+     * never chose into their world, to save an unrelated change. The guard must
+     * not be reachable that way.
+     */
+    describe("when the file's own value is already unreadable", () => {
+      const brokenFields = FIELDS.map((f) =>
+        f.key === "maxSettlersPerSettlement" ? { ...f, value: "" } : f,
+      );
+      const openBroken = (value: string) =>
+        openDialog({
+          load: vi.fn(async () =>
+            response(
+              FIELDS.map((f) => (f.key === "maxSettlersPerSettlement" ? { ...f, value } : f)),
+            ),
+          ),
+        });
+
+      it("does not block saving an unrelated field, and sends nothing for it", async () => {
+        const { save } = await openDialog({ load: vi.fn(async () => response(brokenFields)) });
+        await userEvent.click(screen.getByLabelText("allowCheats"));
+        expect(screen.getByRole("button", { name: /^save$/i })).toBeEnabled();
+        await userEvent.click(screen.getByRole("button", { name: /^save$/i }));
+        await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+        expect(save).toHaveBeenCalledWith("Tulsa", { allowCheats: true });
+      });
+
+      it("does not block on a value that is present but not a number either", async () => {
+        const { save } = await openBroken("lots");
+        await userEvent.click(screen.getByLabelText("allowCheats"));
+        await userEvent.click(screen.getByRole("button", { name: /^save$/i }));
+        await waitFor(() => expect(save).toHaveBeenCalledWith("Tulsa", { allowCheats: true }));
+      });
+
+      it("says the file is unreadable there without blaming the operator or offering a restore", async () => {
+        await openDialog({ load: vi.fn(async () => response(brokenFields)) });
+        expect(screen.getByText(/no readable number here/i)).toBeTruthy();
+        expect(screen.getByText(/the line is empty/i)).toBeTruthy();
+        // It must say a typed number is a NEW value, not a restored one...
+        expect(screen.getByText(/a new value rather than a restored one/i)).toBeTruthy();
+        // ...and must never use the wording that assumes the user emptied it.
+        expect(screen.queryByText(/put back the stored/i)).toBeNull();
+        // Not flagged as the operator's invalid input either.
+        expect(screen.getByLabelText("maxSettlersPerSettlement")).not.toHaveAttribute(
+          "aria-invalid",
+          "true",
+        );
+      });
+
+      it("quotes what the file actually says when it is not empty", async () => {
+        await openBroken("lots");
+        expect(screen.getByText(/it says "lots"/i)).toBeTruthy();
+      });
+
+      it("still sends a number the user deliberately types into it", async () => {
+        const { save } = await openDialog({ load: vi.fn(async () => response(brokenFields)) });
+        fireEvent.change(screen.getByLabelText("maxSettlersPerSettlement"), {
+          target: { value: "12" },
+        });
+        await userEvent.click(screen.getByRole("button", { name: /^save$/i }));
+        await waitFor(() =>
+          expect(save).toHaveBeenCalledWith("Tulsa", { maxSettlersPerSettlement: 12 }),
+        );
+      });
+    });
+
     it("is not confused with a field genuinely set to zero", async () => {
       const { save } = await openDialog();
       fireEvent.change(screen.getByLabelText("maxSettlersPerSettlement"), { target: { value: "0" } });
@@ -374,27 +444,67 @@ describe("WorldSettingsDialog", () => {
    * pull it back, so the escape is permanent rather than a one-key detour.
    */
   describe("focus containment", () => {
-    it("keeps Shift+Tab inside, from the very state it opens in", async () => {
-      const { trigger } = await openDialog();
-      const dialog = screen.getByRole("dialog");
-      await userEvent.tab({ shift: true });
-      expect(dialog.contains(document.activeElement)).toBe(true);
-      expect(document.activeElement).not.toBe(trigger);
-      expect(document.activeElement).not.toBe(document.body);
+    /**
+     * Removes the focusin safety net for the duration of a test.
+     *
+     * Without this the Tab tests prove nothing about the Tab handling: focusin
+     * catches an escape a few microseconds later and the assertion passes over
+     * a dialog whose keyboard handling is broken. That is not hypothetical -
+     * it is why the first version of these tests stayed green against the bug
+     * they were written for.
+     */
+    function suppressFocusinGuard() {
+      const real = document.addEventListener.bind(document);
+      const spy = vi
+        .spyOn(document, "addEventListener")
+        .mockImplementation(((type: string, listener: EventListener, options?: unknown) => {
+          if (type === "focusin") return;
+          real(type, listener, options as AddEventListenerOptions);
+        }) as unknown as typeof document.addEventListener);
+      return () => spy.mockRestore();
+    }
+
+    it("opens focus on the first control, not on the dialog container", async () => {
+      // The container is neither the first focusable nor the last, so focus
+      // parked on it matches no wrap rule and Shift+Tab walks straight out.
+      await openDialog();
+      expect(document.activeElement).not.toBe(screen.getByRole("dialog"));
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close" }));
     });
 
-    it("keeps Tab inside for a full cycle in both directions", async () => {
-      await openDialog();
-      const dialog = screen.getByRole("dialog");
-      // More presses than there are controls, so the wrap at each end is
-      // crossed rather than just approached.
-      for (let i = 0; i < 14; i++) {
-        await userEvent.tab();
-        expect(dialog.contains(document.activeElement)).toBe(true);
-      }
-      for (let i = 0; i < 14; i++) {
+    it("keeps Shift+Tab inside from the state it opens in, on the keydown handling alone", async () => {
+      const restore = suppressFocusinGuard();
+      try {
+        const { trigger } = await openDialog();
+        const dialog = screen.getByRole("dialog");
         await userEvent.tab({ shift: true });
         expect(dialog.contains(document.activeElement)).toBe(true);
+        expect(document.activeElement).not.toBe(trigger);
+        expect(document.activeElement).not.toBe(document.body);
+      } finally {
+        restore();
+      }
+    });
+
+    it("keeps Tab inside for a full cycle in both directions, on the keydown handling alone", async () => {
+      const restore = suppressFocusinGuard();
+      try {
+        const { trigger } = await openDialog();
+        const dialog = screen.getByRole("dialog");
+        // More presses than there are controls, so the wrap at each end is
+        // crossed rather than just approached.
+        for (let i = 0; i < 14; i++) {
+          await userEvent.tab();
+          expect(dialog.contains(document.activeElement)).toBe(true);
+          expect(document.activeElement).not.toBe(trigger);
+        }
+        for (let i = 0; i < 14; i++) {
+          await userEvent.tab({ shift: true });
+          expect(dialog.contains(document.activeElement)).toBe(true);
+          expect(document.activeElement).not.toBe(trigger);
+        }
+      } finally {
+        restore();
       }
     });
 
