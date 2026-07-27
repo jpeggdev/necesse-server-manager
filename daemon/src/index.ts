@@ -1,0 +1,40 @@
+import { spawn as nodeSpawn } from "node:child_process";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { loadConfig } from "./config.js";
+import { buildServer } from "./http.js";
+import { ModInstaller } from "./mod-installer.js";
+import { ModRegistry } from "./mod-registry.js";
+import { ProcessManager, type ChildLike, type SpawnFn } from "./process-manager.js";
+import { SteamCmd } from "./steamcmd.js";
+import { findOrphanServer, listJavaProcesses } from "./orphan.js";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const dataDir = join(here, "..");
+const configFile = join(dataDir, "config.json");
+const modsFile = join(dataDir, "mods.json");
+
+const spawnFn: SpawnFn = (cmd, args, opts) =>
+  nodeSpawn(cmd, args, {
+    cwd: opts.cwd,
+    windowsHide: true,
+    stdio: ["pipe", "pipe", "pipe"],
+  }) as unknown as ChildLike;
+
+const cfg = await loadConfig(configFile);
+const pm = new ProcessManager(cfg, spawnFn);
+const steam = new SteamCmd(cfg, spawnFn);
+const installer = new ModInstaller(cfg, new ModRegistry(modsFile), steam);
+
+const orphan = await findOrphanServer(listJavaProcesses, cfg.serverJar);
+if (orphan) {
+  pm.markUnmanaged(orphan.pid);
+  console.warn(
+    `A Necesse server (pid ${orphan.pid}) is already running and was not started by this daemon. ` +
+      `It cannot be stopped gracefully from here.`,
+  );
+}
+
+const app = buildServer({ cfg, configFile, pm, installer, steam });
+await app.listen({ host: "0.0.0.0", port: cfg.port });
+console.log(`necesse-daemon listening on 0.0.0.0:${cfg.port}`);
