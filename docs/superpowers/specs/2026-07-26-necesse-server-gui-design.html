@@ -1,0 +1,407 @@
+<meta charset="utf-8">
+<title>Necesse Server GUI - Design</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1a1a1a; --muted: #5f6b7a; --line: #e2e6ea;
+    --accent: #2f6f4f; --accent-bg: #eef6f1; --warn: #8a5a00; --warn-bg: #fdf6e7;
+    --code-bg: #f5f7f9; --card: #fafbfc;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171a; --fg: #e6e9ec; --muted: #9aa6b2; --line: #2b3138;
+      --accent: #6fd39b; --accent-bg: #17281f; --warn: #e0b25c; --warn-bg: #2a2113;
+      --code-bg: #1c2126; --card: #181c20;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.65 -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 62rem; margin: 0 auto; padding: 2.5rem 1.25rem 6rem; }
+  header h1 { margin: 0 0 .3rem; font-size: 1.9rem; letter-spacing: -.02em; }
+  header .sub { color: var(--muted); margin: 0 0 2rem; }
+  h2 {
+    font-size: 1.25rem; margin: 2.75rem 0 .85rem;
+    padding-bottom: .4rem; border-bottom: 2px solid var(--line);
+  }
+  h3 { font-size: 1.02rem; margin: 1.7rem 0 .5rem; }
+  p, li { color: var(--fg); }
+  code, pre { font-family: "Cascadia Code", Consolas, monospace; font-size: .875em; }
+  code { background: var(--code-bg); padding: .12em .35em; border-radius: 3px; }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--line); border-radius: 6px;
+    padding: .85rem 1rem; overflow-x: auto; line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; }
+  .tablewrap { overflow-x: auto; margin: 1rem 0; }
+  table { border-collapse: collapse; width: 100%; font-size: .92rem; }
+  th, td { text-align: left; padding: .5rem .7rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 600; color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+  td code { white-space: nowrap; }
+  .note, .warn {
+    border-left: 3px solid var(--accent); background: var(--accent-bg);
+    padding: .8rem 1rem; border-radius: 0 5px 5px 0; margin: 1.1rem 0;
+  }
+  .warn { border-left-color: var(--warn); background: var(--warn-bg); }
+  .note p:first-child, .warn p:first-child { margin-top: 0; }
+  .note p:last-child, .warn p:last-child { margin-bottom: 0; }
+  details {
+    border: 1px solid var(--line); border-radius: 6px; padding: .6rem .9rem;
+    margin: .7rem 0; background: var(--card);
+  }
+  details[open] { padding-bottom: .9rem; }
+  summary { cursor: pointer; font-weight: 600; }
+  .pill {
+    display: inline-block; font-size: .74rem; padding: .1rem .5rem; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--muted); margin-left: .4rem; vertical-align: middle;
+  }
+  .toc { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 1rem 1.25rem; }
+  .toc ol { margin: .3rem 0 0; padding-left: 1.3rem; columns: 2; column-gap: 2rem; }
+  .toc a { color: inherit; }
+  @media (max-width: 40rem) { .toc ol { columns: 1; } }
+</style>
+
+<div class="wrap">
+<header>
+  <h1>Necesse Server GUI</h1>
+  <p class="sub">Design document &middot; 2026-07-26 &middot; LAN client/server manager for a Necesse dedicated server</p>
+</header>
+
+<div class="toc">
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#goal">Goal &amp; scope</a></li>
+    <li><a href="#truth">Verified ground truth</a></li>
+    <li><a href="#arch">Architecture</a></li>
+    <li><a href="#lifecycle">Process lifecycle</a></li>
+    <li><a href="#mods">Mod management</a></li>
+    <li><a href="#update">Server updates</a></li>
+    <li><a href="#api">API</a></li>
+    <li><a href="#ui">Client UI</a></li>
+    <li><a href="#errors">Error handling</a></li>
+    <li><a href="#testing">Testing</a></li>
+    <li><a href="#deploy">Deployment</a></li>
+    <li><a href="#scope-out">Out of scope</a></li>
+  </ol>
+</div>
+
+<h2 id="goal">1. Goal &amp; scope</h2>
+
+<p>A desktop app on the workstation that manages the Necesse dedicated server running on a
+separate machine (<code>SERVER</code>, 192.168.1.106) over the LAN. It must start and stop the
+server, launch or create worlds by name, update the server binaries, manage the installed mod
+set by Steam Workshop id, and stream the server console live. Errors surface verbatim rather
+than as generic failures.</p>
+
+<h3>Success criteria</h3>
+<ul>
+  <li>Start a named world from the client; the console streams until the server reports ready.</li>
+  <li>Typing a world name that does not exist creates it, and the UI says so <em>before</em> launch.</li>
+  <li>Stop performs a graceful save-and-shutdown, not a process kill.</li>
+  <li>Adding a mod by workshop id downloads and installs it, replacing any prior jar for that id.</li>
+  <li>Update All refreshes every managed mod and reports per-mod outcome.</li>
+  <li>Any failure shows the underlying tool's own output.</li>
+</ul>
+
+<h2 id="truth">2. Verified ground truth</h2>
+
+<p>Every path below was read off <code>SERVER</code> over SSH on 2026-07-26, not assumed. The
+placeholder paths in the existing <code>Update-Necesse.ps1</code>
+(<code>C:\steamcmd</code>, <code>C:\Servers\Necesse</code>) do <strong>not</strong> exist.</p>
+
+<div class="tablewrap">
+<table>
+  <tr><th>Item</th><th>Value</th></tr>
+  <tr><td>Server host</td><td><code>SERVER</code> / 192.168.1.106, Windows 11 Pro, user <code>jeffp</code></td></tr>
+  <tr><td>Server root</td><td><code>C:\necesseserver\</code></td></tr>
+  <tr><td>Server jar</td><td><code>C:\necesseserver\Server.jar</code></td></tr>
+  <tr><td>Java</td><td><code>C:\necesseserver\jre\bin\java.exe</code> (bundled, 17.0.14)</td></tr>
+  <tr><td>steamcmd</td><td><code>C:\Users\jeffp\steam\steamcmd.exe</code></td></tr>
+  <tr><td>Necesse AppData</td><td><code>C:\Users\jeffp\AppData\Roaming\Necesse\</code></td></tr>
+  <tr><td>Mods dir</td><td><code>&lt;AppData&gt;\mods</code> (loaded by <code>ModsFolderModProvider</code>)</td></tr>
+  <tr><td>Worlds dir</td><td><code>&lt;AppData&gt;\saves\worlds\*.zip</code></td></tr>
+  <tr><td>Game port</td><td>14159, 5 slots (from <code>&lt;AppData&gt;\cfg\server.cfg</code>)</td></tr>
+  <tr><td>Dedicated server app id</td><td><code>1169370</code> &mdash; anonymous steamcmd</td></tr>
+  <tr><td>Workshop app id</td><td><code>1169040</code> &mdash; anonymous download confirmed working</td></tr>
+  <tr><td>Node on SERVER</td><td>Not installed; to be installed as part of deployment</td></tr>
+</div>
+
+<h3>The real launch line</h3>
+<p>Taken from <code>latest-server-log.txt</code>:</p>
+<pre><code>-nogui -world "Infected Toenail" -owner Jeff -owner Eli</code></pre>
+<p>The <code>-owner</code> flags grant owner permissions to any client connecting under that name.
+They are configuration, not hardcoded, and are passed on every start.</p>
+
+<h2 id="arch">3. Architecture</h2>
+
+<p>Two deliverables in one repo.</p>
+
+<h3>Daemon <span class="pill">Node + TypeScript, runs on SERVER</span></h3>
+<p>Owns all state and every side effect. Listens on port 8710 for HTTP and WebSocket. No
+authentication &mdash; the LAN is trusted, a deliberate choice recorded here because this API can
+stop processes and delete files.</p>
+
+<h3>Client <span class="pill">Tauri 2 + React/TS, runs on the workstation</span></h3>
+<p>A thin shell around a web UI. No Rust logic beyond window creation; all calls go from the
+webview to the daemon over HTTP and one WebSocket. The client holds no authoritative state, so
+closing it never affects the running game server, and a second client would see identical state.</p>
+
+<h3>Daemon modules</h3>
+<p>Each module has one purpose, a narrow interface, and injected dependencies so it is testable
+without a Necesse install.</p>
+
+<div class="tablewrap">
+<table>
+  <tr><th>Module</th><th>Responsibility</th><th>Depends on</th></tr>
+  <tr><td><code>config</code></td><td>Loads and persists <code>config.json</code>; the single source of truth for every path, JVM arg, owner list, and <code>lastWorld</code>.</td><td>fs</td></tr>
+  <tr><td><code>process-manager</code></td><td>Spawns the server, holds the stdin pipe, parses state transitions out of stdout, keeps a 2000-line ring buffer. Emits <code>line</code> and <code>state</code>.</td><td>injected <code>spawn</code>, config</td></tr>
+  <tr><td><code>worlds</code></td><td>Enumerates world zips with last-modified; answers "does this name already exist".</td><td>fs, config</td></tr>
+  <tr><td><code>mod-registry</code></td><td>Reads and writes <code>mods.json</code>: which workshop id owns which jar file.</td><td>fs</td></tr>
+  <tr><td><code>steamcmd</code></td><td>Runs steamcmd and streams its output. Knows only "download workshop item N" and "update app N". No knowledge of the registry.</td><td>injected <code>spawn</code>, config</td></tr>
+  <tr><td><code>mod-installer</code></td><td>Orchestrates download &rarr; copy jar &rarr; delete the previously recorded jar &rarr; update registry.</td><td>steamcmd, mod-registry, fs</td></tr>
+  <tr><td><code>http</code></td><td>Routes and WebSocket fan-out. Thin; delegates everything and translates thrown errors into responses.</td><td>all of the above</td></tr>
+</table>
+</div>
+
+<h2 id="lifecycle">4. Process lifecycle</h2>
+
+<div class="warn">
+<p><strong>Why the daemon must own the process.</strong> On Windows you cannot write to the stdin
+of a process you did not create. "Find the java process and send stop" is therefore impossible
+for a server started by anything else. The daemon spawns the server itself and holds the pipe for
+its lifetime.</p>
+</div>
+
+<h3>Start</h3>
+<p>Working directory must be the server root, since the server resolves its root path from cwd.</p>
+<pre><code>cwd: C:\necesseserver
+C:\necesseserver\jre\bin\java.exe
+  -XX:+UnlockExperimentalVMOptions -XX:+UseG1GC -XX:+ExplicitGCInvokesConcurrent
+  -XX:G1NewSizePercent=20 -XX:G1ReservePercent=20 -XX:MaxGCPauseMillis=50
+  -XX:G1HeapRegionSize=32M
+  -jar Server.jar -nogui -world "&lt;name&gt;" -owner Jeff -owner Eli</code></pre>
+
+<h3>State machine</h3>
+<p>States are driven by real log strings captured from the server's own output, not by guesses
+or timers.</p>
+
+<div class="tablewrap">
+<table>
+  <tr><th>State</th><th>Entered when</th></tr>
+  <tr><td><code>stopped</code></td><td>No child process.</td></tr>
+  <tr><td><code>starting</code></td><td>Child spawned. Mod loading happens here and can take tens of seconds.</td></tr>
+  <tr><td><code>running</code></td><td>A line matches <code>/^Started server using port (\d+) with (\d+) slots on world "(.+?)"/</code>.</td></tr>
+  <tr><td><code>stopping</code></td><td><code>stop\n</code> written to stdin.</td></tr>
+  <tr><td><code>unmanaged</code></td><td>A Necesse java process exists that this daemon did not spawn.</td></tr>
+  <tr><td><code>crashed</code></td><td>Child exited with a nonzero code without passing through <code>stopping</code>.</td></tr>
+</table>
+</div>
+
+<details>
+<summary>Log strings this design relies on</summary>
+<pre><code>Loading existing world at ...\saves\worlds\Infected Toenail.zip
+Started server using port 14159 with 5 slots on world "Infected Toenail.zip", game version 1.2.0.
+Local address: 192.168.1.106:14159
+&gt; stop
+Completed world save before stopping server
+Server has stopped</code></pre>
+<p><code>Loading existing world</code> confirms after the fact whether a world was loaded or newly
+created, which the client displays so a typo that created a world is immediately visible.</p>
+</details>
+
+<h3>Stop</h3>
+<p>Write <code>stop\n</code> to stdin, then wait for exit with a 90-second timeout. The server saves
+the world before exiting, so this must never be shortcut. On timeout the daemon reports that the
+process did not exit and offers a kill as an explicit, separately confirmed action &mdash; it never
+escalates on its own.</p>
+
+<h3>The unmanaged case</h3>
+<p>On startup the daemon scans for a running <code>java.exe</code> whose command line references
+<code>Server.jar</code>. If found, state is <code>unmanaged</code>: the client shows that the server
+is up but not controllable, and the only offered action is a hard kill labelled as risking
+world loss. The daemon does not pretend it can stop it gracefully.</p>
+
+<h2 id="mods">5. Mod management</h2>
+
+<h3>The problem with the current script</h3>
+<p><code>Update-Necesse.ps1</code> copies every jar it finds into the mods folder. When a mod's
+version is in its filename &mdash; <code>SafeHavenQOL-1.2.0-2.6.jar</code> &rarr;
+<code>-2.7.jar</code> &mdash; the old jar stays behind and the server loads the mod twice. The
+registry exists to fix exactly this.</p>
+
+<h3>mods.json</h3>
+<pre><code>[
+  { "id": "3731244177", "name": "Safe Haven QOL",
+    "jar": "SafeHavenQOL-1.2.0-2.6.jar", "lastUpdated": "2026-07-26T04:24:00Z" }
+]</code></pre>
+
+<h3>Seeded registry</h3>
+<p>All eight jars on SERVER match the workstation's Steam workshop folder by exact filename, so
+the initial registry is derived, not guessed. Names come from the server log's own
+<code>Found mod:</code> lines.</p>
+
+<div class="tablewrap">
+<table>
+  <tr><th>Workshop id</th><th>Jar</th><th>Name</th></tr>
+  <tr><td><code>3532423990</code></td><td><code>AdvancedStarterKit-1.2.0-1.1.jar</code></td><td>Advanced Starter Kit</td></tr>
+  <tr><td><code>3268603061</code></td><td><code>AphoreaMod-1.2.0-1.0.38.jar</code></td><td>Aphorea Mod</td></tr>
+  <tr><td><code>3754847143</code></td><td><code>AutoTorch-1.0.jar</code></td><td>AutoTorch</td></tr>
+  <tr><td><code>3648675157</code></td><td><code>CorruptedRaidMod.jar</code></td><td>CorruptedRaidMod</td></tr>
+  <tr><td><code>3417452007</code></td><td><code>ExtendedRange-1.2.0-1.3.jar</code></td><td>Extended Range</td></tr>
+  <tr><td><code>3743512839</code></td><td><code>FishingOverhaul-1.2.0-1.0.1.jar</code></td><td>Fishing Overhaul</td></tr>
+  <tr><td><code>3531458136</code></td><td><code>NPCShopsExpanded-1.2.0-1.7.jar</code></td><td>NPC Shops Expanded</td></tr>
+  <tr><td><code>3731244177</code></td><td><code>SafeHavenQOL-1.2.0-2.6.jar</code></td><td>Safe Haven QOL</td></tr>
+</table>
+</div>
+
+<h3>Install / update one mod</h3>
+<pre><code>steamcmd +login anonymous +workshop_download_item 1169040 &lt;id&gt; +quit
+  &rarr; C:\Users\jeffp\steam\steamapps\workshop\content\1169040\&lt;id&gt;\*.jar</code></pre>
+<ol>
+  <li>Run steamcmd, streaming its output to the client as a task.</li>
+  <li>Locate the downloaded jar. If the folder holds no jar, fail with steamcmd's output attached.</li>
+  <li>Copy it into the mods dir.</li>
+  <li>If the registry recorded a different jar name for this id, delete that old jar.</li>
+  <li>Write the registry entry.</li>
+</ol>
+<p>Update All runs this per managed mod and reports each outcome individually &mdash; updated,
+already current, or failed with its error. One mod failing never aborts the rest.</p>
+
+<h3>Untracked jars</h3>
+<p>Any jar in the mods folder with no registry entry is listed as <em>untracked</em>: removable,
+but not updatable, and labelled as such. Adding a workshop id whose download produces a matching
+filename adopts that jar into the registry. Nothing is ever guessed into managed state.</p>
+
+<div class="note">
+<p><code>modlist.data</code> in the mods folder is Necesse's own enable/disable record, keyed by
+internal mod id rather than workshop id. The daemon does not write it; the server regenerates it.
+Mod enable/disable is out of scope for this version.</p>
+</div>
+
+<h3>Mods change only while stopped</h3>
+<p>The server reads its mod set once at startup. Mod mutations are refused while the server is
+running, with a message saying so, rather than silently taking effect at some unpredictable later
+point.</p>
+
+<h2 id="update">6. Server updates</h2>
+<pre><code>steamcmd +force_install_dir C:\necesseserver +login anonymous
+         +app_update 1169370 validate +quit</code></pre>
+<p>Anonymous, no credentials, because the dedicated server is a separate free app from the game.
+Output streams to the client as a task. If the server is running the request is refused with a
+clear message rather than shutting the game down as a side effect &mdash; stopping is the
+operator's decision.</p>
+
+<h2 id="api">7. API</h2>
+
+<div class="tablewrap">
+<table>
+  <tr><th>Endpoint</th><th>Returns / does</th></tr>
+  <tr><td><code>GET /api/status</code></td><td>State, current world, pid, uptime, ready-line details.</td></tr>
+  <tr><td><code>GET /api/worlds</code></td><td>World names with last-modified, plus <code>lastWorld</code>.</td></tr>
+  <tr><td><code>POST /api/server/start</code></td><td><code>{world}</code>. Replies immediately; progress arrives over the socket.</td></tr>
+  <tr><td><code>POST /api/server/stop</code></td><td>Graceful stdin stop.</td></tr>
+  <tr><td><code>POST /api/server/kill</code></td><td>Hard kill. Separate endpoint so it can never happen implicitly.</td></tr>
+  <tr><td><code>POST /api/server/update</code></td><td>Starts the steamcmd app update task.</td></tr>
+  <tr><td><code>GET /api/mods</code></td><td>Managed and untracked rows.</td></tr>
+  <tr><td><code>POST /api/mods</code></td><td><code>{id, name}</code> &mdash; download and install.</td></tr>
+  <tr><td><code>DELETE /api/mods/:id</code></td><td>Delete the jar and the registry entry.</td></tr>
+  <tr><td><code>POST /api/mods/update-all</code></td><td>Per-mod results.</td></tr>
+  <tr><td><code>GET /api/config</code> / <code>PUT /api/config</code></td><td>Read and edit owners, paths, JVM args.</td></tr>
+  <tr><td><code>WS /ws</code></td><td>Push channel.</td></tr>
+</table>
+</div>
+
+<h3>WebSocket messages</h3>
+<ul>
+  <li><code>console</code> &mdash; one server output line.</li>
+  <li><code>status</code> &mdash; a state transition with the new status payload.</li>
+  <li><code>task</code> &mdash; streamed output from a steamcmd operation, terminating in success or an error.</li>
+</ul>
+<p>On connect the client receives the ring buffer as backlog, so a client opened mid-session sees
+recent history rather than an empty console.</p>
+
+<h2 id="ui">8. Client UI</h2>
+
+<p>A single window, three regions.</p>
+
+<h3>Header</h3>
+<p>Status pill, world input, Start / Stop, Update Server.</p>
+<p>The world input is a <strong>free-text combobox</strong>, not a picker. Existing worlds appear as
+suggestions and the field is prefilled with <code>lastWorld</code>, but any typed name is passed
+straight through to <code>-world</code>. Because that creates a world when the name is unknown, the
+field shows a live indicator &mdash; "will load existing world" or "will create a new world" &mdash;
+so a typo is caught before launch rather than discovered as a mystery empty world afterwards.</p>
+
+<h3>Mods panel</h3>
+<p>Rows show name, workshop id, installed jar, and an X to remove. Untracked rows are visually
+distinct and lack an update affordance. Below the list, an add row taking id and name, and Update
+All. While the server is running the mutation controls are disabled with the reason shown.</p>
+
+<h3>Console</h3>
+<p>Live output with autoscroll that disengages when scrolled up and resumes on return to the
+bottom. Task output from steamcmd is interleaved and visually distinguished from game output.</p>
+
+<h2 id="errors">9. Error handling</h2>
+
+<p>Nothing is swallowed or reworded. Every route resolves to a result or
+<code>{ok: false, error}</code> carrying the underlying message &mdash; steamcmd's stderr, the spawn
+<code>ENOENT</code>, the missing jar. The client renders that text in a dismissible banner.</p>
+
+<p>Failures that must be distinguishable rather than collapsed into "failed":</p>
+<ul>
+  <li>steamcmd missing at the configured path, versus steamcmd running and failing.</li>
+  <li>Workshop download producing no jar, versus a copy failing.</li>
+  <li>Server exiting during <code>starting</code> &mdash; usually a bad mod &mdash; surfaced with the tail of the console, which is where the actual cause is.</li>
+  <li>Stop timing out, versus stop failing to write to stdin.</li>
+  <li>Daemon unreachable, distinguished by the client from an error returned by the daemon.</li>
+</ul>
+
+<h2 id="testing">10. Testing</h2>
+
+<p><code>process-manager</code>, <code>mod-registry</code>, <code>mod-installer</code>, and
+<code>steamcmd</code> receive <code>spawn</code> and their filesystem access as injected
+dependencies, so the full start / stop / install / update-all logic is unit-testable against a
+fake process emitting recorded log lines, with no Necesse install present.</p>
+
+<p>Covered by unit tests: state transitions against real captured log output, stop timeout, the
+stale-jar replacement path, update-all continuing past a single mod's failure, and steamcmd
+argument construction.</p>
+
+<div class="warn">
+<p><strong>Verification honesty.</strong> Unit tests exercise none of the real integration. Live
+verification runs against SERVER over SSH and must state which configuration was exercised: real
+start and stop of a real world, a real mod install, and a real app update. Anything not exercised
+&mdash; notably the <code>unmanaged</code> and <code>crashed</code> paths, which need a deliberately
+broken mod or an externally launched server &mdash; gets named explicitly as untested rather than
+implied covered by a green test run.</p>
+</div>
+
+<h2 id="deploy">11. Deployment</h2>
+
+<ol>
+  <li>Install Node LTS on SERVER over SSH via winget.</li>
+  <li>Copy the daemon to SERVER; write <code>config.json</code> with the verified paths and seed <code>mods.json</code> from the table above.</li>
+  <li>Open port 8710 inbound on SERVER's firewall.</li>
+  <li>Register a Scheduled Task to run the daemon at logon so the client can connect any time.</li>
+  <li>Build the Tauri client on the workstation, pointed at 192.168.1.106:8710.</li>
+</ol>
+
+<div class="note">
+<p>The Tauri webview must be allowed to reach the daemon's origin: the daemon sends permissive CORS
+headers and the client's CSP allows <code>http://192.168.1.106:8710</code> for both HTTP and
+WebSocket.</p>
+</div>
+
+<h2 id="scope-out">12. Out of scope</h2>
+<ul>
+  <li>Authentication &mdash; trusted LAN, chosen deliberately.</li>
+  <li>Arbitrary console commands; only <code>stop</code> is sent to stdin.</li>
+  <li>Player list and per-player admin actions.</li>
+  <li>Enabling/disabling mods without uninstalling (<code>modlist.data</code> is not written).</li>
+  <li>World backup, restore, and deletion.</li>
+  <li>Editing <code>server.cfg</code> (port, slots, password, MOTD).</li>
+  <li>Managing more than one server instance.</li>
+</ul>
+
+</div>
