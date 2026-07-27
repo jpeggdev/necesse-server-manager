@@ -29,7 +29,9 @@ Push-Location "$repo\daemon"
 try {
   npm ci
   if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }
-  npx tsc
+  # tsconfig.json is the typecheck config (src + test, noEmit); the emitting
+  # one is tsconfig.build.json. A bare `npx tsc` here would emit nothing.
+  npx tsc -p tsconfig.build.json
   if ($LASTEXITCODE -ne 0) { throw "tsc build failed" }
 } finally {
   Pop-Location

@@ -5,6 +5,16 @@ import type { ModListResponse, StatusPayload, WsMessage } from "./types";
 export const DAEMON_BASE = "http://192.168.1.106:8710";
 const WS_URL = "ws://192.168.1.106:8710/ws";
 const CONSOLE_LIMIT = 2000;
+const WS_RETRY_MS = 2000;
+
+/**
+ * Consecutive failed websocket connection attempts before the UI stops
+ * presenting the situation as "still connecting" and says something is wrong.
+ * Three at the 2s retry is ~6 seconds, which is long enough to ride out a
+ * daemon restart or a flapping link without crying wolf, and short enough that
+ * nobody sits watching a spinner that is never going to resolve.
+ */
+export const WS_FAILURE_THRESHOLD = 3;
 
 export interface ConsoleEntry {
   line: string;
@@ -72,29 +82,66 @@ export function useDaemon(): DaemonState {
     });
   }, []);
 
+  /**
+   * Why a run of failed connections is worth an HTTP round trip: the two
+   * failures behind it need completely different actions from the operator,
+   * and spec 9 requires the client to tell them apart. If HTTP answers, the
+   * daemon is up and something in between is eating the WebSocket upgrade (a
+   * proxy, a firewall rule, antivirus TLS inspection) - the app will keep
+   * working for one-shot requests but will never show live console or status.
+   * If HTTP fails too, the daemon is simply not reachable, and fetch's own
+   * message says how. Either way the operator learns something; before this,
+   * both rendered as "Connecting to the daemon..." forever.
+   */
+  const diagnoseConnectFailure = useCallback(
+    async (attempts: number) => {
+      try {
+        await api.status();
+        setError(
+          `The daemon at ${DAEMON_BASE} answers over HTTP, but the live update socket at ` +
+            `${WS_URL} could not be opened after ${attempts} attempts. Console output and status ` +
+            `changes cannot arrive until it connects - check for a firewall or proxy blocking the ` +
+            `WebSocket upgrade.`,
+        );
+      } catch (e) {
+        setError((e as Error).message);
+      }
+    },
+    [api],
+  );
+
   useEffect(() => {
     let ws: WebSocket | null = null;
     let retry: ReturnType<typeof setTimeout> | null = null;
     let closed = false;
+    // Consecutive failures since the last successful open. Reset in onopen, so
+    // a socket that keeps opening and dropping (a daemon being restarted)
+    // never trips the threshold - only a run of attempts that never connect.
+    let failures = 0;
 
     const connect = () => {
       ws = new WebSocket(WS_URL);
       ws.onopen = () => {
+        failures = 0;
         setConnected(true);
         void refresh();
       };
       ws.onclose = () => {
+        // An unmount closes the socket itself; that is not a failed attempt.
+        if (closed) return;
         setConnected(false);
+        failures += 1;
+        if (failures >= WS_FAILURE_THRESHOLD) void diagnoseConnectFailure(failures);
         // Nothing task-related to unwind here: the reconnect's backlog (and
         // refresh()) carries the daemon's current activeTasks, so whatever
         // happened during the outage is resolved by re-reading the truth
         // rather than by guessing at it.
-        if (!closed) retry = setTimeout(connect, 2000);
+        retry = setTimeout(connect, WS_RETRY_MS);
       };
       ws.onerror = () => {
-        // onclose always follows onerror for a WebSocket, so reconnection
-        // scheduling stays solely in onclose - this only avoids an unhandled
-        // "error" event from surfacing as an uncaught exception.
+        // onclose always follows onerror for a WebSocket, so both the retry
+        // and the failure counting stay solely in onclose - this only avoids
+        // an unhandled "error" event surfacing as an uncaught exception.
       };
       ws.onmessage = (ev) => {
         let msg: WsMessage;
@@ -137,7 +184,7 @@ export function useDaemon(): DaemonState {
       if (retry) clearTimeout(retry);
       ws?.close();
     };
-  }, [append, refresh]);
+  }, [append, refresh, diagnoseConnectFailure]);
 
   return {
     api,

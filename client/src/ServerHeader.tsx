@@ -15,6 +15,13 @@ export interface ServerHeaderProps {
   onCandidateChange: (name: string) => void;
   /** True while a mod/server task is streaming, independent of the server's own run state. */
   busy?: boolean;
+  /**
+   * The last stop request came back as a timeout (HTTP 504): the daemon gave
+   * up waiting and deliberately left the process running. Owned by App, which
+   * is the only thing that sees the response, and cleared as soon as the
+   * daemon leaves `stopping`.
+   */
+  stopTimedOut?: boolean;
 }
 
 export function ServerHeader(props: ServerHeaderProps) {
@@ -46,6 +53,22 @@ export function ServerHeader(props: ServerHeaderProps) {
   // while the world saves, instead of flashing a disabled Start button that
   // misreports what the server is doing.
   const live = status.state === "running" || status.state === "starting" || status.state === "stopping";
+
+  /**
+   * A stop that ran past the daemon's timeout. The daemon answers 504, leaves
+   * the process alive on purpose, and stays in `stopping` - which renders a
+   * disabled Stop, no Start, and (before this) no kill either, so the operator
+   * who has just been told "the process was left running" had nothing at all
+   * to act with short of curl. Spec 4 requires the timeout to offer a kill as
+   * an explicit, separately confirmed action; this is where it becomes
+   * reachable.
+   *
+   * Deliberately gated on the timeout having HAPPENED rather than on
+   * `stopping`: an ordinary shutdown takes 2-3 seconds and is the common case,
+   * and growing a force-kill button every time the server saves would train
+   * the operator to reach for the one control that can corrupt the world.
+   */
+  const stopStalled = (props.stopTimedOut ?? false) && status.state === "stopping";
   const canStart = !live && !taskBusy && world.trim().length > 0 && candidateIsCurrent && candidate!.valid;
 
   const startTitle = taskBusy
@@ -113,8 +136,23 @@ export function ServerHeader(props: ServerHeaderProps) {
         Update Server
       </button>
 
-      {status.state === "unmanaged" && (
-        <button className="danger" onClick={props.onKill} title="Risks world corruption">
+      {stopStalled && (
+        <span className="hint hint-bad">
+          Stop timed out. The server was left running deliberately and may still be saving; give it
+          longer if you can.
+        </span>
+      )}
+
+      {(status.state === "unmanaged" || stopStalled) && (
+        <button
+          className="danger"
+          onClick={props.onKill}
+          title={
+            stopStalled
+              ? "Kills the server outright, possibly mid-save. Unsaved world progress is lost and the save can be left corrupt. Only after waiting."
+              : "Risks world corruption"
+          }
+        >
           Force kill (pid {status.pid})
         </button>
       )}

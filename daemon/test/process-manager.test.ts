@@ -107,6 +107,51 @@ describe("start", () => {
     child().child.stdout.emit("data", Buffer.from("tial\r\n"));
     expect(seen).toEqual(["partial"]);
   });
+
+  /*
+   * stdout and stderr are independent pipes with no ordering guarantee between
+   * them, and Java writes JVM, SLF4J and mod-stacktrace noise to stderr during
+   * exactly the startup window the ready line lands in. With one shared
+   * partial-line buffer, a stderr line arriving between two stdout chunks is
+   * spliced into the middle of the half-written stdout line: the ready line
+   * never matches, so state stays `starting` forever while the server is up
+   * and playable, port/slots/gameVersion stay null, and (because `inspect`
+   * gates `isStopped` on `running`) a later external shutdown is then
+   * misreported as `crashed`.
+   */
+  it("keeps a split stdout line intact when a stderr line lands in the middle of it", () => {
+    const seen: string[] = [];
+    pm.on("line", (l) => seen.push(l.line));
+    pm.start("Tulsa");
+
+    const split = F.REAL_READY.indexOf("with 5 slots");
+    child().child.stdout.emit("data", Buffer.from(F.REAL_READY.slice(0, split)));
+    child().child.stderr.emit("data", Buffer.from("SLF4J: boom\n"));
+    child().child.stdout.emit("data", Buffer.from(F.REAL_READY.slice(split) + "\r\n"));
+
+    expect(seen).toContain("SLF4J: boom");
+    expect(seen).toContain(
+      '[2026-07-27 03:27:40] Started server using port 14159 with 5 slots on world "Tulsa.zip", game version 1.2.0.',
+    );
+    expect(pm.status.state).toBe("running");
+    expect(pm.status.port).toBe(14159);
+    expect(pm.status.slots).toBe(5);
+    expect(pm.status.gameVersion).toBe("1.2.0");
+    expect(pm.status.world).toBe("Tulsa");
+  });
+
+  it("buffers a partial stderr line without stdout completing it", () => {
+    const seen: string[] = [];
+    pm.on("line", (l) => seen.push(l.line));
+    pm.start("Tulsa");
+
+    child().child.stderr.emit("data", Buffer.from("Exception in thread "));
+    child().child.stdout.emit("data", Buffer.from("normal stdout line\r\n"));
+    expect(seen).toEqual(["normal stdout line"]);
+
+    child().child.stderr.emit("data", Buffer.from('"main"\n'));
+    expect(seen).toEqual(["normal stdout line", 'Exception in thread "main"']);
+  });
 });
 
 describe("stop", () => {
@@ -213,6 +258,28 @@ describe("crash detection", () => {
     child().child.exit(1);
     expect(pm.status.state).toBe("crashed");
     expect(pm.status.lastError).toMatch(/exited with code 1/);
+  });
+
+  /*
+   * The state stays `crashed` - the server went away without anyone asking it
+   * to, and calling that `stopped` would present a failed launch as an idle
+   * daemon - but the message is what the operator actually reads, and a code-0
+   * exit is not a crash. Spec 4 defines crashed as a NONZERO exit, so the text
+   * must not assert one.
+   */
+  it("does not describe a clean code-0 exit during starting as a crash", () => {
+    pm.start("Tulsa");
+    child().child.exit(0);
+    expect(pm.status.state).toBe("crashed");
+    expect(pm.status.lastError).toMatch(/code 0/);
+    expect(pm.status.lastError).toMatch(/not a crash/i);
+  });
+
+  it("says a signal killed it when the exit carries no code", () => {
+    pm.start("Tulsa");
+    child().child.exit(null);
+    expect(pm.status.lastError).toMatch(/terminated by a signal/i);
+    expect(pm.status.lastError).not.toMatch(/code null/i);
   });
 
   it("marks crashed when a running server exits on its own", () => {

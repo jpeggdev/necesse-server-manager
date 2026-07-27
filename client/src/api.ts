@@ -6,6 +6,28 @@ export interface WorldsResponse {
   candidate: { name: string; valid: boolean; exists: boolean } | null;
 }
 
+/**
+ * The daemon's own message, plus the status it came with. The text belongs to
+ * the daemon and is never reworded here, but the UI has to tell one failure
+ * from another - specifically a 504 from POST /api/server/stop, which means
+ * the stop timed out and the process was deliberately left running, from a 409
+ * that means it was never running at all. Only the former should unlock a
+ * force kill, and matching on message text to decide that would be a trap for
+ * whoever next edits the daemon's wording.
+ */
+export class DaemonError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "DaemonError";
+    this.status = status;
+  }
+}
+
+/** The daemon answers a stop that ran past `stopTimeoutMs` with this. */
+export const STOP_TIMEOUT_STATUS = 504;
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
@@ -22,7 +44,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   }
   const body = (await res.json().catch(() => null)) as { error?: string } | null;
   if (!res.ok) {
-    throw new Error(body?.error ?? `${res.status} ${res.statusText}`);
+    throw new DaemonError(body?.error ?? `${res.status} ${res.statusText}`, res.status);
   }
   return body as T;
 }

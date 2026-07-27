@@ -1,12 +1,5 @@
 import { describe, it, expect } from "vitest";
-import {
-  stripTimestamp,
-  stripAnsi,
-  normalize,
-  parseReady,
-  isStopped,
-  isLoadingExistingWorld,
-} from "../src/log-lines.js";
+import { stripTimestamp, stripAnsi, normalize, parseReady, isStopped } from "../src/log-lines.js";
 import * as F from "./fixtures/log-fixtures.js";
 
 describe("stripTimestamp", () => {
@@ -53,22 +46,15 @@ describe("isStopped", () => {
   });
 });
 
-describe("isLoadingExistingWorld", () => {
-  it("detects an existing world load", () => {
-    expect(isLoadingExistingWorld(F.LOADING_EXISTING)).toBe(true);
-    expect(isLoadingExistingWorld(F.READY_LINE_NO_TS)).toBe(false);
-  });
-});
-
 /*
  * Regression cover for the one thing the unit tests could not know before the
  * server was run for real: stdout prefixes an SGR colour escape BEFORE the
  * timestamp.
  *
- * Only two cases here actually fail against the pre-2026-07-27 parsers -
- * "recognises the shutdown line" and "recognises an existing-world load",
- * measured by reverting isStopped/isLoadingExistingWorld to stripTimestamp and
- * re-running. The rest are regression guards, not bug reproductions:
+ * Only one case here actually fails against the pre-2026-07-27 parsers -
+ * "recognises the shutdown line", measured by reverting isStopped to
+ * stripTimestamp and re-running. The rest are regression guards, not bug
+ * reproductions:
  * `parseReady` passed all along because READY is an unanchored substring
  * search, the normalize/stripAnsi cases exercise API that did not exist
  * pre-fix, and the last case pins behaviour that was already correct. Said
@@ -86,11 +72,6 @@ describe("the real stdout format (colour escape before the timestamp)", () => {
     expect(isStopped(F.REAL_STOPPED)).toBe(true);
     expect(isStopped(F.REAL_SAVE_COMPLETE)).toBe(false);
     expect(isStopped(F.REAL_STOP_ECHO)).toBe(false);
-  });
-
-  it("recognises an existing-world load", () => {
-    expect(isLoadingExistingWorld(F.REAL_LOADING_EXISTING)).toBe(true);
-    expect(isLoadingExistingWorld(F.REAL_READY)).toBe(false);
   });
 
   it("parses the ready line", () => {

@@ -1,0 +1,14 @@
+{
+  // The emitting config. `tsconfig.json` covers src AND test so the tests are
+  // typechecked like the client's already are, but test files cannot be
+  // emitted under `rootDir: "src"` (TS6059) and must not end up in `dist`, so
+  // the build narrows the input set back to src and turns emit back on.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": "src",
+    "sourceMap": true
+  },
+  "include": ["src/**/*"]
+}

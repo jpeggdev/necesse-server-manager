@@ -110,6 +110,47 @@ describe("ServerHeader", () => {
     expect(screen.getByRole("button", { name: /force kill/i })).toBeTruthy();
   });
 
+  /*
+   * After a stop times out the daemon deliberately leaves the process running
+   * and answers 504. State stays `stopping`, so pre-fix the header rendered a
+   * disabled Stop, no Start, and no kill: the operator was told "the process
+   * was left running" and then given nothing to act with, short of curl.
+   * Spec 4 requires the timeout to "offer a kill as an explicit, separately
+   * confirmed action". The trigger is the timeout having actually happened -
+   * NOT `stopping` itself, which is the healthy common case.
+   */
+  describe("after a stop timeout", () => {
+    const stopping: StatusPayload = { ...running, state: "stopping" };
+
+    it("offers Force kill, visually dangerous and stating the world-loss risk", () => {
+      setup({ status: stopping, stopTimedOut: true });
+      const btn = screen.getByRole("button", { name: /force kill/i });
+      expect(btn).toBeEnabled();
+      expect(btn.className).toMatch(/danger/);
+      expect(btn.getAttribute("title")).toMatch(/world/i);
+      // ...and it is not mistakable for the ordinary Stop, which stays put and disabled.
+      expect(screen.getByRole("button", { name: /^stop$/i })).toBeDisabled();
+      expect(screen.getByText(/timed out/i)).toBeTruthy();
+    });
+
+    it("fires onKill when clicked", async () => {
+      const props = setup({ status: stopping, stopTimedOut: true });
+      await userEvent.click(screen.getByRole("button", { name: /force kill/i }));
+      expect(props.onKill).toHaveBeenCalledTimes(1);
+    });
+
+    it("stays hidden during an ordinary healthy shutdown", () => {
+      setup({ status: stopping });
+      expect(screen.queryByRole("button", { name: /force kill/i })).toBeNull();
+      expect(screen.queryByText(/timed out/i)).toBeNull();
+    });
+
+    it("stays hidden while the server is running, even if a previous stop timed out", () => {
+      setup({ status: running, stopTimedOut: true });
+      expect(screen.queryByRole("button", { name: /force kill/i })).toBeNull();
+    });
+  });
+
   it("does not fire onCandidateChange on every keystroke (debounced)", () => {
     vi.useFakeTimers();
     try {

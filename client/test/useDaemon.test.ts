@@ -8,7 +8,7 @@
 // fake WebSocket carrying real message shapes.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderHook, act } from "@testing-library/react";
-import { useDaemon } from "../src/useDaemon";
+import { useDaemon, WS_FAILURE_THRESHOLD } from "../src/useDaemon";
 
 class FakeWebSocket {
   static instances: FakeWebSocket[] = [];
@@ -205,6 +205,101 @@ describe("useDaemon busy - orderings that previously wedged it", () => {
     });
     expect(result.current.busy).toBe(false);
     expect(result.current.console.some((l) => l.line === "downloading...")).toBe(true);
+    unmount();
+  });
+});
+
+/*
+ * A websocket that never opens leaves the app on "Connecting to the daemon..."
+ * indefinitely - `connected` stays false, so App never renders the real UI, and
+ * nothing sets `error` because refresh() only ever ran from onopen and onerror
+ * was a no-op. The operator watches a spinner and learns nothing. Spec 9
+ * requires an unreachable daemon to be distinguishable from a daemon that
+ * answers but errors, and neither half was met here.
+ */
+describe("useDaemon websocket connection failures", () => {
+  /** Awaits enough microtask ticks for the HTTP probe (fetch + json) to settle. */
+  async function flush() {
+    await act(async () => {
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+    });
+  }
+
+  /** One failed connection attempt: error, close, then the hook's 2s retry. */
+  async function failConnection() {
+    const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
+    act(() => {
+      ws.onerror?.();
+      ws.onclose?.();
+    });
+    await flush();
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+  }
+
+  it("says the socket is blocked while HTTP still answers, rather than spinning forever", async () => {
+    vi.useFakeTimers();
+    try {
+      const { result, unmount } = renderHook(() => useDaemon());
+
+      // Below the threshold this is indistinguishable from a daemon
+      // mid-restart, and must not paint an error over a transient blip.
+      for (let i = 0; i < WS_FAILURE_THRESHOLD - 1; i++) await failConnection();
+      expect(result.current.error).toBeNull();
+
+      await failConnection();
+
+      expect(result.current.connected).toBe(false);
+      expect(result.current.error).toBeTruthy();
+      expect(result.current.error).toMatch(/HTTP/);
+      expect(result.current.error).toMatch(/socket/i);
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports the daemon as unreachable, in fetch's own words, when HTTP fails too", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("Failed to fetch");
+      }),
+    );
+    vi.useFakeTimers();
+    try {
+      const { result, unmount } = renderHook(() => useDaemon());
+      for (let i = 0; i < WS_FAILURE_THRESHOLD; i++) await failConnection();
+
+      expect(result.current.error).toMatch(/Could not reach the daemon/i);
+      expect(result.current.error).toMatch(/Failed to fetch/);
+      // The blocked-socket wording would be a lie here: nothing answered.
+      expect(result.current.error).not.toMatch(/answers over HTTP/i);
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not raise a connection error for a socket that keeps opening and dropping", async () => {
+    // A daemon being restarted drops the socket repeatedly, but each attempt
+    // succeeds - that is a working setup, not a broken one, and the counter
+    // resets on every open.
+    const { result, ws, unmount } = await openConnection();
+
+    let current = ws;
+    for (let i = 0; i < WS_FAILURE_THRESHOLD + 1; i++) {
+      current = dropAndReconnect(current);
+      await act(async () => {
+        current.onopen?.();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+    }
+
+    expect(result.current.connected).toBe(true);
+    expect(result.current.error).toBeNull();
     unmount();
   });
 });

@@ -13,9 +13,8 @@ const TIMESTAMP = /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]\s*/;
  * the timestamp - ESC[39m for a normal line, ESC[34m for (DEBUG), ESC[33m for
  * (WARN). That is neither of the two forms the parsers were written to
  * tolerate, and it defeats any anchored match: TIMESTAMP stopped matching, so
- * isStopped's equality test and isLoadingExistingWorld's prefix test silently
- * never fired against the real server. Stripped before the timestamp for that
- * reason.
+ * isStopped's equality test silently never fired against the real server.
+ * Stripped before the timestamp for that reason.
  *
  * Built with String.fromCharCode rather than written as a regex literal: an
  * ESC inside a literal is either a raw control byte - invisible in every
@@ -61,8 +60,4 @@ export function parseReady(line: string): ReadyInfo | null {
 
 export function isStopped(line: string): boolean {
   return normalize(line) === "Server has stopped";
-}
-
-export function isLoadingExistingWorld(line: string): boolean {
-  return normalize(line).startsWith("Loading existing world at ");
 }

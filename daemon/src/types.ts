@@ -80,7 +80,7 @@ export interface ConsoleLine {
   source: "server" | "task";
 }
 
-export type TaskKind = "mod-install" | "mod-remove" | "mod-update-all" | "server-update";
+export type TaskKind = "mod-install" | "mod-update-all" | "server-update";
 
 export interface InstallResult {
   id: string;

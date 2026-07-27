@@ -505,6 +505,14 @@ Scope note on #1: `isLoadingExistingWorld` was broken by the same cause but has
 one real consequence was the `crashed` misclassification. Neither defect was
 reachable by unit tests; both required a real server.
 
+> **Superseded later the same day.** `isLoadingExistingWorld` and its tests have
+> since been **deleted** rather than kept fixed — the final pre-merge review
+> ruled that a spec promise pointing at a function nothing calls is worse than
+> no function at all. The loaded-vs-created confirmation reaches the operator
+> through the console stream (the server's own `Loading existing world at` /
+> `Creating new world at` lines, which Steps 2 and 3 above show arriving), and
+> the design spec's &sect;8 now says so. Everything else in this section stands.
+
 ---
 
 ## Not verified

@@ -30,12 +30,16 @@ class FakeWebSocket {
 }
 
 let activeTasks: string[] = [];
+/** What the daemon currently reports; mutable so a test can move it. */
+let serverState = "stopped";
 /** Holds POST /api/server/update open so the click-to-response span is observable. */
 let releaseUpdate: (() => void) | null = null;
+/** How POST /api/server/stop answers. Null means "not exercised in this test". */
+let stopResponse: { ok: boolean; status: number; body: unknown } | null = null;
 
 function statusPayload() {
   return {
-    state: "stopped",
+    state: serverState,
     world: null,
     pid: null,
     startedAt: null,
@@ -53,12 +57,17 @@ function jsonResponse(body: unknown) {
 
 beforeEach(() => {
   activeTasks = [];
+  serverState = "stopped";
   releaseUpdate = null;
+  stopResponse = null;
   FakeWebSocket.instances = [];
   vi.stubGlobal("WebSocket", FakeWebSocket as unknown as typeof WebSocket);
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
+      if (url.endsWith("/api/server/stop") && stopResponse) {
+        return { ok: stopResponse.ok, status: stopResponse.status, json: async () => stopResponse!.body };
+      }
       if (url.endsWith("/api/server/update")) {
         return new Promise((resolve) => {
           releaseUpdate = () => resolve(jsonResponse({ ok: true, taskId: "t1" }));
@@ -153,5 +162,64 @@ describe("App busy continuity", () => {
     });
     await settle();
     expect(updateServer).toBeEnabled();
+  });
+});
+
+/*
+ * The daemon's stop-timeout behaviour is correct on its own - it waits, gives
+ * up, answers 504, and leaves the process alive on purpose - but the operator
+ * only ever sees the client. Pre-fix the 504 produced an error banner saying
+ * "the process was left running" above a header with a disabled Stop, no
+ * Start, and no kill: nothing to act with. This pins the whole path, from the
+ * HTTP status through to a usable button.
+ */
+describe("App stop timeout", () => {
+  const TIMEOUT_MESSAGE =
+    "Server did not exit within 90000ms of receiving stop. It may still be saving. The process was left running.";
+
+  it("surfaces Force kill after a 504 stop, and withdraws it once the server is gone", async () => {
+    serverState = "running";
+    stopResponse = { ok: false, status: 504, body: { ok: false, error: TIMEOUT_MESSAGE } };
+    const ws = await mountConnected();
+
+    expect(screen.queryByRole("button", { name: /force kill/i })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /^stop$/i }));
+
+    // The daemon set `stopping` before writing to stdin, then timed out.
+    serverState = "stopping";
+    await act(async () => {
+      ws.onmessage?.({ data: JSON.stringify({ type: "status", status: statusPayload() }) });
+    });
+    await settle();
+
+    expect(screen.getByText(TIMEOUT_MESSAGE)).toBeTruthy();
+    const kill = await screen.findByRole("button", { name: /force kill/i });
+    expect(kill).toBeEnabled();
+
+    // The server finishes saving and exits on its own: the dangerous button
+    // must not linger into the next lifecycle.
+    serverState = "stopped";
+    await act(async () => {
+      ws.onmessage?.({ data: JSON.stringify({ type: "status", status: statusPayload() }) });
+    });
+    await waitFor(() => expect(screen.queryByRole("button", { name: /force kill/i })).toBeNull());
+  });
+
+  it("does not surface Force kill when a stop fails for any other reason", async () => {
+    // A 409 ("not running") is a mistake, not a stuck process. Only the
+    // timeout leaves the operator without a control.
+    serverState = "running";
+    stopResponse = { ok: false, status: 409, body: { ok: false, error: "Server is not running (state: stopped)." } };
+    const ws = await mountConnected();
+
+    fireEvent.click(screen.getByRole("button", { name: /^stop$/i }));
+    serverState = "stopping";
+    await act(async () => {
+      ws.onmessage?.({ data: JSON.stringify({ type: "status", status: statusPayload() }) });
+    });
+    await settle();
+
+    expect(screen.getByText(/not running/i)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /force kill/i })).toBeNull();
   });
 });

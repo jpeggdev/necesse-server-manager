@@ -4,6 +4,7 @@ import { ModsPanel } from "./ModsPanel";
 import { ConsolePanel } from "./ConsolePanel";
 import { ErrorBanner } from "./ErrorBanner";
 import { useDaemon } from "./useDaemon";
+import { DaemonError, STOP_TIMEOUT_STATUS } from "./api";
 import "./App.css";
 
 export default function App() {
@@ -27,6 +28,20 @@ export default function App() {
   // answers the request that launched it, the refresh() inside this window
   // already sees it. The two spans overlap; they never leave a gap.
   const [submitting, setSubmitting] = useState(0);
+  // Set only by a 504 from POST /api/server/stop - the daemon waited out
+  // stopTimeoutMs, gave up, and left the process running on purpose. It is the
+  // one failure that leaves the header with no usable control, so it is what
+  // unlocks Force kill.
+  const [stopTimedOut, setStopTimedOut] = useState(false);
+
+  // Cleared the moment the daemon leaves `stopping`, however it got there: the
+  // server finally finished saving, the kill landed, or a new run started. A
+  // force-kill button that outlived the stuck stop it belongs to would be
+  // pointing at a different process than the one the operator saw hang.
+  const serverState = status?.state;
+  useEffect(() => {
+    if (serverState !== "stopping") setStopTimedOut(false);
+  }, [serverState]);
 
   // The daemon-connectivity error (from useDaemon's own refresh() failures)
   // and mutation errors (from guard()'s catch) are two different sources
@@ -38,14 +53,17 @@ export default function App() {
   }, [daemonError]);
 
   const guard = useCallback(
-    (fn: () => Promise<unknown>) => () => {
+    (fn: () => Promise<unknown>, onFailure?: (e: Error) => void) => () => {
       setSubmitting((n) => n + 1);
       fn()
         .then(() => {
           setError(null);
           return refresh();
         })
-        .catch((e: Error) => setError(e.message))
+        .catch((e: Error) => {
+          setError(e.message);
+          onFailure?.(e);
+        })
         .finally(() => setSubmitting((n) => n - 1));
     },
     [refresh],
@@ -96,9 +114,18 @@ export default function App() {
         worlds={worlds}
         candidate={candidate}
         busy={busy}
+        stopTimedOut={stopTimedOut}
         onCandidateChange={onCandidateChange}
         onStart={(w) => guard(() => api.start(w))()}
-        onStop={guard(() => api.stop())}
+        onStop={guard(
+          () => api.stop(),
+          // The status, not the message text: the daemon owns its wording and
+          // may reword the timeout at any point without meaning to change what
+          // the UI offers.
+          (e) => {
+            if (e instanceof DaemonError && e.status === STOP_TIMEOUT_STATUS) setStopTimedOut(true);
+          },
+        )}
         onKill={guard(() => api.kill())}
         onUpdateServer={guard(() => api.updateServer())}
       />

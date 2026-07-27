@@ -33,7 +33,16 @@ export class ProcessManager extends EventEmitter {
   private gameVersion: string | null = null;
   private lastError: string | null = null;
   private lines: ConsoleLine[] = [];
-  private pending = "";
+  /**
+   * One partial-line buffer per stream. stdout and stderr are independent
+   * pipes with no ordering guarantee between them, so a single shared buffer
+   * splices a complete line from one stream into the middle of a half-written
+   * line from the other. Java writes JVM, SLF4J and mod-stacktrace noise to
+   * stderr during exactly the startup window the ready line lands in, so the
+   * line that gets corrupted is routinely the ready line - and the daemon then
+   * sits in `starting` forever while the server is up and playable.
+   */
+  private pending = { out: "", err: "" };
   private externalPid: number | null = null;
   private stopWaiter: { resolve: () => void; reject: (e: Error) => void; timer: NodeJS.Timeout } | null = null;
 
@@ -121,33 +130,34 @@ export class ProcessManager extends EventEmitter {
     this.slots = null;
     this.gameVersion = null;
     this.lastError = null;
-    this.pending = "";
+    this.pending = { out: "", err: "" };
     this.startedAt = new Date().toISOString();
 
     const child = this.spawnFn(this.cfg.javaExe, this.buildArgs(world), { cwd: this.cfg.serverRoot });
     this.child = child;
     this.setState("starting");
 
-    const onData = (buf: Buffer | string) => this.ingest(buf.toString());
-    child.stdout.on("data", onData);
-    child.stderr.on("data", onData);
+    child.stdout.on("data", this.ingest("out"));
+    child.stderr.on("data", this.ingest("err"));
 
     child.on("exit", (code) => this.onExit(code));
   }
 
-  private ingest(chunk: string): void {
-    this.pending += chunk;
-    const parts = this.pending.split("\n");
-    this.pending = parts.pop() ?? "";
-    for (const raw of parts) {
-      // Colour escapes are stripped once, here, so both the recorded backlog
-      // and the parsers see the same plain text. The client renders console
-      // lines as text with no terminal emulator behind it, so an unstripped
-      // line shows the operator a literal "[39m" before every message.
-      const line = stripAnsi(raw.replace(/\r$/, ""));
-      this.record(line);
-      this.inspect(line);
-    }
+  private ingest(stream: "out" | "err"): (buf: Buffer | string) => void {
+    return (buf) => {
+      this.pending[stream] += buf.toString();
+      const parts = this.pending[stream].split("\n");
+      this.pending[stream] = parts.pop() ?? "";
+      for (const raw of parts) {
+        // Colour escapes are stripped once, here, so both the recorded backlog
+        // and the parsers see the same plain text. The client renders console
+        // lines as text with no terminal emulator behind it, so an unstripped
+        // line shows the operator a literal "[39m" before every message.
+        const line = stripAnsi(raw.replace(/\r$/, ""));
+        this.record(line);
+        this.inspect(line);
+      }
+    };
   }
 
   private record(line: string): void {
@@ -189,7 +199,19 @@ export class ProcessManager extends EventEmitter {
     } else if (wasStopping) {
       this.setState("stopped");
     } else {
-      this.lastError = `Server process exited with code ${code}`;
+      // Still `crashed`: the server went away without anyone asking it to, and
+      // presenting that as a normal `stopped` would make a failed launch look
+      // like an idle daemon. But a code-0 exit is not a crash, and spec 4
+      // defines crashed as a NONZERO exit, so the message must not claim one.
+      // (`crashed` and `stopped` both permit a subsequent start(), so nothing
+      // an operator can do is gated on the difference.)
+      this.lastError =
+        code === 0
+          ? `Server process exited on its own with code 0 - a clean exit, not a crash - ` +
+            `without the daemon asking it to stop. Check the console for why it gave up.`
+          : code === null
+            ? `Server process was terminated by a signal before it was asked to stop.`
+            : `Server process exited with code ${code}`;
       this.setState("crashed");
     }
 
@@ -262,7 +284,7 @@ export class ProcessManager extends EventEmitter {
   private setState(state: ServerState): void {
     this.state = state;
     if (state === "stopped" || state === "crashed") {
-      this.pending = "";
+      this.pending = { out: "", err: "" };
       this.startedAt = null;
     }
     this.emit("state", this.status);

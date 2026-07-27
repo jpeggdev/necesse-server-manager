@@ -346,6 +346,16 @@ All. While the server is running the mutation controls are disabled with the rea
 <p>Live output with autoscroll that disengages when scrolled up and resumes on return to the
 bottom. Task output from steamcmd is interleaved and visually distinguished from game output.</p>
 
+<div class="note">
+<p><strong>Where the loaded-vs-created confirmation comes from.</strong> The after-the-fact
+confirmation promised in <a href="#lifecycle">&sect;4</a> is the server's own
+<code>Loading existing world at</code> / <code>Creating new world at</code> line, which reaches the
+operator through this console stream. It is deliberately <em>not</em> a parsed status field: as
+shipped, nothing in the daemon matched on it, so the parser was dead code promising a confirmation
+that no UI ever read. The pre-launch indicator on the world input (<a href="#ui">&sect;8</a>,
+header) remains the control that actually prevents the typo; the console line is the receipt.</p>
+</div>
+
 <h2 id="errors">9. Error handling</h2>
 
 <p>Nothing is swallowed or reworded. Every route resolves to a result or

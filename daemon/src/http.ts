@@ -199,6 +199,36 @@ export function buildServer(deps: Deps): FastifyInstance {
     return false;
   };
 
+  /**
+   * Fastify's default JSON parser rejects an empty body under a JSON
+   * content-type with FST_ERR_CTP_EMPTY_JSON_BODY (400), before the route
+   * handler runs. Half this API's mutations legitimately carry no body
+   * (stop, kill, server update, mods update-all), and any sensible client -
+   * curl -X POST -H, a deploy script, a second GUI - may still set the header.
+   * The client works around it by omitting the header, but only the daemon can
+   * fix it for everyone else, so an empty body is treated as an absent one and
+   * the routes' own `req.body ?? {}` handles it from there. A body that is
+   * present but malformed is still a 400: silently ignoring it would turn a
+   * typo'd payload into a request that looks like it worked.
+   */
+  app.addContentTypeParser<string>(
+    "application/json",
+    { parseAs: "string" },
+    (_req, body, done) => {
+      if (body.trim().length === 0) {
+        done(null, undefined);
+        return;
+      }
+      try {
+        done(null, JSON.parse(body));
+      } catch (e) {
+        const err = e as Error & { statusCode?: number };
+        err.statusCode = 400;
+        done(err, undefined);
+      }
+    },
+  );
+
   void app.register(cors, { origin: true });
   void app.register(websocket);
 

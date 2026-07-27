@@ -136,6 +136,70 @@ describe("activeTasks in the status payload", () => {
   });
 });
 
+/*
+ * Fastify's default JSON parser rejects an empty body under a JSON
+ * content-type with FST_ERR_CTP_EMPTY_JSON_BODY (400), before the route
+ * handler ever runs. `client/src/api.ts` works around it by omitting the
+ * header when there is no body, but the daemon is the only party that can fix
+ * it for curl, a script, or a second client - all of which reasonably set the
+ * header on a POST that happens to carry nothing.
+ */
+describe("bodyless POSTs that still declare a JSON content-type", () => {
+  const cases = [
+    { url: "/api/server/stop", expected: 409 }, // not running
+    { url: "/api/server/kill", expected: 409 }, // nothing to kill
+    { url: "/api/server/update", expected: 200 },
+    { url: "/api/mods/update-all", expected: 200 },
+  ];
+
+  for (const { url, expected } of cases) {
+    it(`treats an empty body as absent on POST ${url}`, async () => {
+      const res = await app.inject({
+        method: "POST",
+        url,
+        headers: { "content-type": "application/json" },
+        payload: "",
+      });
+      expect(res.json().code, url).toBeUndefined(); // no FST_ERR_CTP_EMPTY_JSON_BODY
+      expect(res.statusCode, url).toBe(expected);
+    });
+  }
+
+  it("treats an empty body as absent when the header carries a charset too", async () => {
+    // What PowerShell's Invoke-RestMethod and most HTTP libraries actually
+    // send, rather than the bare type curl uses.
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/server/stop",
+      headers: { "content-type": "application/json; charset=utf-8" },
+      payload: "",
+    });
+    expect(res.json().code).toBeUndefined();
+    expect(res.statusCode).toBe(409);
+  });
+
+  it("still parses a real JSON body under the same header", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/server/start",
+      headers: { "content-type": "application/json" },
+      payload: JSON.stringify({ world: "Tulsa" }),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().status.world).toBe("Tulsa");
+  });
+
+  it("still rejects a malformed JSON body rather than silently ignoring it", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/server/start",
+      headers: { "content-type": "application/json" },
+      payload: "{not json",
+    });
+    expect(res.statusCode).toBe(400);
+  });
+});
+
 // A task whose promise never settles at all - a hung steamcmd network read, a
 // Steam-side prompt nobody can answer - would otherwise hold its id forever.
 // Now that the set lives in the daemon, reloading the client no longer clears
