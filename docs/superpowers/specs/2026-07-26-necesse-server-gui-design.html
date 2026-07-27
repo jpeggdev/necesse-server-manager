@@ -133,6 +133,10 @@ placeholder paths in the existing <code>Update-Necesse.ps1</code>
 <p>The <code>-owner</code> flags grant owner permissions to any client connecting under that name.
 They are configuration, not hardcoded, and are passed on every start.</p>
 
+<p><code>lastWorld</code> is written to <code>config.json</code> when a start attempt reaches the
+<code>running</code> state, not when the request is made. A world name that fails to launch is
+therefore never the value the client prefills next time.</p>
+
 <h2 id="arch">3. Architecture</h2>
 
 <p>Two deliverables in one repo.</p>
