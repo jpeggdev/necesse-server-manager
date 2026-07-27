@@ -63,7 +63,17 @@ describe("isLoadingExistingWorld", () => {
 /*
  * Regression cover for the one thing the unit tests could not know before the
  * server was run for real: stdout prefixes an SGR colour escape BEFORE the
- * timestamp. Every assertion below fails against the pre-2026-07-27 parsers.
+ * timestamp.
+ *
+ * Only two cases here actually fail against the pre-2026-07-27 parsers -
+ * "recognises the shutdown line" and "recognises an existing-world load",
+ * measured by reverting isStopped/isLoadingExistingWorld to stripTimestamp and
+ * re-running. The rest are regression guards, not bug reproductions:
+ * `parseReady` passed all along because READY is an unanchored substring
+ * search, the normalize/stripAnsi cases exercise API that did not exist
+ * pre-fix, and the last case pins behaviour that was already correct. Said
+ * explicitly because "these tests cover the bug" is easy to assume of a whole
+ * block and wrong here.
  */
 describe("the real stdout format (colour escape before the timestamp)", () => {
   it("strips the escape and the timestamp together", () => {

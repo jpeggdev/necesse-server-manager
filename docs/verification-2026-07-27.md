@@ -9,13 +9,41 @@ process anywhere in the loop.
 - **Branch** `feat/necesse-gui-v1`.
 - **Method** HTTP calls from the workstation plus a WebSocket observer
   (`ws://192.168.1.106:8710/ws`) logging every frame with a local receive
-  timestamp. All console output below is verbatim from that observer.
+  timestamp.
 - **Result** two defects found and fixed (one of them real and load-bearing),
   every other exercised path behaved as designed. Read the
   [Not verified](#not-verified) section before treating this as coverage.
 
 > The observer prints each line through `JSON.stringify`, so `\u001b` in the
 > transcripts below is a real escape byte on the wire, not a rendering of one.
+> Blocks captured **before** the fix are marked *(pre-fix)*; where such a block
+> is quoted with the escapes stripped for readability, it says so on the block.
+> Everything unmarked is exactly as logged.
+
+### Chronology
+
+The steps below are numbered by the verification plan, **not** by the order they
+ran, and the fix landed in the middle of the run. Times are the server's local
+clock (UTC-5); the observer's timestamps elsewhere in this document are UTC.
+
+| Local time | What ran | Build |
+|---|---|---|
+| 03:27:24 | Step 2 — start `Tulsa` | **pre-fix** |
+| 03:27:40 | ready line, port 14159 | **pre-fix** |
+| 03:28 | Step 7 — mod-mutation guards while running | **pre-fix** |
+| 03:29:27 | Step 4 — graceful stop, first exercise | **pre-fix** |
+| ~03:30-03:33 | ANSI defect diagnosed, fixed, tested, redeployed, daemon restarted | — |
+| 03:33:10 | Step 3 — create `Claude Test World` | post-fix |
+| 03:33:41 | Step 4 — graceful stop, second exercise | post-fix |
+| 03:34:00 | Step 5 — install `Admin Tools` | post-fix |
+| 03:34:2x | Step 6, plus the start-during-task interlock | post-fix |
+| 03:35-03:36 | Step 8 — cleanup and restoration | post-fix |
+
+Steps 2, 4 (first exercise) and 7 therefore ran against the **pre-fix** daemon.
+No conclusion depends on which build produced them — the defect changed how an
+*externally*-initiated shutdown is classified, and every stop performed here was
+API-initiated, which takes a different path — but the record should not imply a
+chronology it does not have.
 
 ---
 
@@ -67,6 +95,13 @@ STARTED_STATE=Running
 
 `activeTasks: []` present. Prerequisite met.
 
+The script was afterwards hardened to *throw* rather than print — on a failed
+`ssh`, on the task still being `Running` when the wait expires, and on a
+`/api/status` that comes back with no `activeTasks` (which would mean the
+restart did not pick up the new `dist`). As first written it would have exited 0
+on all three. The hardened version has **not** been re-run — see
+[Not verified](#not-verified).
+
 ---
 
 ## Step 1 — Timestamp format
@@ -96,11 +131,19 @@ Three colours, one per severity: `ESC[39m` normal, `ESC[34m` `(DEBUG)`,
 never matched, so the timestamp was never removed, so every parser that compares
 against a *whole* or *leading* string silently failed:
 
-| Parser | Test | Against the real line | Consequence |
+| Parser | Test | Against the real line | Live consequence |
 |---|---|---|---|
-| `parseReady` | unanchored `RegExp.exec` | **worked by luck** | none — the pattern is a substring search |
-| `isStopped` | `=== "Server has stopped"` | **always false** | see below |
-| `isLoadingExistingWorld` | `.startsWith(...)` | **always false** | new-vs-existing world detection dead |
+| `parseReady` | unanchored `RegExp.exec` | **worked by luck** | none — the pattern is a substring search, so the leading escape is irrelevant |
+| `isStopped` | `=== "Server has stopped"` | **always false** | **the whole of it** — see below |
+| `isLoadingExistingWorld` | `.startsWith(...)` | **always false** | **none: it has no production caller** |
+
+`isLoadingExistingWorld` is exported and unit-tested but called from nowhere in
+`daemon/src` or `client/src` — grep finds it only in `log-lines.ts` and its own
+test. New-vs-existing world detection is done by `GET /api/worlds?name=`
+returning `candidate.exists`, which is what Step 3 below actually used, and that
+path never touches this function. So its being broken had **no** live effect. It
+is fixed and regression-tested because a dead function that silently returns the
+wrong answer is a trap for the next caller, not because anything depended on it.
 
 `isStopped` drives `process-manager.ts:166`:
 
@@ -134,16 +177,40 @@ survivable enough to reach live testing — the common path masks it.
 - `daemon/test/fixtures/log-fixtures.ts`: six `REAL_*` fixtures captured from the
   transcript above.
 - `daemon/test/log-lines.test.ts`, `daemon/test/process-manager.test.ts`: new
-  cases. Every one of them fails against the pre-fix parsers.
+  cases, including one that ingests the real captured shutdown line — escapes
+  intact — through `ProcessManager` and asserts an externally-initiated shutdown
+  ends `stopped` with `lastError` null rather than `crashed`. That wiring, not
+  `isStopped` in isolation, is what the bug actually broke.
+
+**Which of the new tests are bug reproductions, and which are only guards.** Not
+all of them fail pre-fix, and saying otherwise would overstate the cover. Measured
+by reverting `isStopped` and `isLoadingExistingWorld` to `stripTimestamp` and
+removing the ingest-time strip, then re-running:
+
+```
+ ❯ test/log-lines.test.ts (14 tests | 2 failed)
+   × the real stdout format ... > recognises the shutdown line
+   × the real stdout format ... > recognises an existing-world load
+ ❯ test/process-manager.test.ts (32 tests | 2 failed)
+   × start > drives the real coloured stdout, and strips the colour out of the backlog
+   × stop  > reports an externally-initiated shutdown as stopped, not crashed
+      Tests  4 failed | 42 passed (46)
+```
+
+Exactly **four** are pre-fix-sensitive — the two above plus the backlog
+assertion and the new end-to-end stop test. The rest are regression guards:
+`parseReady(REAL_READY)` **passes pre-fix** because `READY` is an unanchored
+substring search, the `normalize`/`stripAnsi` cases exercise API that did not
+exist before the fix, and the last case pins behaviour that was already correct.
 
 ```
 $ npx vitest run
  Test Files  9 passed (9)
-      Tests  128 passed (128)
+      Tests  129 passed (129)
 ```
 
-122 → 128. Rebuilt, redeployed, daemon restarted; everything from Step 3 onward
-ran against the fixed build. Console lines after the fix, same server:
+122 → 129. Rebuilt, redeployed, daemon restarted. Console lines after the fix,
+same server:
 
 ```
 console line="[2026-07-27 03:33:23] AphoreaMod started"
@@ -154,13 +221,18 @@ console line="[2026-07-27 03:34:20] Loading existing world at C:\Users\jeffp\App
 
 ## Step 2 — Start an existing world (`Tulsa`)
 
+*Ran **pre-fix**, at 03:27 local — this is the run that produced the Step 1
+capture.*
+
 ```
 $ POST /api/server/start  {"world":"Tulsa"}
 {"ok":true,"status":{"state":"starting","world":"Tulsa","pid":13296,
  "startedAt":"2026-07-27T08:27:24.887Z","port":null,...,"activeTasks":[]}}
 ```
 
-State `starting` → `running` on the ready line, 16s later:
+State `starting` → `running` on the ready line, 16s later. **Console lines below
+are quoted with the leading colour escape stripped for readability** — see Step 1
+for the same lines raw:
 
 ```
 console "Loading existing world at C:\Users\jeffp\AppData\Roaming\Necesse\saves\worlds\Tulsa.zip"
@@ -212,7 +284,8 @@ $ GET /api/worlds?name=Claude%20Test%20World
 ## Step 4 — Graceful stop
 
 The single most important behaviour in the project — the only thing between the
-user and a corrupted save. Exercised twice (once per world), both clean.
+user and a corrupted save. Exercised twice, once per world: `Tulsa` at 03:29:27
+**pre-fix**, `Claude Test World` at 03:33:41 post-fix. Both clean.
 
 ```
 $ curl.exe -X POST http://192.168.1.106:8710/api/server/stop
@@ -220,20 +293,42 @@ $ curl.exe -X POST http://192.168.1.106:8710/api/server/stop
 HTTP=200
 ```
 
+**First exercise (pre-fix), quoted exactly as logged** — escapes included,
+because this is the load-bearing evidence in the document and it should be
+checkable against the raw capture:
+
 ```
 status  {"state":"stopping",...}
-console "> stop"
-console "Starting world save"
-console "Completed world save before stopping server"
-console "Stopped server on 2026/07/27 03:29:27 with code: SERVER_STOPPED"
-console "World time: 172, day 1"
-console "Server has stopped"
-console "Exiting in 2 seconds..."
+console line="\u001b[39m[2026-07-27 03:29:27] > stop"
+console line="\u001b[39m[2026-07-27 03:29:27] Starting world save"
+console line="\u001b[39m[2026-07-27 03:29:27] Completed world save before stopping server"
+console line="\u001b[39m[2026-07-27 03:29:27] Stopped server on 2026/07/27 03:29:27 with code: SERVER_STOPPED"
+console line="\u001b[39m[2026-07-27 03:29:27] World time: 172, day 1"
+console line="\u001b[39m[2026-07-27 03:29:27] Server has stopped"
+console line="\u001b[39m[2026-07-27 03:29:27] Exiting in 2 seconds..."
 status  {"state":"stopped","world":"Tulsa","pid":null,"lastError":null,"activeTasks":[]}
 ```
 
-Both required lines present, `SERVER_STOPPED` exit code, state back to
-`stopped`, `lastError` null, no `crashed`.
+Second exercise (post-fix), same sequence with the escapes now stripped by the
+daemon rather than by the author:
+
+```
+console line="[2026-07-27 03:33:41] > stop"
+console line="[2026-07-27 03:33:41] Starting world save"
+console line="[2026-07-27 03:33:43] Completed world save before stopping server"
+console line="[2026-07-27 03:33:43] Stopped server on 2026/07/27 03:33:43 with code: SERVER_STOPPED"
+console line="[2026-07-27 03:33:44] Server has stopped"
+console line="[2026-07-27 03:33:44] Exiting in 2 seconds..."
+status  {"state":"stopped","world":"Claude Test World","pid":null,"lastError":null,"activeTasks":[]}
+```
+
+Both required lines present in both runs, `SERVER_STOPPED` exit code, state back
+to `stopped`, `lastError` null, no `crashed`.
+
+Worth being precise about why the pre-fix run still worked: `ProcessManager.stop()`
+sets `stopping` itself before writing to stdin, so this path never consults
+`isStopped`. The broken parser only mattered for a shutdown the daemon did not
+initiate — which is exactly the case [not exercised live](#not-verified).
 
 **Note on how the request must be sent.** PowerShell's `Invoke-WebRequest`
 attaches a default `Content-Type` to a bodyless POST, and Fastify rejects it
@@ -402,16 +497,36 @@ it as the load-test world.
 
 | # | Severity | Where | Status |
 |---|---|---|---|
-| 1 | **High** | ANSI escape before the timestamp defeats `isStopped` and `isLoadingExistingWorld`; an externally-initiated shutdown gets reported as `crashed`, and console output reaches the client full of raw escape bytes | Fixed, 6 new tests, redeployed, re-verified live |
+| 1 | **High** | ANSI escape before the timestamp defeats `isStopped`, so an externally-initiated shutdown is reported as `crashed` rather than `stopped`; separately, console output reaches the client full of raw escape bytes | Fixed, 4 pre-fix-sensitive tests added, redeployed; **cosmetic half re-verified live, behavioural half not** |
 | 2 | Low (tooling) | `Restart-ScheduledTask` does not exist on SERVER; the documented redeploy step fails | Fixed — `scripts/04-restart-daemon.ps1` |
 
-Neither was reachable by unit tests. Both required a real server.
+Scope note on #1: `isLoadingExistingWorld` was broken by the same cause but has
+**no production caller**, so it contributed nothing to the live blast radius. The
+one real consequence was the `crashed` misclassification. Neither defect was
+reachable by unit tests; both required a real server.
 
 ---
 
 ## Not verified
 
 Nothing below was exercised. A green result above says nothing about any of it.
+
+### The behavioural half of the ANSI fix
+
+The fix has two halves, and **only one of them was confirmed live.**
+
+- *Cosmetic half — verified.* Console lines arrive escape-free after the
+  redeploy, confirmed by reading the bytes on the WebSocket.
+- *Behavioural half — **not verified**.* The consequence that made this defect
+  High severity is that an externally-initiated shutdown was misclassified as
+  `crashed`. Reproducing that live needs a stop issued from **outside** the
+  daemon, which needs a connected game client with admin rights. No such
+  shutdown was performed post-fix, so the claim that it now reports `stopped`
+  rests on the unit test added for it
+  (`process-manager.test.ts` › "reports an externally-initiated shutdown as
+  stopped, not crashed"), which was confirmed to fail against the pre-fix
+  parser — **not** on live evidence. Every stop in this document was
+  API-initiated and therefore took the path that was never broken.
 
 ### Deliberately skipped — awaiting user authorization
 
@@ -460,3 +575,10 @@ Nothing below was exercised. A green result above says nothing about any of it.
 - **A world whose name needs escaping**, an invalid world name reaching `start`, a
   full disk, a mods folder that is read-only, and steamcmd failing (bad workshop
   id, no network) — all unit-tested, none exercised against the real thing.
+- **The hardened `scripts/04-restart-daemon.ps1`.** The version that performed the
+  Step 0 restart printed its state and carried on regardless; it was afterwards
+  made to *throw* on a failed `ssh`, on a task still `Running` after the 20s wait,
+  and on a `/api/status` with no `activeTasks`. **That hardened version has not
+  been run.** Re-running it would restart the daemon, which this session was
+  directed not to do, so its new failure paths are unexercised — including, by
+  construction, all three of the throws.

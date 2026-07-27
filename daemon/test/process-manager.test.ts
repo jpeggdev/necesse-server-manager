@@ -157,6 +157,34 @@ describe("stop", () => {
     expect(pm.status.lastError).toBeNull();
   });
 
+  /*
+   * The wiring the 2026-07-27 ANSI defect actually broke, end to end, and the
+   * only test here that covers it. Nobody calls pm.stop() in this scenario -
+   * an in-game admin issued the stop - so the log line is the daemon's ONLY
+   * signal that a shutdown is under way. Pre-fix, isStopped never matched the
+   * real coloured line, so state stayed `running` through the exit, onExit saw
+   * wasStopping === false, and a clean fully-saved shutdown was reported as
+   * `crashed` with lastError "exited with code 0". Uses the captured line with
+   * its escapes intact; asserting on a hand-cleaned line would not have caught
+   * the bug.
+   */
+  it("reports an externally-initiated shutdown as stopped, not crashed", () => {
+    pm.start("Tulsa");
+    child().child.emitLine(F.REAL_READY);
+    expect(pm.status.state).toBe("running");
+
+    // The save line must NOT be mistaken for the shutdown line.
+    child().child.emitLine(F.REAL_SAVE_COMPLETE);
+    expect(pm.status.state).toBe("running");
+
+    child().child.emitLine(F.REAL_STOPPED);
+    expect(pm.status.state).toBe("stopping");
+
+    child().child.exit(0);
+    expect(pm.status.state).toBe("stopped");
+    expect(pm.status.lastError).toBeNull();
+  });
+
   it("treats a zero exit code during stop as clean, with no lastError", async () => {
     pm.start("Tulsa");
     child().child.emitLine(F.READY_LINE_WITH_TS);
