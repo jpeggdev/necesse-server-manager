@@ -19,6 +19,21 @@ export interface Deps {
 const WORKSHOP_ID = /^\d+$/;
 
 /**
+ * How long a task may sit in `activeTasks` before the daemon gives up on it.
+ *
+ * Sized to be unreachable by any legitimate run rather than tuned close to
+ * one: the longest real case is `app_update <id> validate`, which re-hashes
+ * every file in the install and re-downloads whatever fails, so on a slow link
+ * it is plausibly tens of minutes. An hour is several times that worst case,
+ * which is the right trade here - expiring a task that is actually still
+ * working produces a misleading "timed out" line and re-enables Start while
+ * steamcmd writes, so a false expiry is far more costly than a late one. The
+ * daemon still self-heals within a single sitting instead of needing a
+ * restart, which is the whole point.
+ */
+export const TASK_EXPIRY_MS = 60 * 60 * 1000;
+
+/**
  * Fields a LAN client may patch via PUT /api/config. Everything else
  * (paths, jvmArgs, port, app ids) is edited by hand in config.json on the
  * machine itself — the no-auth design accepts "anyone on the LAN can
@@ -87,9 +102,10 @@ export function buildServer(deps: Deps): FastifyInstance {
   /**
    * Registers the task as active, runs it, and guarantees the entry is removed
    * again on every exit path - resolve, reject, or a synchronous throw out of
-   * `fn` (the async IIFE turns that into a rejection too). A leaked entry would
-   * wedge POST /api/server/start and every client's Start button for the life
-   * of the daemon, so the `finally` is load-bearing, not defensive padding.
+   * `fn` (the async IIFE turns that into a rejection too), plus the expiry
+   * below for the path where none of those ever happen. A leaked entry wedges
+   * POST /api/server/start and every client's Start button for the life of the
+   * daemon, so `settle` deleting before it broadcasts is load-bearing.
    */
   const runTask = (
     kind: TaskKind,
@@ -101,36 +117,84 @@ export function buildServer(deps: Deps): FastifyInstance {
     const onLine = (line: string) => broadcast({ type: "task", taskId, kind, line });
     activeTasks.add(taskId);
     broadcastStatus();
+
+    // Exactly one terminal task-done per id is part of the contract clients
+    // read, so whichever of the two paths (expiry, real completion) arrives
+    // first claims it and the other becomes a no-op. The delete happens before
+    // any broadcast, so a throwing broadcast still cannot strand the entry.
+    let settled = false;
+    const settle = (msg: WsMessage): void => {
+      if (settled) {
+        console.warn(
+          `Task ${taskId} (${kind}) produced a terminal result after it had already ` +
+            `been given up on as timed out. Ignoring it; the daemon has moved on.`,
+        );
+        return;
+      }
+      settled = true;
+      activeTasks.delete(taskId);
+      broadcast(msg);
+      broadcastStatus();
+    };
+
+    // A steamcmd run that never settles - a hung network read, a Steam-side
+    // prompt nobody can answer - would otherwise hold the id forever, and
+    // since the set now lives in the daemon, reloading the client no longer
+    // clears it: only restarting the daemon would. So the entry expires and
+    // the daemon self-heals. The child process is deliberately NOT killed:
+    // killing steamcmd mid-write can leave a half-written install or a
+    // truncated jar, which is worse than a stale flag. It keeps running, and
+    // if it finishes later `settle` above discards the result harmlessly.
+    const expiry = setTimeout(() => {
+      settle({
+        type: "task-done",
+        taskId,
+        kind,
+        ok: false,
+        error:
+          `Timed out: no result after ${Math.round(TASK_EXPIRY_MS / 60000)} minutes. ` +
+          `The underlying process was left running rather than killed mid-write, so it ` +
+          `may still finish on its own - check the server install before relying on it.`,
+      });
+    }, TASK_EXPIRY_MS);
+    // Without this an idle hour-long timer keeps the event loop alive, so the
+    // daemon (and the test runner) would refuse to exit until it fired.
+    expiry.unref?.();
+
     void (async () => {
       try {
         const r = await fn(onLine);
-        broadcast({ type: "task-done", taskId, kind, ok: r.ok, error: r.error, results: r.results });
+        settle({ type: "task-done", taskId, kind, ok: r.ok, error: r.error, results: r.results });
       } catch (e) {
-        broadcast({ type: "task-done", taskId, kind, ok: false, error: (e as Error).message });
+        settle({ type: "task-done", taskId, kind, ok: false, error: (e as Error).message });
       } finally {
-        activeTasks.delete(taskId);
-        broadcastStatus();
+        clearTimeout(expiry);
       }
     })();
     return taskId;
   };
 
   /**
-   * Server-side interlock. A UI-only guard cannot stop a second client, a page
-   * left open from before the task started, or curl - and starting the game
-   * while steamcmd is mid-rewrite of the install or mods folder is exactly the
-   * corruption this exists to prevent.
+   * Server-side interlock, applied to starting the server AND to launching or
+   * removing anything that writes the install or mods folder. A UI-only guard
+   * cannot stop a second client, a page left open from before the task
+   * started, or curl. Two steamcmd runs rewriting `serverRoot`/`modsDir` at
+   * once, or the game launching against a half-written one, is the corruption
+   * this exists to prevent - so these operations serialize rather than
+   * interleave.
    */
-  const requireNoActiveTask = (reply: {
-    code(c: number): { send(b: unknown): unknown };
-  }): boolean => {
+  const requireNoActiveTask = (
+    reply: { code(c: number): { send(b: unknown): unknown } },
+    action: string,
+  ): boolean => {
     if (activeTasks.size === 0) return true;
     reply.code(409).send({
       ok: false,
       error:
-        `Cannot start the server while a background task (mod install, mod update, or ` +
-        `server update) is still running. Starting now risks launching against a ` +
-        `half-rewritten install. Wait for it to finish. In flight: ${[...activeTasks].join(", ")}.`,
+        `Cannot ${action} while a background task (mod install, mod update, or server ` +
+        `update) is still running. Those tasks rewrite the server install and the mods ` +
+        `folder, so overlapping them - or launching the game against a half-written one - ` +
+        `risks corruption. Wait for it to finish. In flight: ${[...activeTasks].join(", ")}.`,
     });
     return false;
   };
@@ -177,7 +241,7 @@ export function buildServer(deps: Deps): FastifyInstance {
     if (typeof world !== "string" || !isValidWorldName(world)) {
       return reply.code(400).send({ ok: false, error: `Invalid world name: ${JSON.stringify(world)}` });
     }
-    if (!requireNoActiveTask(reply)) return reply;
+    if (!requireNoActiveTask(reply, "start the server")) return reply;
     try {
       pm.start(world);
     } catch (e) {
@@ -212,6 +276,7 @@ export function buildServer(deps: Deps): FastifyInstance {
         error: `Cannot update while the server is ${pm.status.state}. Stop it first.`,
       });
     }
+    if (!requireNoActiveTask(reply, "update the server")) return reply;
     const taskId = runTask("server-update", async (onLine) => {
       const r = await steam.updateApp(onLine);
       return { ok: r.ok, error: r.ok ? undefined : r.output };
@@ -235,6 +300,7 @@ export function buildServer(deps: Deps): FastifyInstance {
         error: `Cannot change mods while the server is ${pm.status.state}. Stop it first.`,
       });
     }
+    if (!requireNoActiveTask(reply, "install a mod")) return reply;
     const taskId = runTask("mod-install", async (onLine) => {
       const r = await installer.install(id, name.trim(), onLine);
       return { ok: r.ok, error: r.error };
@@ -249,6 +315,9 @@ export function buildServer(deps: Deps): FastifyInstance {
         error: `Cannot change mods while the server is ${pm.status.state}. Stop it first.`,
       });
     }
+    // Not a task itself, but it deletes a jar out of the same modsDir an
+    // install or update-all is writing into, so it serializes with them too.
+    if (!requireNoActiveTask(reply, "remove a mod")) return reply;
     const { id } = req.params as { id: string };
     try {
       await installer.remove(id);
@@ -265,6 +334,7 @@ export function buildServer(deps: Deps): FastifyInstance {
         error: `Cannot update mods while the server is ${pm.status.state}. Stop it first.`,
       });
     }
+    if (!requireNoActiveTask(reply, "update mods")) return reply;
     // Goes through runTask like every other task kind so the activeTasks
     // lifecycle has exactly one implementation and no second path to leak from.
     const taskId = runTask("mod-update-all", async (onLine) => {
@@ -307,6 +377,10 @@ export function buildServer(deps: Deps): FastifyInstance {
   });
 
   app.decorate("broadcast", broadcast);
+  // The live socket set. Anything with send(string) can join it, which is how
+  // a test observes what the daemon pushes without standing up a real
+  // websocket client.
+  app.decorate("sockets", sockets);
 
   return app;
 }

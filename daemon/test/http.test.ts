@@ -2,14 +2,14 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildServer } from "../src/http.js";
+import { buildServer, TASK_EXPIRY_MS } from "../src/http.js";
 import { ProcessManager } from "../src/process-manager.js";
 import { ModInstaller } from "../src/mod-installer.js";
 import { ModRegistry } from "../src/mod-registry.js";
 import { SteamCmd } from "../src/steamcmd.js";
 import { DEFAULT_CONFIG } from "../src/config.js";
 import { makeFakeSpawn } from "./fixtures/fake-spawn.js";
-import type { DaemonConfig } from "../src/types.js";
+import type { DaemonConfig, WsMessage } from "../src/types.js";
 import * as F from "./fixtures/log-fixtures.js";
 
 let cfg: DaemonConfig;
@@ -104,16 +104,146 @@ describe("activeTasks in the status payload", () => {
     });
   });
 
-  it("keeps the other id when one of two overlapping tasks finishes", async () => {
-    const a = (await app.inject({ method: "POST", url: "/api/server/update" })).json().taskId;
-    const b = (await app.inject({ method: "POST", url: "/api/server/update" })).json().taskId;
-    expect((await app.inject({ method: "GET", url: "/api/status" })).json().activeTasks).toEqual([a, b]);
+  it("refuses to start a second task while one is active, rather than interleaving them", async () => {
+    // Two steamcmd runs rewriting serverRoot/modsDir at once is the hazard;
+    // these operations serialize instead. Every task-launching route, plus
+    // the mod delete that writes the same folder, must refuse.
+    const first = (await app.inject({ method: "POST", url: "/api/server/update" })).json().taskId;
 
-    spawn.calls[0].child.exit(0); // only the first steamcmd run exits
+    for (const [method, url, payload] of [
+      ["POST", "/api/server/update", undefined],
+      ["POST", "/api/mods", { id: "123", name: "A" }],
+      ["POST", "/api/mods/update-all", undefined],
+      ["DELETE", "/api/mods/123", undefined],
+    ] as const) {
+      const res = await app.inject({ method, url, payload });
+      expect(res.statusCode, `${method} ${url}`).toBe(409);
+      expect(res.json().error, `${method} ${url}`).toMatch(/background task/i);
+    }
+    // Only the original steamcmd was ever spawned.
+    expect(spawn.calls).toHaveLength(1);
+    expect((await app.inject({ method: "GET", url: "/api/status" })).json().activeTasks).toEqual([first]);
+
+    spawn.calls[0].child.exit(0);
     await vi.waitFor(async () => {
       const res = await app.inject({ method: "GET", url: "/api/status" });
-      expect(res.json().activeTasks).toEqual([b]);
+      expect(res.json().activeTasks).toEqual([]);
     });
+
+    // ...and the next task is accepted normally once the first has cleared.
+    const second = await app.inject({ method: "POST", url: "/api/mods/update-all" });
+    expect(second.statusCode).toBe(200);
+  });
+});
+
+// A task whose promise never settles at all - a hung steamcmd network read, a
+// Steam-side prompt nobody can answer - would otherwise hold its id forever.
+// Now that the set lives in the daemon, reloading the client no longer clears
+// it; only restarting the daemon would. So the entry expires. The child is
+// deliberately left running: killing steamcmd mid-write can leave a
+// half-written install or truncated jar, which is worse than a stale flag.
+describe("task expiry", () => {
+  /** Joins the live socket set so a test can read what the daemon pushed. */
+  function captureBroadcasts(instance: ReturnType<typeof buildServer>): WsMessage[] {
+    const seen: WsMessage[] = [];
+    (instance as unknown as { sockets: Set<{ send(d: string): void }> }).sockets.add({
+      send: (d: string) => void seen.push(JSON.parse(d) as WsMessage),
+    });
+    return seen;
+  }
+
+  it("drops an expired task from activeTasks, unblocks start, and says why", async () => {
+    // Only setTimeout/clearTimeout are faked: faking setImmediate as well
+    // would stall Fastify's inject.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const seen = captureBroadcasts(app);
+      const { taskId } = (await app.inject({ method: "POST", url: "/api/server/update" })).json();
+      expect((await app.inject({ method: "GET", url: "/api/status" })).json().activeTasks).toEqual([
+        taskId,
+      ]);
+      // steamcmd never exits - the child is still there, just silent.
+      expect(spawn.calls[0].child.killed).toBe(false);
+
+      vi.advanceTimersByTime(TASK_EXPIRY_MS);
+
+      expect((await app.inject({ method: "GET", url: "/api/status" })).json().activeTasks).toEqual([]);
+      // The client learns why, rather than the line just vanishing.
+      const done = seen.filter((m) => m.type === "task-done");
+      expect(done).toHaveLength(1);
+      expect(done[0]).toMatchObject({ taskId, ok: false });
+      expect((done[0] as { error: string }).error).toMatch(/timed out/i);
+      // Never killed: a half-written install is worse than a stale flag.
+      expect(spawn.calls[0].child.killed).toBe(false);
+
+      const started = await app.inject({
+        method: "POST",
+        url: "/api/server/start",
+        payload: { world: "Tulsa" },
+      });
+      expect(started.statusCode).toBe(200);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("is harmless when an expired task completes anyway", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let seen: WsMessage[];
+    let taskId: string;
+    try {
+      seen = captureBroadcasts(app);
+      taskId = (await app.inject({ method: "POST", url: "/api/server/update" })).json().taskId;
+      vi.advanceTimersByTime(TASK_EXPIRY_MS);
+      // The daemon has given up: the one terminal message so far is the
+      // timeout, sent while steamcmd is still running.
+      const afterExpiry = seen.filter((m) => m.type === "task-done");
+      expect(afterExpiry).toHaveLength(1);
+      expect((afterExpiry[0] as { ok: boolean; error: string }).error).toMatch(/timed out/i);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // The long-running steamcmd finally exits, well after the daemon gave up.
+    expect(() => spawn.calls[0].child.exit(0)).not.toThrow();
+    await vi.waitFor(async () => {
+      const res = await app.inject({ method: "GET", url: "/api/status" });
+      expect(res.json().activeTasks).toEqual([]);
+    });
+    // Still exactly one terminal message for the id - the late result is
+    // discarded, not broadcast as a second task-done, and never re-added.
+    expect(seen!.filter((m) => m.type === "task-done" && m.taskId === taskId!)).toHaveLength(1);
+  });
+
+  it("leaves a task well inside the bound completely alone", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const seen = captureBroadcasts(app);
+      const { taskId } = (await app.inject({ method: "POST", url: "/api/server/update" })).json();
+
+      vi.advanceTimersByTime(TASK_EXPIRY_MS - 1);
+
+      expect((await app.inject({ method: "GET", url: "/api/status" })).json().activeTasks).toEqual([
+        taskId,
+      ]);
+      expect(seen.filter((m) => m.type === "task-done")).toHaveLength(0);
+
+      // It then finishes normally, and the pending expiry must not fire later.
+      spawn.calls[0].child.exit(0);
+      // Deliberately NOT vi.waitFor: under fake timers it advances the clock
+      // itself, which would trip the expiry and defeat the test. setImmediate
+      // is unfaked here, so one macrotask drains the promise chain instead.
+      await new Promise((r) => setImmediate(r));
+      expect((await app.inject({ method: "GET", url: "/api/status" })).json().activeTasks).toEqual([]);
+
+      vi.advanceTimersByTime(TASK_EXPIRY_MS * 2);
+
+      const done = seen.filter((m) => m.type === "task-done");
+      expect(done).toHaveLength(1);
+      expect(done[0]).toMatchObject({ taskId, ok: true });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
