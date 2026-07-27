@@ -14,6 +14,7 @@ import { ProcessManager } from "../../daemon/src/process-manager.js";
 import { ModInstaller } from "../../daemon/src/mod-installer.js";
 import { ModRegistry } from "../../daemon/src/mod-registry.js";
 import { SteamCmd } from "../../daemon/src/steamcmd.js";
+import { SteamWorkshop } from "../../daemon/src/steam-workshop.js";
 import { DEFAULT_CONFIG } from "../../daemon/src/config.js";
 import { makeFakeSpawn } from "../../daemon/test/fixtures/fake-spawn.js";
 import { makeApi } from "../src/api";
@@ -34,7 +35,13 @@ beforeEach(async () => {
   const pm = new ProcessManager(cfg, spawn.spawn);
   const steam = new SteamCmd(cfg, spawn.spawn);
   const installer = new ModInstaller(cfg, new ModRegistry(join(root, "mods.json")), steam);
-  app = buildServer({ cfg, configFile, pm, installer, steam });
+  // Same rule as the fake spawn: this test stands up a real daemon, so its
+  // fetch is stubbed to refuse rather than reach Steam. Anything that tries
+  // fails loudly instead of quietly making a live call from the test suite.
+  const workshop = new SteamWorkshop(cfg, () =>
+    Promise.reject(new Error("no network in tests")),
+  );
+  app = buildServer({ cfg, configFile, pm, installer, steam, workshop });
   baseUrl = await app.listen({ port: 0, host: "127.0.0.1" });
 });
 

@@ -50,7 +50,25 @@ export interface DaemonConfig {
   serverAppId: number;
   workshopAppId: number;
   stopTimeoutMs: number;
+  /**
+   * Steam Web API key, needed only by workshop search. Empty means "not
+   * configured", which is the shipped default: everything else the daemon asks
+   * Steam for works anonymously. Hand-edited in config.json on the server
+   * itself and never returned over the API - see PublicDaemonConfig.
+   */
+  steamApiKey: string;
 }
+
+/**
+ * What GET /api/config actually returns. The API has no authentication by
+ * deliberate design, so every field it emits is readable by anything on the
+ * LAN; the Steam key is therefore replaced by a boolean rather than redacted
+ * in place, so there is no shape in which the key could survive the trip.
+ * Clients only ever need to know whether search is available.
+ */
+export type PublicDaemonConfig = Omit<DaemonConfig, "steamApiKey"> & {
+  steamApiKeyConfigured: boolean;
+};
 
 export interface ModEntry {
   id: string;
@@ -66,6 +84,56 @@ export interface UntrackedMod {
 export interface ModListResponse {
   managed: ModEntry[];
   untracked: UntrackedMod[];
+}
+
+/**
+ * One Steam Workshop entry, flattened from whichever Steam endpoint produced
+ * it. `updatedAt` is Steam's `time_updated` (unix seconds) as ISO, or null
+ * when Steam sent none - never the epoch, so "unknown" cannot read as "1970".
+ */
+export interface WorkshopItem {
+  id: string;
+  title: string;
+  previewUrl: string;
+  updatedAt: string | null;
+  fileSize: number;
+  subscriptions: number;
+  banned: boolean;
+}
+
+export interface WorkshopSearchResponse {
+  ok: true;
+  items: WorkshopItem[];
+  /** Feed back as ?cursor= for the next page. null when there are no more. */
+  nextCursor: string | null;
+  total: number;
+}
+
+/**
+ * One managed mod's update status, from GET /api/mods/updates.
+ *
+ * `updateAvailable` compares the workshop entry's `time_updated` against when
+ * this daemon last installed the mod. Steam moves that timestamp for ANY edit
+ * to the workshop entry - a retitle, a description tweak, a new screenshot -
+ * so a true here means "the entry changed after we installed it", which is an
+ * indication an update may exist, not proof of a new jar.
+ */
+export interface ModUpdateInfo {
+  id: string;
+  /** The workshop title when Steam knew the item, else the registry's name. */
+  title: string;
+  workshopUpdatedAt: string | null;
+  /** ModEntry.lastUpdated: when this daemon last installed it. */
+  installedAt: string;
+  /** false when Steam returned no usable entry (removed, banned, bad id). */
+  onWorkshop: boolean;
+  updateAvailable: boolean;
+}
+
+export interface ModUpdatesResponse {
+  ok: true;
+  checkedAt: string;
+  mods: ModUpdateInfo[];
 }
 
 export interface WorldInfo {

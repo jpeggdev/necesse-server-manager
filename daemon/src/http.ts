@@ -6,7 +6,17 @@ import { listWorlds, worldExists, isValidWorldName } from "./worlds.js";
 import type { ModInstaller } from "./mod-installer.js";
 import type { ProcessManager } from "./process-manager.js";
 import type { SteamCmd } from "./steamcmd.js";
-import type { DaemonConfig, InstallResult, StatusPayload, TaskKind, WsMessage } from "./types.js";
+import { WorkshopError, type SteamWorkshop } from "./steam-workshop.js";
+import type {
+  DaemonConfig,
+  InstallResult,
+  ModUpdateInfo,
+  PublicDaemonConfig,
+  StatusPayload,
+  TaskKind,
+  WorkshopItem,
+  WsMessage,
+} from "./types.js";
 
 export interface Deps {
   cfg: DaemonConfig;
@@ -14,6 +24,7 @@ export interface Deps {
   pm: ProcessManager;
   installer: ModInstaller;
   steam: SteamCmd;
+  workshop: SteamWorkshop;
 }
 
 const WORKSHOP_ID = /^\d+$/;
@@ -43,8 +54,28 @@ export const TASK_EXPIRY_MS = 60 * 60 * 1000;
  */
 const ALLOWED_CONFIG_KEYS = new Set<keyof DaemonConfig>(["owners", "lastWorld", "stopTimeoutMs"]);
 
+/**
+ * The config as it may leave the daemon. `steamApiKey` is dropped entirely
+ * rather than blanked in place: this API has no authentication by deliberate
+ * design, so anything either config route returns is readable by every device
+ * on the LAN, and a boolean is all a client can do anything with anyway.
+ */
+const publicConfig = (c: DaemonConfig): PublicDaemonConfig => {
+  const { steamApiKey, ...rest } = c;
+  return { ...rest, steamApiKeyConfigured: steamApiKey.trim().length > 0 };
+};
+
+/**
+ * A workshop call that failed maps to a status the client can act on: 503 when
+ * the box is missing a key (an operator fixes it), 502 when Steam itself was
+ * unreachable or unhappy (try later). Never 200 - a Steam outage must not be
+ * indistinguishable from "nothing to report".
+ */
+const workshopFailureCode = (e: unknown): number =>
+  e instanceof WorkshopError && e.kind === "not-configured" ? 503 : 502;
+
 export function buildServer(deps: Deps): FastifyInstance {
-  const { cfg, configFile, pm, installer, steam } = deps;
+  const { cfg, configFile, pm, installer, steam, workshop } = deps;
   const app = Fastify({ logger: false });
   type Socket = { send(data: string): void };
   const sockets = new Set<Socket>();
@@ -321,9 +352,6 @@ export function buildServer(deps: Deps): FastifyInstance {
     if (typeof id !== "string" || !WORKSHOP_ID.test(id)) {
       return reply.code(400).send({ ok: false, error: `Invalid workshop id: ${JSON.stringify(id)}` });
     }
-    if (typeof name !== "string" || name.trim().length === 0) {
-      return reply.code(400).send({ ok: false, error: "Mod name is required." });
-    }
     if (!requireStopped(reply)) {
       return reply.send({
         ok: false,
@@ -331,11 +359,105 @@ export function buildServer(deps: Deps): FastifyInstance {
       });
     }
     if (!requireNoActiveTask(reply, "install a mod")) return reply;
+    // An explicitly supplied name always wins; Steam is consulted only when the
+    // client gave none, and after the guards above so a request that was going
+    // to be refused anyway never costs a network round trip. A placeholder name
+    // would be written into mods.json and shown in the UI from then on, so
+    // failing here is better than inventing one.
+    let resolved = typeof name === "string" ? name.trim() : "";
+    if (resolved.length === 0) {
+      try {
+        resolved = (await workshop.getDetails([id]))[0]?.title.trim() ?? "";
+      } catch (e) {
+        return reply.code(400).send({
+          ok: false,
+          error:
+            `No name was supplied and Steam could not be asked for one (${(e as Error).message}). ` +
+            `Supply a name explicitly and try again.`,
+        });
+      }
+      if (resolved.length === 0) {
+        return reply.code(400).send({
+          ok: false,
+          error:
+            `No name was supplied and the Steam Workshop has no usable entry for id ${id} ` +
+            `(it may be removed, private, or the id may be wrong). Supply a name explicitly ` +
+            `if you are sure the id is right.`,
+        });
+      }
+    }
     const taskId = runTask("mod-install", async (onLine) => {
-      const r = await installer.install(id, name.trim(), onLine);
+      const r = await installer.install(id, resolved, onLine);
       return { ok: r.ok, error: r.error };
     });
     return { ok: true, taskId };
+  });
+
+  /**
+   * Which managed mods have a workshop entry newer than the copy installed
+   * here. Deliberately NOT folded into GET /api/mods: that list is read off
+   * disk and has to keep working when Steam is unreachable, so this is a
+   * second call the client makes afterward and a Steam outage costs badges
+   * rather than the mod list itself.
+   *
+   * Steam moves `time_updated` for ANY edit to the workshop entry - a retitle,
+   * a description tweak, a new screenshot - not only for a new file. So
+   * `updateAvailable` means "the entry changed after we installed it", which
+   * is an indication an update may exist, not proof of a new jar.
+   */
+  app.get("/api/mods/updates", async (_req, reply) => {
+    const { managed } = await installer.list();
+    let items: WorkshopItem[];
+    try {
+      items = await workshop.getDetails(managed.map((m) => m.id));
+    } catch (e) {
+      // Reported as a failure rather than as an empty set of updates: a
+      // fabricated "everything is current" is the one answer that would be
+      // actively misleading here.
+      return reply.code(workshopFailureCode(e)).send({ ok: false, error: (e as Error).message });
+    }
+    const byId = new Map(items.map((i) => [i.id, i]));
+    const mods: ModUpdateInfo[] = managed.map((m) => {
+      const item = byId.get(m.id);
+      const installedMs = Date.parse(m.lastUpdated);
+      const updatedMs = item?.updatedAt ? Date.parse(item.updatedAt) : NaN;
+      return {
+        id: m.id,
+        title: item !== undefined && item.title.length > 0 ? item.title : m.name,
+        workshopUpdatedAt: item?.updatedAt ?? null,
+        installedAt: m.lastUpdated,
+        onWorkshop: item !== undefined,
+        // Both ends must parse for the comparison to mean anything; a registry
+        // entry with an unreadable lastUpdated reports "no update" rather than
+        // a guess in either direction.
+        updateAvailable:
+          Number.isFinite(installedMs) && Number.isFinite(updatedMs) && updatedMs > installedMs,
+      };
+    });
+    return { ok: true, checkedAt: new Date().toISOString(), mods };
+  });
+
+  /**
+   * Workshop search. The only Steam call that needs an API key, so a box
+   * without one gets a 503 saying exactly that rather than Steam's bare 403,
+   * which reads like a broken daemon.
+   */
+  app.get("/api/workshop/search", async (req, reply) => {
+    const q = req.query as { q?: string; cursor?: string; count?: string };
+    const asked = Number(q.count);
+    try {
+      const r = await workshop.search({
+        text: q.q,
+        cursor: q.cursor,
+        // Clamped rather than passed through: Steam caps the page size anyway,
+        // and an unbounded numperpage from a query string is a free way to
+        // make the daemon fetch a very large body.
+        count: Number.isFinite(asked) && asked > 0 ? Math.min(Math.trunc(asked), 50) : 20,
+      });
+      return { ok: true, ...r };
+    } catch (e) {
+      return reply.code(workshopFailureCode(e)).send({ ok: false, error: (e as Error).message });
+    }
   });
 
   app.delete("/api/mods/:id", async (req, reply) => {
@@ -374,7 +496,7 @@ export function buildServer(deps: Deps): FastifyInstance {
     return { ok: true, taskId };
   });
 
-  app.get("/api/config", async () => cfg);
+  app.get("/api/config", async () => publicConfig(cfg));
 
   app.put("/api/config", async (req, reply) => {
     const patch = (req.body ?? {}) as Record<string, unknown>;
@@ -403,7 +525,9 @@ export function buildServer(deps: Deps): FastifyInstance {
     }
     Object.assign(cfg, patch as Partial<DaemonConfig>);
     await saveConfig(configFile, cfg);
-    return cfg;
+    // Same redaction as the GET: this route echoes the whole config back, and
+    // the key must not ride out on the response to an unrelated patch either.
+    return publicConfig(cfg);
   });
 
   app.decorate("broadcast", broadcast);

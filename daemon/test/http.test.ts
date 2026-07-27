@@ -7,17 +7,25 @@ import { ProcessManager } from "../src/process-manager.js";
 import { ModInstaller } from "../src/mod-installer.js";
 import { ModRegistry } from "../src/mod-registry.js";
 import { SteamCmd } from "../src/steamcmd.js";
+import { SteamWorkshop } from "../src/steam-workshop.js";
 import { DEFAULT_CONFIG } from "../src/config.js";
 import { makeFakeSpawn } from "./fixtures/fake-spawn.js";
+import { makeFakeFetch, detailsBody, type FakeFetch } from "./fixtures/fake-fetch.js";
 import type { DaemonConfig, WsMessage } from "../src/types.js";
 import * as F from "./fixtures/log-fixtures.js";
+
+/** Never a real key; the injected fetch means it is never sent anywhere either. */
+const FAKE_KEY = "0000000000000000000000000000TEST";
 
 let cfg: DaemonConfig;
 let configFile: string;
 let spawn: ReturnType<typeof makeFakeSpawn>;
 let pm: ProcessManager;
 let installer: ModInstaller;
+let registry: ModRegistry;
 let steam: SteamCmd;
+let net: FakeFetch;
+let workshop: SteamWorkshop;
 let app: ReturnType<typeof buildServer>;
 
 beforeEach(async () => {
@@ -32,8 +40,11 @@ beforeEach(async () => {
   spawn = makeFakeSpawn();
   pm = new ProcessManager(cfg, spawn.spawn);
   steam = new SteamCmd(cfg, spawn.spawn);
-  installer = new ModInstaller(cfg, new ModRegistry(join(root, "mods.json")), steam);
-  app = buildServer({ cfg, configFile, pm, installer, steam });
+  registry = new ModRegistry(join(root, "mods.json"));
+  installer = new ModInstaller(cfg, registry, steam);
+  net = makeFakeFetch();
+  workshop = new SteamWorkshop(cfg, net.fetch);
+  app = buildServer({ cfg, configFile, pm, installer, steam, workshop });
 });
 
 describe("GET /api/status", () => {
@@ -51,7 +62,7 @@ describe("GET /api/status", () => {
     };
     const deadPm = new ProcessManager(cfg, spawn.spawn, esrch);
     deadPm.markUnmanaged(9001);
-    const selfHealApp = buildServer({ cfg, configFile, pm: deadPm, installer, steam });
+    const selfHealApp = buildServer({ cfg, configFile, pm: deadPm, installer, steam, workshop });
 
     const res = await selfHealApp.inject({ method: "GET", url: "/api/status" });
 
@@ -93,7 +104,14 @@ describe("activeTasks in the status payload", () => {
     const throwingSteam = {
       updateApp: () => Promise.reject(new Error("steamcmd is missing")),
     } as unknown as SteamCmd;
-    const rejectApp = buildServer({ cfg, configFile, pm, installer, steam: throwingSteam });
+    const rejectApp = buildServer({
+      cfg,
+      configFile,
+      pm,
+      installer,
+      steam: throwingSteam,
+      workshop,
+    });
 
     const launch = await rejectApp.inject({ method: "POST", url: "/api/server/update" });
     expect(launch.json().ok).toBe(true);
@@ -468,13 +486,210 @@ describe("POST /api/mods validation", () => {
     expect(res.json().error).toMatch(/workshop id/i);
   });
 
-  it("rejects a blank name", async () => {
+  it("rejects a blank name that Steam cannot fill in either", async () => {
+    // The fake fetch's default answer is "Steam knows nothing about this id",
+    // so there is no title to fall back to and no placeholder is invented.
     const res = await app.inject({
       method: "POST",
       url: "/api/mods",
       payload: { id: "123", name: "  " },
     });
     expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/supply a name/i);
+  });
+});
+
+// A workshop id is the only thing a user actually has; the name is Steam's to
+// know. Resolving it is best-effort and must never invent one, because whatever
+// lands here is written into mods.json and shown in the UI from then on.
+describe("POST /api/mods name resolution", () => {
+  it("resolves the title from Steam when no name is supplied", async () => {
+    const install = vi.spyOn(installer, "install").mockResolvedValue({
+      id: "3731244177",
+      name: "Safe Haven QOL",
+      jar: "SafeHavenQOL.jar",
+      ok: true,
+    });
+    net.respondJson(detailsBody([{ id: "3731244177", title: "Safe Haven QOL" }]));
+
+    const res = await app.inject({ method: "POST", url: "/api/mods", payload: { id: "3731244177" } });
+
+    expect(res.statusCode).toBe(200);
+    await vi.waitFor(() => expect(install).toHaveBeenCalled());
+    expect(install.mock.calls[0][1]).toBe("Safe Haven QOL");
+  });
+
+  it("prefers an explicitly supplied name and never asks Steam", async () => {
+    const install = vi.spyOn(installer, "install").mockResolvedValue({
+      id: "3731244177",
+      name: "My Own Name",
+      jar: "x.jar",
+      ok: true,
+    });
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/mods",
+      payload: { id: "3731244177", name: "My Own Name" },
+    });
+    expect(res.statusCode).toBe(200);
+    await vi.waitFor(() => expect(install).toHaveBeenCalled());
+    expect(install.mock.calls[0][1]).toBe("My Own Name");
+    expect(net.calls).toHaveLength(0);
+  });
+
+  it("fails with a 400 telling the user to supply a name when Steam is unreachable", async () => {
+    net.failWith("getaddrinfo ENOTFOUND api.steampowered.com");
+    const res = await app.inject({ method: "POST", url: "/api/mods", payload: { id: "3731244177" } });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/supply a name/i);
+    // The underlying reason survives rather than being swallowed.
+    expect(res.json().error).toContain("ENOTFOUND");
+    expect(spawn.calls).toHaveLength(0);
+  });
+
+  it("still applies the stopped and no-active-task guards before touching Steam", async () => {
+    await app.inject({ method: "POST", url: "/api/server/start", payload: { world: "Tulsa" } });
+    spawn.calls[0].child.emitLine(F.READY_LINE_WITH_TS);
+    const res = await app.inject({ method: "POST", url: "/api/mods", payload: { id: "3731244177" } });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toMatch(/running/i);
+    expect(net.calls).toHaveLength(0);
+  });
+
+  it("still rejects a non-numeric id before touching Steam", async () => {
+    const res = await app.inject({ method: "POST", url: "/api/mods", payload: { id: "../../etc" } });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/workshop id/i);
+    expect(net.calls).toHaveLength(0);
+  });
+});
+
+/*
+ * Kept out of GET /api/mods on purpose: that list comes off disk and has to
+ * survive Steam being down, so the badge data is a second call and an outage
+ * costs badges rather than the mod list.
+ */
+describe("GET /api/mods/updates", () => {
+  const installed = async (id: string, name: string, lastUpdated: string): Promise<void> =>
+    registry.upsert({ id, name, jar: `${name}.jar`, lastUpdated });
+
+  it("flags a mod whose workshop entry changed after it was installed", async () => {
+    await installed("111", "Old Local Name", "2026-01-01T00:00:00.000Z");
+    await installed("222", "Current", "2026-06-01T00:00:00.000Z");
+    net.respondJson(
+      detailsBody([
+        { id: "111", title: "Fancy New Title", timeUpdated: Math.floor(Date.parse("2026-05-01T00:00:00.000Z") / 1000) },
+        { id: "222", title: "Current", timeUpdated: Math.floor(Date.parse("2026-02-01T00:00:00.000Z") / 1000) },
+      ]),
+    );
+
+    const res = await app.inject({ method: "GET", url: "/api/mods/updates" });
+
+    expect(res.statusCode).toBe(200);
+    const byId = Object.fromEntries(
+      (res.json().mods as Array<{ id: string }>).map((m) => [m.id, m]),
+    );
+    expect(byId["111"]).toMatchObject({
+      updateAvailable: true,
+      onWorkshop: true,
+      title: "Fancy New Title",
+      workshopUpdatedAt: "2026-05-01T00:00:00.000Z",
+      installedAt: "2026-01-01T00:00:00.000Z",
+    });
+    expect(byId["222"]).toMatchObject({ updateAvailable: false, onWorkshop: true });
+  });
+
+  it("falls back to the registry's name and claims no update for an id Steam does not know", async () => {
+    await installed("999", "Locally Known", "2026-01-01T00:00:00.000Z");
+    net.respondJson(detailsBody([{ id: "999", result: 9 }]));
+    const [mod] = (await app.inject({ method: "GET", url: "/api/mods/updates" })).json().mods;
+    expect(mod).toMatchObject({
+      title: "Locally Known",
+      onWorkshop: false,
+      workshopUpdatedAt: null,
+      updateAvailable: false,
+    });
+  });
+
+  it("says Steam failed rather than reporting a fabricated 'no updates'", async () => {
+    await installed("111", "A", "2026-01-01T00:00:00.000Z");
+    net.failWith("connect ETIMEDOUT 23.4.5.6:443");
+    const res = await app.inject({ method: "GET", url: "/api/mods/updates" });
+    expect(res.statusCode).toBe(502);
+    expect(res.json().ok).toBe(false);
+    expect(res.json().error).toContain("ETIMEDOUT");
+    expect(res.json().mods).toBeUndefined();
+  });
+
+  it("leaves GET /api/mods working while Steam is down", async () => {
+    await installed("111", "A", "2026-01-01T00:00:00.000Z");
+    net.failWith("getaddrinfo ENOTFOUND api.steampowered.com");
+    const res = await app.inject({ method: "GET", url: "/api/mods" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().managed).toHaveLength(1);
+  });
+
+  it("answers without a network call when nothing is managed", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/mods/updates" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().mods).toEqual([]);
+    expect(net.calls).toHaveLength(0);
+  });
+});
+
+describe("GET /api/workshop/search", () => {
+  it("says plainly that no key is configured instead of relaying Steam's 403", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/workshop/search?q=torch" });
+    expect(res.statusCode).toBe(503);
+    expect(res.json().error).toMatch(/api key/i);
+    expect(res.json().error).not.toMatch(/403|forbidden/i);
+    expect(net.calls).toHaveLength(0);
+  });
+
+  it("passes the query and cursor through and returns what a UI needs", async () => {
+    cfg.steamApiKey = FAKE_KEY;
+    net.respondJson({
+      response: {
+        total: 2,
+        next_cursor: "PAGE2",
+        publishedfiledetails: [
+          {
+            publishedfileid: "3731244177",
+            title: "Safe Haven QOL",
+            preview_url: "https://images.example/a.jpg",
+            time_updated: 1_700_000_000,
+            subscriptions: 4242,
+          },
+        ],
+      },
+    });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/workshop/search?q=torch&cursor=%2A&count=5",
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().nextCursor).toBe("PAGE2");
+    expect(res.json().total).toBe(2);
+    expect(res.json().items[0]).toMatchObject({
+      id: "3731244177",
+      title: "Safe Haven QOL",
+      previewUrl: "https://images.example/a.jpg",
+      subscriptions: 4242,
+      updatedAt: new Date(1_700_000_000 * 1000).toISOString(),
+    });
+    const sent = new URL(net.calls[0].url);
+    expect(sent.searchParams.get("search_text")).toBe("torch");
+    expect(sent.searchParams.get("cursor")).toBe("*");
+  });
+
+  it("reports an upstream failure as 502 without leaking the key", async () => {
+    cfg.steamApiKey = FAKE_KEY;
+    net.respondRaw(403, "Forbidden", "<html>Access is denied</html>");
+    const res = await app.inject({ method: "GET", url: "/api/workshop/search?q=torch" });
+    expect(res.statusCode).toBe(502);
+    expect(res.payload).not.toContain(FAKE_KEY);
   });
 });
 
@@ -514,6 +729,27 @@ describe("GET /api/config", () => {
     const res = await app.inject({ method: "GET", url: "/api/config" });
     expect(res.json().stopTimeoutMs).toBe(50);
   });
+
+  // This API has no authentication by design, so anything it returns is
+  // readable by every device on the LAN. The Steam key must not be one of them.
+  it("never returns the Steam API key, only whether one is set", async () => {
+    cfg.steamApiKey = FAKE_KEY;
+    const res = await app.inject({ method: "GET", url: "/api/config" });
+    expect(res.statusCode).toBe(200);
+    expect(res.payload).not.toContain(FAKE_KEY);
+    expect(res.json().steamApiKey).toBeUndefined();
+    expect(res.json().steamApiKeyConfigured).toBe(true);
+  });
+
+  it("reports no key configured when the field is empty or blank", async () => {
+    expect((await app.inject({ method: "GET", url: "/api/config" })).json().steamApiKeyConfigured).toBe(
+      false,
+    );
+    cfg.steamApiKey = "   ";
+    expect((await app.inject({ method: "GET", url: "/api/config" })).json().steamApiKeyConfigured).toBe(
+      false,
+    );
+  });
 });
 
 describe("PUT /api/config", () => {
@@ -535,5 +771,31 @@ describe("PUT /api/config", () => {
     });
     expect(res.statusCode).toBe(400);
     expect(res.json().error).toMatch(/javaExe/);
+  });
+
+  // The key is hand-edited on the box like every other sensitive field: with no
+  // authentication, a settable key is a key anyone on the LAN can overwrite.
+  it("refuses to set the Steam API key remotely and leaves the stored one alone", async () => {
+    cfg.steamApiKey = FAKE_KEY;
+    const res = await app.inject({
+      method: "PUT",
+      url: "/api/config",
+      payload: { steamApiKey: "attacker-supplied" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/steamApiKey/);
+    expect(cfg.steamApiKey).toBe(FAKE_KEY);
+  });
+
+  it("does not echo the key back on a successful patch either", async () => {
+    cfg.steamApiKey = FAKE_KEY;
+    const res = await app.inject({
+      method: "PUT",
+      url: "/api/config",
+      payload: { stopTimeoutMs: 5000 },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.payload).not.toContain(FAKE_KEY);
+    expect(res.json().steamApiKeyConfigured).toBe(true);
   });
 });

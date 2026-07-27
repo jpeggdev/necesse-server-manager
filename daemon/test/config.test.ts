@@ -17,6 +17,17 @@ describe("config", () => {
     expect(cfg.workshopAppId).toBe(1169040);
     const written = JSON.parse(await readFile(file, "utf8"));
     expect(written.port).toBe(8710);
+    // Never a real key in the defaults, the seed, or anything written from them.
+    expect(cfg.steamApiKey).toBe("");
+    expect(written.steamApiKey).toBe("");
+  });
+
+  it("gives an existing config with no steamApiKey the empty default rather than undefined", async () => {
+    // The live config.json predates the field; publicConfig() calls .trim() on
+    // it, so an undefined here would throw on every GET /api/config.
+    const file = join(await tmp(), "config.json");
+    await writeFile(file, JSON.stringify({ owners: ["Jeff"] }));
+    expect((await loadConfig(file)).steamApiKey).toBe("");
   });
 
   it("merges a partial file over defaults so new keys gain defaults", async () => {

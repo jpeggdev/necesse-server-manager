@@ -23,6 +23,10 @@ export const DEFAULT_CONFIG: DaemonConfig = {
   serverAppId: 1169370,
   workshopAppId: 1169040,
   stopTimeoutMs: 90_000,
+  // Empty by design. The real key is written into config.json on the server
+  // itself and must never enter the repo; every Steam call except workshop
+  // search works anonymously without it.
+  steamApiKey: "",
 };
 
 export async function loadConfig(file: string): Promise<DaemonConfig> {

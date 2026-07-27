@@ -7,6 +7,7 @@ import { ModInstaller } from "./mod-installer.js";
 import { ModRegistry } from "./mod-registry.js";
 import { ProcessManager, type SpawnFn } from "./process-manager.js";
 import { SteamCmd } from "./steamcmd.js";
+import { SteamWorkshop } from "./steam-workshop.js";
 import { findOrphanServer, listJavaProcesses } from "./orphan.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -29,6 +30,10 @@ const cfg = await loadConfig(configFile);
 const pm = new ProcessManager(cfg, spawnFn);
 const steam = new SteamCmd(cfg, spawnFn);
 const installer = new ModInstaller(cfg, new ModRegistry(modsFile), steam);
+// Node's global fetch, wrapped so what SteamWorkshop sees is its own narrow
+// FetchFn rather than the full DOM signature. This is the only place in the
+// daemon that reaches the network directly.
+const workshop = new SteamWorkshop(cfg, (url, init) => fetch(url, init));
 
 const orphan = await findOrphanServer(listJavaProcesses, cfg.serverJar);
 if (orphan) {
@@ -39,6 +44,6 @@ if (orphan) {
   );
 }
 
-const app = buildServer({ cfg, configFile, pm, installer, steam });
+const app = buildServer({ cfg, configFile, pm, installer, steam, workshop });
 await app.listen({ host: "0.0.0.0", port: cfg.port });
 console.log(`necesse-daemon listening on 0.0.0.0:${cfg.port}`);

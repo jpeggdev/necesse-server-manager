@@ -19,5 +19,6 @@
   "lastWorld": "Infected Toenail",
   "serverAppId": 1169370,
   "workshopAppId": 1169040,
-  "stopTimeoutMs": 90000
+  "stopTimeoutMs": 90000,
+  "steamApiKey": ""
 }
