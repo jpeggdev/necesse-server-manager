@@ -133,6 +133,23 @@ describe("mod mutation guard", () => {
       expect(res.json().error).toMatch(/running/i);
     }
   });
+
+  it("also refuses mutations while the server is still starting", async () => {
+    await app.inject({ method: "POST", url: "/api/server/start", payload: { world: "Tulsa" } });
+    // No READY line emitted: pm.status.state is still "starting" here, which
+    // is the realistic case (e.g. clicking Update All during mod loading).
+    expect(pm.status.state).toBe("starting");
+    for (const [method, url, payload] of [
+      ["POST", "/api/mods", { id: "1", name: "A" }],
+      ["DELETE", "/api/mods/1", undefined],
+      ["POST", "/api/mods/update-all", undefined],
+      ["POST", "/api/server/update", undefined],
+    ] as const) {
+      const res = await app.inject({ method, url, payload });
+      expect(res.statusCode, `${method} ${url}`).toBe(409);
+      expect(res.json().error).toMatch(/starting/i);
+    }
+  });
 });
 
 describe("POST /api/mods validation", () => {
@@ -161,5 +178,57 @@ describe("GET /api/mods", () => {
     await writeFile(join(cfg.modsDir, "Mystery.jar"), "x");
     const res = await app.inject({ method: "GET", url: "/api/mods" });
     expect(res.json()).toEqual({ managed: [], untracked: [{ jar: "Mystery.jar" }] });
+  });
+});
+
+describe("DELETE /api/mods/:id", () => {
+  it("returns 404 for an id that is not managed by this daemon", async () => {
+    const res = await app.inject({ method: "DELETE", url: "/api/mods/999" });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error).toMatch(/not managed/i);
+  });
+});
+
+describe("POST /api/server/kill", () => {
+  it("kills a managed process", async () => {
+    await app.inject({ method: "POST", url: "/api/server/start", payload: { world: "Tulsa" } });
+    const res = await app.inject({ method: "POST", url: "/api/server/kill" });
+    expect(res.statusCode).toBe(200);
+    expect(spawn.calls[0].child.killed).toBe(true);
+  });
+
+  it("returns 409 with the real message when there is nothing to kill", async () => {
+    const res = await app.inject({ method: "POST", url: "/api/server/kill" });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toMatch(/no managed server/i);
+  });
+});
+
+describe("GET /api/config", () => {
+  it("returns the current config", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/config" });
+    expect(res.json().stopTimeoutMs).toBe(50);
+  });
+});
+
+describe("PUT /api/config", () => {
+  it("accepts an allowed field", async () => {
+    const res = await app.inject({
+      method: "PUT",
+      url: "/api/config",
+      payload: { stopTimeoutMs: 5000 },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().stopTimeoutMs).toBe(5000);
+  });
+
+  it("rejects a disallowed field with 400 naming the field", async () => {
+    const res = await app.inject({
+      method: "PUT",
+      url: "/api/config",
+      payload: { javaExe: "C:\\evil.exe" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/javaExe/);
   });
 });

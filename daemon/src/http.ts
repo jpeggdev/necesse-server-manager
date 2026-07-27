@@ -18,21 +18,36 @@ export interface Deps {
 
 const WORKSHOP_ID = /^\d+$/;
 
+/**
+ * Fields a LAN client may patch via PUT /api/config. Everything else
+ * (paths, jvmArgs, port, app ids) is edited by hand in config.json on the
+ * machine itself — the no-auth design accepts "anyone on the LAN can
+ * control the game server," not "anyone on the LAN can repoint javaExe/
+ * serverJar/steamcmdExe (or inject a -javaagent) and get the daemon to
+ * spawn an arbitrary executable."
+ */
+const ALLOWED_CONFIG_KEYS = new Set<keyof DaemonConfig>(["owners", "lastWorld", "stopTimeoutMs"]);
+
 export function buildServer(deps: Deps): FastifyInstance {
   const { cfg, configFile, pm, installer, steam } = deps;
   const app = Fastify({ logger: false });
-  const sockets = new Set<{ send(data: string): void }>();
+  type Socket = { send(data: string): void };
+  const sockets = new Set<Socket>();
   let taskSeq = 0;
 
   const broadcast = (msg: WsMessage): void => {
     const data = JSON.stringify(msg);
+    const dead: Socket[] = [];
     for (const s of sockets) {
       try {
         s.send(data);
       } catch {
-        // A dead socket is removed on close/error; a failed send is not worth surfacing.
+        // Collected and removed after the loop rather than deleting mid-
+        // iteration, so a throwing send() can't skip a later entry.
+        dead.push(s);
       }
     }
+    for (const s of dead) sockets.delete(s);
   };
 
   pm.on("line", (l) => broadcast({ type: "console", line: l.line, ts: l.ts }));
@@ -214,9 +229,32 @@ export function buildServer(deps: Deps): FastifyInstance {
 
   app.get("/api/config", async () => cfg);
 
-  app.put("/api/config", async (req) => {
-    const patch = (req.body ?? {}) as Partial<DaemonConfig>;
-    Object.assign(cfg, patch);
+  app.put("/api/config", async (req, reply) => {
+    const patch = (req.body ?? {}) as Record<string, unknown>;
+    for (const key of Object.keys(patch)) {
+      if (!ALLOWED_CONFIG_KEYS.has(key as keyof DaemonConfig)) {
+        return reply.code(400).send({ ok: false, error: `Field "${key}" cannot be changed remotely.` });
+      }
+    }
+    if ("owners" in patch) {
+      const owners = patch.owners;
+      if (!Array.isArray(owners) || !owners.every((o) => typeof o === "string" && o.trim().length > 0)) {
+        return reply.code(400).send({ ok: false, error: "owners must be an array of non-empty strings." });
+      }
+    }
+    if ("stopTimeoutMs" in patch) {
+      const t = patch.stopTimeoutMs;
+      if (typeof t !== "number" || !(t > 0)) {
+        return reply.code(400).send({ ok: false, error: "stopTimeoutMs must be a positive number." });
+      }
+    }
+    if ("lastWorld" in patch) {
+      const w = patch.lastWorld;
+      if (w !== null && typeof w !== "string") {
+        return reply.code(400).send({ ok: false, error: "lastWorld must be a string or null." });
+      }
+    }
+    Object.assign(cfg, patch as Partial<DaemonConfig>);
     await saveConfig(configFile, cfg);
     return cfg;
   });
