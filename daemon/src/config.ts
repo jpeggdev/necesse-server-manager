@@ -29,7 +29,10 @@ export async function loadConfig(file: string): Promise<DaemonConfig> {
   let raw: string;
   try {
     raw = await readFile(file, "utf8");
-  } catch {
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw new Error(`Failed to read config at ${file}: ${(e as Error).message}`);
+    }
     const cfg = { ...DEFAULT_CONFIG };
     await saveConfig(file, cfg);
     return cfg;

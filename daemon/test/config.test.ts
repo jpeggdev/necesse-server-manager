@@ -40,4 +40,9 @@ describe("config", () => {
     await writeFile(file, "{ not json");
     await expect(loadConfig(file)).rejects.toThrow(file);
   });
+
+  it("propagates a non-ENOENT read error instead of overwriting with defaults", async () => {
+    const dir = await tmp();
+    await expect(loadConfig(dir)).rejects.toThrow(dir);
+  });
 });
