@@ -18,16 +18,18 @@ button.danger { background: #5a2020; border-color: #7a2a2a; }
 .splitter:hover, .splitter:focus-visible { background: #4a7fb5; outline: none; }
 .mods-head { display: flex; justify-content: space-between; align-items: center; }
 .mod-list { list-style: none; padding: 0; }
-.mod-list li { display: grid; grid-template-columns: 1fr auto; gap: .15rem .5rem; padding: .5rem 0; border-bottom: 1px solid #23282e; }
-.mod-name { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
-/* id and jar share one row; the jar takes the slack and ellipsises rather than wrapping. */
-.mod-meta { grid-column: 1; display: flex; align-items: baseline; gap: .5rem; min-width: 0; font-size: .78rem; color: #8d99a5; }
-.mod-id { flex: 0 0 auto; }
-.mod-jar { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* One row per mod: [X] name  id  jar. The row carries a title with all three,
+   so a panel too narrow to show them still exposes the full text on hover. */
+.mod-list li { display: flex; align-items: center; gap: .5rem; padding: .3rem 0; border-bottom: 1px solid #23282e; }
+.mod-list li.untracked { padding-left: calc(32px + .5rem); }
+.mod-name { flex: 0 1 auto; min-width: 4rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mod-id { flex: 0 0 auto; font-size: .78rem; color: #8d99a5; }
+/* The jar absorbs the slack, so it is the first thing to truncate. */
+.mod-jar { flex: 1 1 auto; min-width: 0; font-size: .78rem; color: #8d99a5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mod-list li.untracked .mod-name { color: #e0b25c; }
+.mod-list li.untracked .mod-id { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .x {
-  grid-row: 1 / span 2; align-self: start;
-  width: 32px; height: 32px; flex: 0 0 32px; padding: 0;
+  flex: 0 0 32px; width: 32px; height: 26px; padding: 0;
   background: #6b3434; border-color: #8a4444; font-size: 1.1rem; line-height: 1;
 }
 .x:hover:not(:disabled) { background: #7f3f3f; }
