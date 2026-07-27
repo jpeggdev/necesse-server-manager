@@ -227,3 +227,102 @@ describe("useDaemon registerTask - closes the HTTP-response-to-first-line gap", 
     unmount();
   });
 });
+
+// The HTTP response and the websocket are independent channels with no
+// ordering guarantee between them. registerTask() naively adding an id
+// whenever it's called introduced a worse bug than the one it fixed: for a
+// fast-failing task, "task-done" can arrive BEFORE the HTTP response (and
+// therefore registerTask) does. The daemon sends exactly one task-done per
+// id, so if registerTask were to add the id anyway, nothing would ever
+// clear it - `busy` would read true for the rest of the session, wedging
+// Start/Update Server/Add Mod/Update All permanently.
+describe("useDaemon task-done/registerTask ordering race", () => {
+  it("task-done before registerTask for the same id leaves busy false and does not wedge it", async () => {
+    const { result, ws, unmount } = await openConnection();
+
+    // task-done arrives first - the fast-failing-task case.
+    await act(async () => {
+      ws.onmessage?.({
+        data: JSON.stringify({ type: "task-done", taskId: "t1", kind: "mod-install", ok: false, error: "bad id" }),
+      });
+      await Promise.resolve();
+    });
+    expect(result.current.busy).toBe(false);
+
+    // The HTTP response resolves after - this must NOT wedge busy true.
+    act(() => {
+      result.current.registerTask("t1");
+    });
+    expect(result.current.busy).toBe(false);
+    unmount();
+  });
+
+  it("the normal order (registerTask, then task lines, then task-done) still works", async () => {
+    const { result, ws, unmount } = await openConnection();
+
+    act(() => {
+      result.current.registerTask("t1");
+    });
+    expect(result.current.busy).toBe(true);
+
+    send(ws, { type: "task", taskId: "t1", kind: "mod-install", line: "downloading..." });
+    expect(result.current.busy).toBe(true);
+
+    await act(async () => {
+      ws.onmessage?.({ data: JSON.stringify({ type: "task-done", taskId: "t1", kind: "mod-install", ok: true }) });
+      await Promise.resolve();
+    });
+    expect(result.current.busy).toBe(false);
+    unmount();
+  });
+
+  it("two overlapping tasks registered normally: one completing does not clear the other", async () => {
+    const { result, ws, unmount } = await openConnection();
+
+    act(() => {
+      result.current.registerTask("t1");
+      result.current.registerTask("t2");
+    });
+    expect(result.current.busy).toBe(true);
+
+    await act(async () => {
+      ws.onmessage?.({ data: JSON.stringify({ type: "task-done", taskId: "t1", kind: "mod-install", ok: true }) });
+      await Promise.resolve();
+    });
+    expect(result.current.busy).toBe(true); // t2 is still pending
+
+    await act(async () => {
+      ws.onmessage?.({ data: JSON.stringify({ type: "task-done", taskId: "t2", kind: "mod-update-all", ok: true }) });
+      await Promise.resolve();
+    });
+    expect(result.current.busy).toBe(false);
+    unmount();
+  });
+
+  it("bounds the completed-task bookkeeping so a long session can't grow it forever", async () => {
+    const { result, ws, unmount } = await openConnection();
+
+    // 55 fast-failing tasks whose task-done arrives before any matching
+    // registerTask call - one more than the implemented cap of 50. None of
+    // these were ever pending, so busy must stay false throughout.
+    for (let i = 0; i < 55; i++) {
+      await act(async () => {
+        ws.onmessage?.({
+          data: JSON.stringify({ type: "task-done", taskId: `race-${i}`, kind: "mod-install", ok: false }),
+        });
+        await Promise.resolve();
+      });
+    }
+    expect(result.current.busy).toBe(false);
+
+    // The oldest markers must have been evicted to keep the store bounded:
+    // a late registerTask for the very first one is treated as a brand-new
+    // task (not suppressed), so it genuinely goes pending.
+    act(() => {
+      result.current.registerTask("race-0");
+    });
+    expect(result.current.busy).toBe(true);
+
+    unmount();
+  });
+});
