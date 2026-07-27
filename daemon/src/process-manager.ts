@@ -9,14 +9,19 @@ export interface ChildLike {
   stdout: EventEmitter;
   stderr: EventEmitter;
   stdin: { write(chunk: string): void };
-  on(ev: "exit", cb: (code: number | null) => void): void;
+  on(ev: "exit", cb: (code: number | null, signal: NodeJS.Signals | null) => void): void;
   kill(): void;
 }
 
 export type SpawnFn = (cmd: string, args: string[], opts: { cwd: string }) => ChildLike;
 
-/** Sends a kill signal to an external pid. Defaults to `process.kill`; injectable so tests never signal a real pid. */
-export type KillFn = (pid: number) => void;
+/**
+ * Sends a signal to an external pid. Defaults to `process.kill`; injectable so
+ * tests never signal a real pid. The optional `signal` lets the same function
+ * double as a liveness probe: `killFn(pid, 0)` tests existence without
+ * affecting the process (see `isPidAlive`).
+ */
+export type KillFn = (pid: number, signal?: NodeJS.Signals | number) => void;
 
 export class ProcessManager extends EventEmitter {
   private child: ChildLike | null = null;
@@ -35,12 +40,19 @@ export class ProcessManager extends EventEmitter {
   constructor(
     private cfg: DaemonConfig,
     private spawnFn: SpawnFn,
-    private killFn: KillFn = (pid) => process.kill(pid),
+    private killFn: KillFn = (pid, signal) => process.kill(pid, signal),
   ) {
     super();
   }
 
   get status(): StatusPayload {
+    // Lazy, not polled: an unmanaged server can be stopped by any means
+    // outside this daemon (its own console, Task Manager, a reboot), and
+    // nothing else holds a handle on it or watches for that. Checking here
+    // means the very next status read after that happens self-heals instead
+    // of leaving `unmanaged` stuck forever with no way for the daemon to
+    // start a new server.
+    this.checkUnmanagedLiveness();
     return {
       state: this.state,
       world: this.world,
@@ -51,6 +63,21 @@ export class ProcessManager extends EventEmitter {
       gameVersion: this.gameVersion,
       lastError: this.lastError,
     };
+  }
+
+  private checkUnmanagedLiveness(): void {
+    if (this.state !== "unmanaged" || this.externalPid === null) return;
+    if (!this.isPidAlive(this.externalPid)) this.clearUnmanaged();
+  }
+
+  /** Signal 0 tests existence without affecting the process; ESRCH means gone. Any other error (e.g. EPERM) means it is still alive, just not signallable by us. */
+  private isPidAlive(pid: number): boolean {
+    try {
+      this.killFn(pid, 0);
+      return true;
+    } catch (e) {
+      return (e as NodeJS.ErrnoException).code !== "ESRCH";
+    }
   }
 
   get backlog(): ConsoleLine[] {

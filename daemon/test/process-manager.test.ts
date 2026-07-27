@@ -17,6 +17,19 @@ beforeEach(() => {
 
 const child = (): SpawnRecord => spawn.calls[0];
 
+const esrch = (): never => {
+  const e = new Error("kill ESRCH") as NodeJS.ErrnoException;
+  e.code = "ESRCH";
+  throw e;
+};
+const eperm = (): never => {
+  const e = new Error("kill EPERM") as NodeJS.ErrnoException;
+  e.code = "EPERM";
+  throw e;
+};
+/** Signal 0 succeeding (no throw) is exactly what a live pid looks like. */
+const alive = (): void => {};
+
 describe("buildArgs", () => {
   it("puts jvm args before -jar and one -owner per configured owner", () => {
     const args = pm.buildArgs("Infected Toenail");
@@ -198,19 +211,18 @@ describe("kill", () => {
 });
 
 describe("kill on an unmanaged pid", () => {
-  const esrch = (): never => {
-    const e = new Error("kill ESRCH") as NodeJS.ErrnoException;
-    e.code = "ESRCH";
-    throw e;
-  };
-  const eperm = (): never => {
-    const e = new Error("kill EPERM") as NodeJS.ErrnoException;
-    e.code = "EPERM";
-    throw e;
-  };
-
   it("clears state when the pid is already gone (ESRCH is a success)", () => {
-    const pm2 = new ProcessManager(cfg, spawn.spawn, esrch);
+    // Alive on the liveness probe (signal 0) but ESRCH on the actual kill
+    // attempt: models the pid exiting in the gap between the two, and keeps
+    // this test about kill()'s own ESRCH handling rather than the lazy
+    // liveness self-heal on markUnmanaged (covered separately below).
+    const aliveThenGoneOnKill = (_pid: number, signal?: NodeJS.Signals | number): void => {
+      if (signal === 0) return;
+      const e = new Error("kill ESRCH") as NodeJS.ErrnoException;
+      e.code = "ESRCH";
+      throw e;
+    };
+    const pm2 = new ProcessManager(cfg, spawn.spawn, aliveThenGoneOnKill);
     pm2.markUnmanaged(9001);
     pm2.kill();
     expect(pm2.status.state).toBe("stopped");
@@ -227,26 +239,62 @@ describe("kill on an unmanaged pid", () => {
 });
 
 describe("markUnmanaged", () => {
+  // Reporting on pid 9001 through the real default killFn would make these
+  // assertions depend on whether an unrelated real process 9001 happens to
+  // exist on the machine running the tests, now that `.status` lazily
+  // liveness-checks unmanaged pids (see "unmanaged liveness" below). Inject
+  // `alive` so these stay about markUnmanaged/start/stop, not liveness.
   it("reports an externally started server with its pid", () => {
-    pm.markUnmanaged(9001);
-    expect(pm.status.state).toBe("unmanaged");
-    expect(pm.status.pid).toBe(9001);
+    const pm2 = new ProcessManager(cfg, spawn.spawn, alive);
+    pm2.markUnmanaged(9001);
+    expect(pm2.status.state).toBe("unmanaged");
+    expect(pm2.status.pid).toBe(9001);
   });
 
   it("refuses to start while a server it does not own is running", () => {
-    pm.markUnmanaged(9001);
-    expect(() => pm.start("Tulsa")).toThrow(/unmanaged/i);
+    const pm2 = new ProcessManager(cfg, spawn.spawn, alive);
+    pm2.markUnmanaged(9001);
+    expect(() => pm2.start("Tulsa")).toThrow(/unmanaged/i);
   });
 
   it("cannot be stopped gracefully, and says why", async () => {
-    pm.markUnmanaged(9001);
-    await expect(pm.stop()).rejects.toThrow(/was not started by this daemon/i);
+    const pm2 = new ProcessManager(cfg, spawn.spawn, alive);
+    pm2.markUnmanaged(9001);
+    await expect(pm2.stop()).rejects.toThrow(/was not started by this daemon/i);
   });
 
   it("returns to stopped when the external process is gone", () => {
-    pm.markUnmanaged(9001);
-    pm.clearUnmanaged();
-    expect(pm.status.state).toBe("stopped");
-    expect(pm.status.pid).toBeNull();
+    const pm2 = new ProcessManager(cfg, spawn.spawn, alive);
+    pm2.markUnmanaged(9001);
+    pm2.clearUnmanaged();
+    expect(pm2.status.state).toBe("stopped");
+    expect(pm2.status.pid).toBeNull();
+  });
+});
+
+describe("unmanaged liveness (checked lazily whenever .status is read)", () => {
+  it("self-heals to stopped when the external process is gone (ESRCH on signal 0)", () => {
+    const pm2 = new ProcessManager(cfg, spawn.spawn, esrch);
+    const events: string[] = [];
+    pm2.on("state", (s) => events.push(s.state));
+    pm2.markUnmanaged(9001);
+
+    expect(pm2.status.state).toBe("stopped");
+    expect(pm2.status.pid).toBeNull();
+    expect(events).toContain("stopped");
+  });
+
+  it("stays unmanaged when the external process still exists (signal 0 succeeds)", () => {
+    const pm2 = new ProcessManager(cfg, spawn.spawn, alive);
+    pm2.markUnmanaged(9001);
+    expect(pm2.status.state).toBe("unmanaged");
+    expect(pm2.status.pid).toBe(9001);
+  });
+
+  it("does not falsely clear state on a permission error -- a process we can't signal still exists", () => {
+    const pm2 = new ProcessManager(cfg, spawn.spawn, eperm);
+    pm2.markUnmanaged(9001);
+    expect(pm2.status.state).toBe("unmanaged");
+    expect(pm2.status.pid).toBe(9001);
   });
 });

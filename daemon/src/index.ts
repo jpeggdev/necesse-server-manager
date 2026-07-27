@@ -5,7 +5,7 @@ import { loadConfig } from "./config.js";
 import { buildServer } from "./http.js";
 import { ModInstaller } from "./mod-installer.js";
 import { ModRegistry } from "./mod-registry.js";
-import { ProcessManager, type ChildLike, type SpawnFn } from "./process-manager.js";
+import { ProcessManager, type SpawnFn } from "./process-manager.js";
 import { SteamCmd } from "./steamcmd.js";
 import { findOrphanServer, listJavaProcesses } from "./orphan.js";
 
@@ -15,11 +15,15 @@ const configFile = join(dataDir, "config.json");
 const modsFile = join(dataDir, "mods.json");
 
 const spawnFn: SpawnFn = (cmd, args, opts) =>
+  // `as const` fixes stdio as the literal 3-tuple ("pipe","pipe","pipe") rather
+  // than widening to string[], which is what lets TS's spawn overload pick
+  // ChildProcessWithoutNullStreams (non-null stdin/stdout/stderr) -- the
+  // exact shape ChildLike requires. No cast needed once the overload matches.
   nodeSpawn(cmd, args, {
     cwd: opts.cwd,
     windowsHide: true,
-    stdio: ["pipe", "pipe", "pipe"],
-  }) as unknown as ChildLike;
+    stdio: ["pipe", "pipe", "pipe"] as const,
+  });
 
 const cfg = await loadConfig(configFile);
 const pm = new ProcessManager(cfg, spawnFn);
