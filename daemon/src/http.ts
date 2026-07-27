@@ -99,7 +99,10 @@ export function buildServer(deps: Deps): FastifyInstance {
     });
   });
 
-  app.get("/api/status", async () => pm.status);
+  app.get("/api/status", async () => {
+    pm.refreshUnmanaged();
+    return pm.status;
+  });
 
   app.get("/api/worlds", async (req) => {
     const name = (req.query as { name?: string }).name;

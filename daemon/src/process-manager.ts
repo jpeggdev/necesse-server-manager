@@ -46,13 +46,6 @@ export class ProcessManager extends EventEmitter {
   }
 
   get status(): StatusPayload {
-    // Lazy, not polled: an unmanaged server can be stopped by any means
-    // outside this daemon (its own console, Task Manager, a reboot), and
-    // nothing else holds a handle on it or watches for that. Checking here
-    // means the very next status read after that happens self-heals instead
-    // of leaving `unmanaged` stuck forever with no way for the daemon to
-    // start a new server.
-    this.checkUnmanagedLiveness();
     return {
       state: this.state,
       world: this.world,
@@ -65,7 +58,18 @@ export class ProcessManager extends EventEmitter {
     };
   }
 
-  private checkUnmanagedLiveness(): void {
+  /**
+   * An unmanaged server can be stopped by any means outside this daemon (its
+   * own console, Task Manager, a reboot), and nothing else holds a handle on
+   * it or watches for that. Callers that read status (e.g. GET /api/status)
+   * must call this first so a stale `unmanaged` self-heals to `stopped` on
+   * the next read, instead of getting stuck forever with no way for the
+   * daemon to start a new server. Deliberately not run from inside the
+   * `status` getter itself: `status` must stay a pure read with no side
+   * effects, since `setState`'s emit already reads it and a mutating getter
+   * would re-enter `setState` from within its own emit.
+   */
+  refreshUnmanaged(): void {
     if (this.state !== "unmanaged" || this.externalPid === null) return;
     if (!this.isPidAlive(this.externalPid)) this.clearUnmanaged();
   }

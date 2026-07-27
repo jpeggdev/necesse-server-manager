@@ -272,28 +272,67 @@ describe("markUnmanaged", () => {
   });
 });
 
-describe("unmanaged liveness (checked lazily whenever .status is read)", () => {
-  it("self-heals to stopped when the external process is gone (ESRCH on signal 0)", () => {
+describe("refreshUnmanaged / status purity", () => {
+  // `status` must be a pure read: no liveness check, no state mutation, no
+  // emission. It's called from inside `setState`'s own emit, so a getter
+  // that mutated state there would re-enter `setState` from within itself --
+  // two emits for one transition, and the intermediate state never
+  // delivered to any listener. The liveness check lives on the explicit
+  // `refreshUnmanaged()` instead; callers that want the self-heal (like
+  // GET /api/status in http.ts) call it before reading `.status`.
+
+  it("markUnmanaged on a dead pid does not self-heal on its own", () => {
     const pm2 = new ProcessManager(cfg, spawn.spawn, esrch);
     const events: string[] = [];
     pm2.on("state", (s) => events.push(s.state));
+
     pm2.markUnmanaged(9001);
 
-    expect(pm2.status.state).toBe("stopped");
-    expect(pm2.status.pid).toBeNull();
-    expect(events).toContain("stopped");
-  });
-
-  it("stays unmanaged when the external process still exists (signal 0 succeeds)", () => {
-    const pm2 = new ProcessManager(cfg, spawn.spawn, alive);
-    pm2.markUnmanaged(9001);
+    expect(events).toEqual(["unmanaged"]);
     expect(pm2.status.state).toBe("unmanaged");
     expect(pm2.status.pid).toBe(9001);
   });
 
-  it("does not falsely clear state on a permission error -- a process we can't signal still exists", () => {
+  it("reading .status repeatedly never mutates state or emits, even with a dead pid", () => {
+    const pm2 = new ProcessManager(cfg, spawn.spawn, esrch);
+    pm2.markUnmanaged(9001);
+
+    const events: string[] = [];
+    pm2.on("state", (s) => events.push(s.state));
+
+    pm2.status;
+    pm2.status;
+    pm2.status;
+
+    expect(pm2.status.state).toBe("unmanaged");
+    expect(events).toEqual([]);
+  });
+
+  it("refreshUnmanaged() self-heals to stopped and emits exactly one state event when the pid is gone (ESRCH on signal 0)", () => {
+    const pm2 = new ProcessManager(cfg, spawn.spawn, esrch);
+    pm2.markUnmanaged(9001);
+
+    const events: string[] = [];
+    pm2.on("state", (s) => events.push(s.state));
+    pm2.refreshUnmanaged();
+
+    expect(events).toEqual(["stopped"]);
+    expect(pm2.status.state).toBe("stopped");
+    expect(pm2.status.pid).toBeNull();
+  });
+
+  it("refreshUnmanaged() stays unmanaged when the external process still exists (signal 0 succeeds)", () => {
+    const pm2 = new ProcessManager(cfg, spawn.spawn, alive);
+    pm2.markUnmanaged(9001);
+    pm2.refreshUnmanaged();
+    expect(pm2.status.state).toBe("unmanaged");
+    expect(pm2.status.pid).toBe(9001);
+  });
+
+  it("refreshUnmanaged() does not falsely clear state on a permission error -- a process we can't signal still exists", () => {
     const pm2 = new ProcessManager(cfg, spawn.spawn, eperm);
     pm2.markUnmanaged(9001);
+    pm2.refreshUnmanaged();
     expect(pm2.status.state).toBe("unmanaged");
     expect(pm2.status.pid).toBe(9001);
   });

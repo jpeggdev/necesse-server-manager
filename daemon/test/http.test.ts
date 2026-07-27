@@ -42,6 +42,23 @@ describe("GET /api/status", () => {
     expect(res.statusCode).toBe(200);
     expect(res.json().state).toBe("stopped");
   });
+
+  it("self-heals a stale unmanaged state when the external pid is gone", async () => {
+    const esrch = (): never => {
+      const e = new Error("kill ESRCH") as NodeJS.ErrnoException;
+      e.code = "ESRCH";
+      throw e;
+    };
+    const deadPm = new ProcessManager(cfg, spawn.spawn, esrch);
+    deadPm.markUnmanaged(9001);
+    const selfHealApp = buildServer({ cfg, configFile, pm: deadPm, installer, steam });
+
+    const res = await selfHealApp.inject({ method: "GET", url: "/api/status" });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().state).toBe("stopped");
+    expect(res.json().pid).toBeNull();
+  });
 });
 
 describe("GET /api/worlds", () => {
