@@ -408,4 +408,52 @@ WebSocket.</p>
   <li>Managing more than one server instance.</li>
 </ul>
 
+<h2 id="future">13. Planned for a future version</h2>
+
+<h3>World settings editor</h3>
+<p>Stop the server, open the world zip, edit <code>worldSettings.cfg</code> through a form that
+knows each field's type and allowed values, rewrite the zip in place, restart the server.</p>
+
+<p>Verified contents of <code>&lt;World&gt;/worldSettings.cfg</code> inside a world zip:</p>
+<pre><code>WORLDSETTINGS = {
+	allowCheats = false,
+	difficulty = CLASSIC,
+	deathPenalty = DROP_MATS,
+	raidFrequency = OCCASIONALLY,
+	survivalMode = true,
+	playerHunger = true,
+	disableMobSpawns = false,
+	forcedPvP = false,
+	allowOutsideCharacters = true,
+	creativeMode = true,
+	disableMobAI = false,
+	canSettlersDie = false,
+	dayTimeMod = 1.0,   // max 10
+	nightTimeMod = 1.0, // max 10
+	gameVersion = 1.2.0,
+	rpgskillsWorldStackLevel = 1,
+	rpgskillsChestSlotUpgradeLevel = 0,
+	rpgskillsWelcomeMessageShown = 1
+}</code></pre>
+
+<p>Constraints this feature must respect, which are not obvious from the format alone:</p>
+<ul>
+  <li><strong>Unknown keys must round-trip untouched.</strong> The trailing <code>rpgskills*</code>
+      entries are written by the RPG Skills mod, not the base game. A form that serializes only
+      the fields it knows would silently destroy mod state. Parse to a key-ordered structure,
+      mutate known fields, re-emit everything else verbatim including comments.</li>
+  <li><code>gameVersion</code> is written by the game and must never be editable.</li>
+  <li>Enum fields need their real option sets extracted from <code>Server.jar</code> rather than
+      guessed from a single observed value.</li>
+  <li>The rewrite must be atomic: build a new zip, verify it opens and contains every original
+      entry, then replace the original. A world zip is the only copy of a save and a partial
+      write destroys it. A timestamped backup before replacement is mandatory.</li>
+  <li>The server must be confirmed <code>stopped</code>, not merely asked to stop, before the zip
+      is touched.</li>
+</ul>
+
+<p>The v1 <code>worlds</code> module is the natural home for this, and its interface should not
+assume worlds are opaque files &mdash; it already enumerates and resolves world paths, which is
+what a settings editor needs.</p>
+
 </div>
