@@ -107,6 +107,26 @@ describe("stop", () => {
   it("rejects when the server is not running", async () => {
     await expect(pm.stop()).rejects.toThrow(/not running/i);
   });
+
+  it("treats a zero exit code during stop as clean, with no lastError", async () => {
+    pm.start("Tulsa");
+    child().child.emitLine(F.READY_LINE_WITH_TS);
+    const done = pm.stop();
+    child().child.exit(0);
+    await done;
+    expect(pm.status.state).toBe("stopped");
+    expect(pm.status.lastError).toBeNull();
+  });
+
+  it("records lastError and rejects the pending stop() when the child exits nonzero mid-stop", async () => {
+    pm.start("Tulsa");
+    child().child.emitLine(F.READY_LINE_WITH_TS);
+    const done = pm.stop();
+    child().child.exit(1);
+    await expect(done).rejects.toThrow(/stopping/i);
+    expect(pm.status.state).toBe("crashed");
+    expect(pm.status.lastError).toMatch(/code 1/);
+  });
 });
 
 describe("crash detection", () => {
@@ -150,6 +170,35 @@ describe("kill", () => {
     expect(child().child.killed).toBe(true);
     child().child.exit(null);
     expect(pm.status.state).toBe("stopped");
+  });
+});
+
+describe("kill on an unmanaged pid", () => {
+  const esrch = (): never => {
+    const e = new Error("kill ESRCH") as NodeJS.ErrnoException;
+    e.code = "ESRCH";
+    throw e;
+  };
+  const eperm = (): never => {
+    const e = new Error("kill EPERM") as NodeJS.ErrnoException;
+    e.code = "EPERM";
+    throw e;
+  };
+
+  it("clears state when the pid is already gone (ESRCH is a success)", () => {
+    const pm2 = new ProcessManager(cfg, spawn.spawn, esrch);
+    pm2.markUnmanaged(9001);
+    pm2.kill();
+    expect(pm2.status.state).toBe("stopped");
+    expect(pm2.status.pid).toBeNull();
+  });
+
+  it("propagates a permission failure and does not clear state", () => {
+    const pm2 = new ProcessManager(cfg, spawn.spawn, eperm);
+    pm2.markUnmanaged(9001);
+    expect(() => pm2.kill()).toThrow(/EPERM/i);
+    expect(pm2.status.state).toBe("unmanaged");
+    expect(pm2.status.pid).toBe(9001);
   });
 });
 

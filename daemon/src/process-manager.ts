@@ -15,6 +15,9 @@ export interface ChildLike {
 
 export type SpawnFn = (cmd: string, args: string[], opts: { cwd: string }) => ChildLike;
 
+/** Sends a kill signal to an external pid. Defaults to `process.kill`; injectable so tests never signal a real pid. */
+export type KillFn = (pid: number) => void;
+
 export class ProcessManager extends EventEmitter {
   private child: ChildLike | null = null;
   private state: ServerState = "stopped";
@@ -29,7 +32,11 @@ export class ProcessManager extends EventEmitter {
   private externalPid: number | null = null;
   private stopWaiter: { resolve: () => void; reject: (e: Error) => void; timer: NodeJS.Timeout } | null = null;
 
-  constructor(private cfg: DaemonConfig, private spawnFn: SpawnFn) {
+  constructor(
+    private cfg: DaemonConfig,
+    private spawnFn: SpawnFn,
+    private killFn: KillFn = (pid) => process.kill(pid),
+  ) {
     super();
   }
 
@@ -128,17 +135,30 @@ export class ProcessManager extends EventEmitter {
 
   private onExit(code: number | null): void {
     const wasStopping = this.state === "stopping";
+    // A waiter only exists while a graceful stop() is pending; kill() also
+    // moves state to "stopping" but never creates one, so this is how an
+    // unexpected fault during a graceful stop is told apart from a kill().
+    const waiter = this.stopWaiter;
+    this.stopWaiter = null;
     this.child = null;
-    if (wasStopping) {
+
+    if (waiter && code !== 0) {
+      this.lastError = `Server exited with code ${code} while stopping; the shutdown was not clean.`;
+      this.setState("crashed");
+    } else if (wasStopping) {
       this.setState("stopped");
     } else {
       this.lastError = `Server process exited with code ${code}`;
       this.setState("crashed");
     }
-    if (this.stopWaiter) {
-      clearTimeout(this.stopWaiter.timer);
-      this.stopWaiter.resolve();
-      this.stopWaiter = null;
+
+    if (waiter) {
+      clearTimeout(waiter.timer);
+      if (code !== 0) {
+        waiter.reject(new Error(this.lastError!));
+      } else {
+        waiter.resolve();
+      }
     }
   }
 
@@ -178,7 +198,16 @@ export class ProcessManager extends EventEmitter {
   kill(): void {
     if (this.state === "unmanaged" && this.externalPid !== null) {
       // The UI offers this only for a server we did not spawn; it risks world loss.
-      process.kill(this.externalPid);
+      try {
+        this.killFn(this.externalPid);
+      } catch (e) {
+        const err = e as NodeJS.ErrnoException;
+        if (err.code !== "ESRCH") {
+          // Not "already gone" (e.g. EPERM): a genuine failure, state must not clear.
+          throw new Error(`Failed to kill unmanaged process (pid ${this.externalPid}): ${err.message}`);
+        }
+        // ESRCH: the pid is already gone, which is the goal state for this operation.
+      }
       this.clearUnmanaged();
       return;
     }
