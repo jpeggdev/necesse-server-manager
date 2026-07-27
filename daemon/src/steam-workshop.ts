@@ -104,10 +104,18 @@ function toItem(raw: RawDetail): WorkshopItem | null {
   const id = raw.publishedfileid;
   if (typeof id !== "string" || id.length === 0) return null;
   // GetPublishedFileDetails always sets `result`; QueryFiles omits it. Anything
-  // other than 1 (9 = file not found, plus the removed/hidden cases) carries no
+  // other than 1 (9 = file not found, plus the removed cases) carries no
   // usable title or timestamp, so it is dropped rather than reported as an
   // entry with empty fields.
   if (raw.result !== undefined && raw.result !== RESULT_OK) return null;
+  // A banned item comes back with result 1 and a perfectly good title, so it
+  // has to be dropped explicitly. steamcmd cannot download one anonymously, so
+  // reporting it as a live entry would offer an update badge for something
+  // that can never install, and would resolve a name for an add that is going
+  // to fail. `visibility` is deliberately NOT filtered on: unlisted items are
+  // still downloadable by id and mod authors do use that, so excluding
+  // non-public entries would reject mods that install perfectly well.
+  if (raw.banned === true || raw.banned === 1) return null;
   const updated = raw.time_updated;
   const updatedMs = typeof updated === "number" || typeof updated === "string" ? num(updated) : 0;
   return {
@@ -119,7 +127,6 @@ function toItem(raw: RawDetail): WorkshopItem | null {
     updatedAt: updatedMs > 0 ? new Date(updatedMs * 1000).toISOString() : null,
     fileSize: num(raw.file_size),
     subscriptions: num(raw.subscriptions),
-    banned: raw.banned === true || raw.banned === 1,
   };
 }
 

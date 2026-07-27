@@ -45,6 +45,23 @@ An id Steam does not know still comes back, with `result: 9`. The module drops
 those rather than emitting a blank item, so the caller matches by id and treats a
 miss as "Steam does not know this one".
 
+### What gets dropped, and what does not
+
+- **`result !== 1`** - dropped. No usable title or timestamp.
+- **`banned: true`** - dropped. A banned item comes back with `result: 1` and a
+  perfectly good title, so it has to be excluded explicitly; steamcmd cannot
+  download one anonymously, so keeping it would badge an update that can never
+  install and resolve a name for an add that is going to fail. There is
+  therefore no `banned` field on `WorkshopItem` - a banned entry is simply
+  absent.
+- **`visibility`** - **not** filtered. 0 is public, 1 friends-only, 2 private,
+  3 unlisted. Unlisted items are still downloadable by direct id and mod authors
+  do use that, so filtering on visibility would reject mods that install fine.
+
+Not confirmed without a live call: what Steam returns for a *private* item to an
+anonymous caller. It is most likely `result: 9` (which is already dropped), but
+that was not probed.
+
 ## QueryFiles (needs a key)
 
 `GET https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/`
@@ -112,8 +129,27 @@ mapped to status codes in `http.ts`:
 Never 200 - a Steam outage must not be indistinguishable from "nothing to
 report". The underlying message is always carried through.
 
-## Design constraint worth keeping
+Every request carries `AbortSignal.timeout(10s)`. Neither Node's fetch nor
+Fastify bounds a connection that goes quiet, so without it a wedged Steam would
+hold an HTTP handler open for the life of the daemon. A test asserts the signal
+is attached, because a fake fetch always answers and would otherwise never
+notice its removal.
 
-`GET /api/mods` does **not** call Steam. The mod list is read off disk and has to
+## Design constraints worth keeping
+
+**`GET /api/mods` does not call Steam.** The mod list is read off disk and has to
 keep working when Steam is down; update badges are a second call the client
 makes afterward. A Steam outage therefore costs badges, not the mod list.
+
+**Name resolution in `POST /api/mods` runs before the `requireStopped` /
+`requireNoActiveTask` guards, not after.** `requireNoActiveTask` is only an
+interlock if checking the set and reserving a slot are atomic, and `runTask`
+reserves synchronously - so the pair holds exactly as long as nothing awaits
+between them. Putting the Steam round trip there let two nameless adds both pass
+the check while both waited on Steam, and both then ran steamcmd against
+`modsDir` at once. Hoisting the await above the guards removes the window
+instead of policing it: nothing enters `activeTasks` before `runTask`, so no
+hung or failed resolution can strand an entry and there is no reservation to
+release. The cost is that a request destined to be refused may still spend one
+read-only Steam call first. Adds carrying an explicit name skip resolution and
+reach the guards synchronously, exactly as before.

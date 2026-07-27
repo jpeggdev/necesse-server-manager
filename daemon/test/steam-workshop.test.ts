@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   SteamWorkshop,
   WorkshopError,
   DETAILS_URL,
   QUERY_FILES_URL,
+  REQUEST_TIMEOUT_MS,
 } from "../src/steam-workshop.js";
 import { DEFAULT_CONFIG } from "../src/config.js";
 import { makeFakeFetch, detailsBody, type FakeFetch } from "./fixtures/fake-fetch.js";
@@ -25,6 +26,36 @@ beforeEach(() => {
   workshop = new SteamWorkshop(cfg, net.fetch);
 });
 
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+/*
+ * Nothing else in the suite would notice if the request deadline were deleted:
+ * a fake fetch always answers. These pin it directly, because without it a
+ * Steam that connects and then goes quiet holds an HTTP handler open for as
+ * long as the daemon runs.
+ */
+describe("request deadline", () => {
+  it("attaches a 10s abort signal to the keyless details call", async () => {
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    net.respondJson(detailsBody([{ id: "111" }]));
+    await workshop.getDetails(["111"]);
+    expect(timeout).toHaveBeenCalledWith(REQUEST_TIMEOUT_MS);
+    expect(net.calls[0].signal).toBeInstanceOf(AbortSignal);
+    expect(net.calls[0].signal?.aborted).toBe(false);
+  });
+
+  it("attaches one to the keyed search call too", async () => {
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    cfg.steamApiKey = FAKE_KEY;
+    net.respondJson({ response: { total: 0 } });
+    await workshop.search({ text: "torch" });
+    expect(timeout).toHaveBeenCalledWith(REQUEST_TIMEOUT_MS);
+    expect(net.calls[0].signal).toBeInstanceOf(AbortSignal);
+  });
+});
+
 describe("getDetails", () => {
   it("posts the form-encoded id list Steam's keyless endpoint expects", async () => {
     net.respondJson(detailsBody([{ id: "111" }, { id: "222" }]));
@@ -43,12 +74,7 @@ describe("getDetails", () => {
       detailsBody([{ id: "111", title: "Safe Haven QOL", timeUpdated: 1_700_000_000, subscriptions: 42 }]),
     );
     const [item] = await workshop.getDetails(["111"]);
-    expect(item).toMatchObject({
-      id: "111",
-      title: "Safe Haven QOL",
-      subscriptions: 42,
-      banned: false,
-    });
+    expect(item).toMatchObject({ id: "111", title: "Safe Haven QOL", subscriptions: 42 });
     expect(item.updatedAt).toBe(new Date(1_700_000_000 * 1000).toISOString());
     expect(item.previewUrl).toMatch(/^https:/);
   });
@@ -58,6 +84,26 @@ describe("getDetails", () => {
     net.respondJson(detailsBody([{ id: "111" }, { id: "999", result: 9 }]));
     const items = await workshop.getDetails(["111", "999"]);
     expect(items.map((i) => i.id)).toEqual(["111"]);
+  });
+
+  it("drops a banned item, which Steam still reports with result 1 and a good title", async () => {
+    // steamcmd cannot download a banned item anonymously, so treating it as a
+    // live entry would badge an update that can never install and would resolve
+    // a name for an add that is going to fail.
+    net.respondJson(detailsBody([{ id: "111" }, { id: "222", title: "Naughty", banned: true }]));
+    const items = await workshop.getDetails(["111", "222"]);
+    expect(items.map((i) => i.id)).toEqual(["111"]);
+  });
+
+  it("keeps a non-public item, since an unlisted mod still installs by id", async () => {
+    net.respondJson({
+      response: {
+        publishedfiledetails: [
+          { publishedfileid: "111", result: 1, title: "Unlisted", time_updated: 1, visibility: 3 },
+        ],
+      },
+    });
+    expect((await workshop.getDetails(["111"])).map((i) => i.id)).toEqual(["111"]);
   });
 
   it("reports null rather than the unix epoch when Steam sent no timestamp", async () => {

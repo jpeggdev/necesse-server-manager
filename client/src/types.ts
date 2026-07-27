@@ -87,9 +87,15 @@ export interface ModListResponse {
 }
 
 /**
- * One Steam Workshop entry, flattened from whichever Steam endpoint produced
- * it. `updatedAt` is Steam's `time_updated` (unix seconds) as ISO, or null
- * when Steam sent none - never the epoch, so "unknown" cannot read as "1970".
+ * One usable Steam Workshop entry, flattened from whichever Steam endpoint
+ * produced it. `updatedAt` is Steam's `time_updated` (unix seconds) as ISO, or
+ * null when Steam sent none - never the epoch, so "unknown" cannot read as
+ * "1970".
+ *
+ * Entries Steam reports a non-1 `result` for, and entries flagged `banned`,
+ * never become a WorkshopItem: neither can be downloaded, so there is no
+ * `banned` field here because a banned item is simply absent. Visibility is
+ * not filtered - an unlisted item still installs by id.
  */
 export interface WorkshopItem {
   id: string;
@@ -98,7 +104,6 @@ export interface WorkshopItem {
   updatedAt: string | null;
   fileSize: number;
   subscriptions: number;
-  banned: boolean;
 }
 
 export interface WorkshopSearchResponse {
@@ -125,7 +130,11 @@ export interface ModUpdateInfo {
   workshopUpdatedAt: string | null;
   /** ModEntry.lastUpdated: when this daemon last installed it. */
   installedAt: string;
-  /** false when Steam returned no usable entry (removed, banned, bad id). */
+  /**
+   * false when Steam returned no usable entry: a non-1 result (removed, bad
+   * id), or an entry flagged banned. Such a mod keeps working locally; Steam
+   * simply has nothing to compare against, so it never shows an update.
+   */
   onWorkshop: boolean;
   updateAvailable: boolean;
 }

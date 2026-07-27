@@ -547,13 +547,69 @@ describe("POST /api/mods name resolution", () => {
     expect(spawn.calls).toHaveLength(0);
   });
 
-  it("still applies the stopped and no-active-task guards before touching Steam", async () => {
+  it("still refuses a nameless add while the server is running", async () => {
+    const install = vi.spyOn(installer, "install");
+    net.respondJson(detailsBody([{ id: "3731244177", title: "Resolved" }]));
     await app.inject({ method: "POST", url: "/api/server/start", payload: { world: "Tulsa" } });
     spawn.calls[0].child.emitLine(F.READY_LINE_WITH_TS);
     const res = await app.inject({ method: "POST", url: "/api/mods", payload: { id: "3731244177" } });
     expect(res.statusCode).toBe(409);
     expect(res.json().error).toMatch(/running/i);
-    expect(net.calls).toHaveLength(0);
+    expect(install).not.toHaveBeenCalled();
+  });
+
+  it("still refuses a nameless add while a background task is running", async () => {
+    // The half of the guard pair that name resolution actually put at risk:
+    // an add that resolves a title must not slip past an in-flight steamcmd.
+    const install = vi.spyOn(installer, "install");
+    net.respondJson(detailsBody([{ id: "3731244177", title: "Resolved" }]));
+    await app.inject({ method: "POST", url: "/api/server/update" });
+    const res = await app.inject({ method: "POST", url: "/api/mods", payload: { id: "3731244177" } });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toMatch(/background task/i);
+    expect(install).not.toHaveBeenCalled();
+  });
+
+  /*
+   * The interlock is only worth anything if it is atomic. Name resolution
+   * introduced an await between "is anything in flight?" and reserving the
+   * slot, so two nameless adds could both pass the check while both sat in the
+   * Steam round trip - and both then ran steamcmd against modsDir at once,
+   * which is precisely the corruption the interlock exists to prevent. The
+   * window was as long as the Steam call, up to the full request timeout.
+   */
+  it("refuses a second nameless add fired while the first is still resolving its name", async () => {
+    const install = vi
+      .spyOn(installer, "install")
+      // Never settles: the accepted task stays in activeTasks, which is the
+      // state the second request has to be refused against.
+      .mockImplementation(() => new Promise(() => {}));
+    const release = net.hangThenJson(
+      detailsBody([
+        { id: "111", title: "First" },
+        { id: "222", title: "Second" },
+      ]),
+    );
+
+    // `.then()` is what actually dispatches an inject()ed request - holding the
+    // chainable object alone runs nothing, which is enough to make a naive
+    // version of this test pass against the very bug it is meant to catch.
+    const first = app.inject({ method: "POST", url: "/api/mods", payload: { id: "111" } }).then((r) => r);
+    const second = app.inject({ method: "POST", url: "/api/mods", payload: { id: "222" } }).then((r) => r);
+    // Both requests are genuinely inside the Steam round trip at the same time
+    // before either is allowed to continue. Without this the two serialize and
+    // the race is never exercised.
+    await vi.waitFor(() => expect(net.calls).toHaveLength(2));
+    release();
+    const [a, b] = await Promise.all([first, second]);
+
+    expect([a.statusCode, b.statusCode].sort()).toEqual([200, 409]);
+    const refused = a.statusCode === 409 ? a : b;
+    expect(refused.json().error).toMatch(/background task/i);
+
+    // Drain the microtask queue the accepted task's work is scheduled on.
+    await new Promise((r) => setImmediate(r));
+    expect(install).toHaveBeenCalledTimes(1);
   });
 
   it("still rejects a non-numeric id before touching Steam", async () => {
@@ -602,6 +658,27 @@ describe("GET /api/mods/updates", () => {
   it("falls back to the registry's name and claims no update for an id Steam does not know", async () => {
     await installed("999", "Locally Known", "2026-01-01T00:00:00.000Z");
     net.respondJson(detailsBody([{ id: "999", result: 9 }]));
+    const [mod] = (await app.inject({ method: "GET", url: "/api/mods/updates" })).json().mods;
+    expect(mod).toMatchObject({
+      title: "Locally Known",
+      onWorkshop: false,
+      workshopUpdatedAt: null,
+      updateAvailable: false,
+    });
+  });
+
+  it("treats a banned entry as no usable workshop entry, not as an installable update", async () => {
+    await installed("111", "Locally Known", "2026-01-01T00:00:00.000Z");
+    net.respondJson(
+      detailsBody([
+        {
+          id: "111",
+          title: "Naughty Mod",
+          banned: true,
+          timeUpdated: Math.floor(Date.parse("2026-05-01T00:00:00.000Z") / 1000),
+        },
+      ]),
+    );
     const [mod] = (await app.inject({ method: "GET", url: "/api/mods/updates" })).json().mods;
     expect(mod).toMatchObject({
       title: "Locally Known",
@@ -672,16 +749,25 @@ describe("GET /api/workshop/search", () => {
     expect(res.statusCode).toBe(200);
     expect(res.json().nextCursor).toBe("PAGE2");
     expect(res.json().total).toBe(2);
-    expect(res.json().items[0]).toMatchObject({
+    expect(res.json().items[0]).toEqual({
       id: "3731244177",
       title: "Safe Haven QOL",
       previewUrl: "https://images.example/a.jpg",
       subscriptions: 4242,
+      fileSize: 0,
       updatedAt: new Date(1_700_000_000 * 1000).toISOString(),
     });
     const sent = new URL(net.calls[0].url);
     expect(sent.searchParams.get("search_text")).toBe("torch");
     expect(sent.searchParams.get("cursor")).toBe("*");
+  });
+
+  it("blames the caller, not Steam, for a repeated query parameter", async () => {
+    cfg.steamApiKey = FAKE_KEY;
+    const res = await app.inject({ method: "GET", url: "/api/workshop/search?q=a&q=b" });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/"q"/);
+    expect(net.calls).toHaveLength(0);
   });
 
   it("reports an upstream failure as 502 without leaking the key", async () => {

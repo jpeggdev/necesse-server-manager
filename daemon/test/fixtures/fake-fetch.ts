@@ -4,6 +4,12 @@ export interface FetchRecord {
   url: string;
   method: string;
   body: string;
+  /**
+   * Recorded so a test can prove the request deadline is actually attached.
+   * Without this the `signal:` line could be deleted and every test would
+   * still pass, leaving a silent Steam able to hold a request open forever.
+   */
+  signal: AbortSignal | undefined;
 }
 
 export interface FakeFetch {
@@ -15,6 +21,13 @@ export interface FakeFetch {
   respondRaw(status: number, statusText: string, body: string): void;
   /** Next call rejects, as a DNS failure or a timeout would. */
   failWith(message: string): void;
+  /**
+   * Holds every call open until the returned function is invoked, then answers
+   * with `payload`. Lets a test park two requests inside the Steam round trip
+   * at once, which is the only way to observe what the daemon does while one
+   * is in flight.
+   */
+  hangThenJson(payload: unknown): () => void;
 }
 
 /**
@@ -39,7 +52,12 @@ export function makeFakeFetch(): FakeFetch {
   return {
     calls,
     fetch: (url, init) => {
-      calls.push({ url, method: init?.method ?? "GET", body: init?.body ?? "" });
+      calls.push({
+        url,
+        method: init?.method ?? "GET",
+        body: init?.body ?? "",
+        signal: init?.signal,
+      });
       return next();
     },
     respondJson(payload) {
@@ -50,6 +68,14 @@ export function makeFakeFetch(): FakeFetch {
     },
     failWith(message) {
       next = () => Promise.reject(new Error(message));
+    },
+    hangThenJson(payload) {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => {
+        release = r;
+      });
+      next = () => gate.then(() => res(200, "OK", JSON.stringify(payload)));
+      return release;
     },
   };
 }
@@ -63,6 +89,7 @@ export function detailsBody(
     result?: number;
     subscriptions?: number;
     previewUrl?: string;
+    banned?: boolean;
   }>,
 ): unknown {
   return {
@@ -78,7 +105,7 @@ export function detailsBody(
         time_updated: i.timeUpdated ?? 1_700_000_000,
         file_size: "12345",
         subscriptions: i.subscriptions ?? 7,
-        banned: false,
+        banned: i.banned ?? false,
         visibility: 0,
       })),
     },

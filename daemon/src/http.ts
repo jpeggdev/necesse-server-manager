@@ -352,20 +352,31 @@ export function buildServer(deps: Deps): FastifyInstance {
     if (typeof id !== "string" || !WORKSHOP_ID.test(id)) {
       return reply.code(400).send({ ok: false, error: `Invalid workshop id: ${JSON.stringify(id)}` });
     }
-    if (!requireStopped(reply)) {
-      return reply.send({
-        ok: false,
-        error: `Cannot change mods while the server is ${pm.status.state}. Stop it first.`,
-      });
-    }
-    if (!requireNoActiveTask(reply, "install a mod")) return reply;
-    // An explicitly supplied name always wins; Steam is consulted only when the
-    // client gave none, and after the guards above so a request that was going
-    // to be refused anyway never costs a network round trip. A placeholder name
-    // would be written into mods.json and shown in the UI from then on, so
-    // failing here is better than inventing one.
+    // Name resolution happens BEFORE the two guards below, and this ordering is
+    // load-bearing rather than incidental.
+    //
+    // `requireNoActiveTask` is only an interlock if checking the set and
+    // reserving a slot in it are atomic. `runTask` adds the id synchronously,
+    // so the pair is atomic exactly as long as nothing awaits between them -
+    // and resolving a name is an await, on a network round trip lasting up to
+    // the full request timeout. Sitting it between the check and the reserve
+    // let two nameless adds both pass the check while both waited on Steam,
+    // and both then ran steamcmd against modsDir at once: the corruption the
+    // interlock exists to prevent.
+    //
+    // Hoisting the await above the guards removes the window rather than
+    // policing it. Nothing is ever added to `activeTasks` before `runTask`, so
+    // no failed or hung resolution can strand an entry, and there is no
+    // reservation to release on an error path. The cost is that a request that
+    // was going to be refused may still spend a Steam call first, which is a
+    // read-only GET and cheap next to the alternative. Requests carrying an
+    // explicit name skip this entirely and reach the guards synchronously,
+    // exactly as before.
     let resolved = typeof name === "string" ? name.trim() : "";
     if (resolved.length === 0) {
+      // An explicitly supplied name always wins. A placeholder invented here
+      // would be written into mods.json and shown in the UI from then on, so
+      // failing is better.
       try {
         resolved = (await workshop.getDetails([id]))[0]?.title.trim() ?? "";
       } catch (e) {
@@ -381,11 +392,19 @@ export function buildServer(deps: Deps): FastifyInstance {
           ok: false,
           error:
             `No name was supplied and the Steam Workshop has no usable entry for id ${id} ` +
-            `(it may be removed, private, or the id may be wrong). Supply a name explicitly ` +
-            `if you are sure the id is right.`,
+            `(it may be removed, banned, private, or the id may be wrong). Supply a name ` +
+            `explicitly if you are sure the id is right.`,
         });
       }
     }
+    // Everything from here to `runTask` must stay synchronous.
+    if (!requireStopped(reply)) {
+      return reply.send({
+        ok: false,
+        error: `Cannot change mods while the server is ${pm.status.state}. Stop it first.`,
+      });
+    }
+    if (!requireNoActiveTask(reply, "install a mod")) return reply;
     const taskId = runTask("mod-install", async (onLine) => {
       const r = await installer.install(id, resolved, onLine);
       return { ok: r.ok, error: r.error };
@@ -443,12 +462,23 @@ export function buildServer(deps: Deps): FastifyInstance {
    * which reads like a broken daemon.
    */
   app.get("/api/workshop/search", async (req, reply) => {
-    const q = req.query as { q?: string; cursor?: string; count?: string };
-    const asked = Number(q.count);
+    const q = req.query as Record<string, unknown>;
+    // A repeated parameter (?q=a&q=b) arrives as an array, which would throw
+    // inside the module and reach the client as a 502 blaming Steam for what is
+    // the caller's own mistake. Named plainly as a 400 instead.
+    for (const key of ["q", "cursor", "count"]) {
+      if (q[key] !== undefined && typeof q[key] !== "string") {
+        return reply
+          .code(400)
+          .send({ ok: false, error: `Query parameter "${key}" must be given at most once.` });
+      }
+    }
+    const { q: text, cursor, count } = q as { q?: string; cursor?: string; count?: string };
+    const asked = Number(count);
     try {
       const r = await workshop.search({
-        text: q.q,
-        cursor: q.cursor,
+        text,
+        cursor,
         // Clamped rather than passed through: Steam caps the page size anyway,
         // and an unbounded numperpage from a query string is a free way to
         // make the daemon fetch a very large body.
