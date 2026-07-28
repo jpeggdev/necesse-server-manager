@@ -281,7 +281,15 @@ export function WorldSettingsDialog({
                   text={draft[f.key] ?? f.value}
                   disabled={saving}
                   blocking={blockedKeys.includes(f.key)}
-                  onChange={(v) => setDraft((d) => ({ ...d, [f.key]: v }))}
+                  onChange={(v) => {
+                    // Drop the previous save's outcome the moment editing
+                    // resumes. Leaving "Saved difficulty" on screen beside a
+                    // freshly edited box reads as though the new edit is
+                    // already written too.
+                    setResult(null);
+                    setSaveError(null);
+                    setDraft((d) => ({ ...d, [f.key]: v }));
+                  }}
                 />
               ))}
             </div>
@@ -299,8 +307,11 @@ export function WorldSettingsDialog({
         </div>
 
         <div className="modal-foot">
+          {/* "Cancel" is a lie once a write has landed - there is nothing left
+              to abandon, and the word invites the reader to think closing might
+              undo it. */}
           <button onClick={onClose} disabled={saving}>
-            Cancel
+            {result === null ? "Cancel" : "Close"}
           </button>
           <button
             onClick={onSave}
@@ -311,7 +322,11 @@ export function WorldSettingsDialog({
                 : blockedKeys.length > 0
                   ? `Left empty: ${blockedKeys.join(", ")}. An empty box is not a value - type a number, or restore the stored one.`
                   : changedKeys.length === 0
-                    ? "Nothing has been changed yet"
+                    ? // After a write, "nothing has been changed yet" reads as a
+                      // contradiction of the success line directly above it.
+                      result !== null
+                      ? "Already saved. Change a value to save again."
+                      : "Nothing has been changed yet"
                     : `Writes ${changedKeys.join(", ")}`
             }
           >

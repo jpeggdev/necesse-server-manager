@@ -349,6 +349,52 @@ describe("WorldSettingsDialog", () => {
     expect(await screen.findByText(new RegExp(`Backup written to ${BACKUP}`))).toBeTruthy();
   });
 
+  it("does not tell the user nothing has changed yet once a save has landed", async () => {
+    // The disabled Save's reason used to still read "Nothing has been changed
+    // yet" after a successful write, directly contradicting the success line
+    // above it - which read as though the save had not taken.
+    await openDialog();
+    await userEvent.click(screen.getByLabelText("allowCheats"));
+    await userEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    await screen.findByText(new RegExp(`Backup written to ${BACKUP}`));
+
+    const saveBtn = screen.getByRole("button", { name: /^save$/i });
+    expect(saveBtn).toBeDisabled();
+    expect(saveBtn.getAttribute("title")).toMatch(/already saved/i);
+    expect(saveBtn.getAttribute("title")).not.toMatch(/nothing has been changed/i);
+  });
+
+  it("offers Close rather than Cancel once a write has landed", async () => {
+    // Scoped to the footer: the header's "x" is also named Close.
+    const footerDismiss = () =>
+      screen.getByRole("button", { name: /^save$/i }).parentElement!
+        .querySelector("button")!;
+
+    await openDialog();
+    expect(footerDismiss().textContent).toMatch(/^cancel$/i);
+
+    await userEvent.click(screen.getByLabelText("allowCheats"));
+    await userEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    await screen.findByText(new RegExp(`Backup written to ${BACKUP}`));
+
+    expect(footerDismiss().textContent).toMatch(/^close$/i);
+  });
+
+  it("drops the previous save's outcome as soon as editing resumes", async () => {
+    // Otherwise "Saved allowCheats" sits beside a freshly edited box, implying
+    // the new edit is already written too.
+    await openDialog();
+    await userEvent.click(screen.getByLabelText("allowCheats"));
+    await userEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    await screen.findByText(new RegExp(`Backup written to ${BACKUP}`));
+
+    // Stored value is CLASSIC, so CASUAL is a real change. The option set here
+    // is deliberately fake - the daemon is the source of truth for enums.
+    await userEvent.selectOptions(screen.getByLabelText("difficulty"), "CASUAL");
+    expect(screen.queryByText(/backup written to/i)).toBeNull();
+    expect(screen.getByRole("button", { name: /^save$/i })).toBeEnabled();
+  });
+
   it("says plainly when a save wrote nothing because the values already matched", async () => {
     await openDialog({ save: vi.fn(async () => writeResponse({ backup: null, changed: [] })) });
     await userEvent.click(screen.getByLabelText("allowCheats"));
