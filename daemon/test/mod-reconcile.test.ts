@@ -149,7 +149,11 @@ describe("adopt before pruning", () => {
     const entry = (await library.get("x.a"))!;
     const held = library.jarsOf(entry);
     expect(held).toHaveLength(2);
-    const bytes = await Promise.all(held.map((j) => readFile(library.jarPath(entry, j.jar))));
+    // Both builds arrived as "Mod.jar" and both are still here, kept apart by
+    // their storage names while both keep the label the mods folder would use.
+    expect(held.map((j) => j.jar)).toEqual(["Mod.jar", "Mod.jar"]);
+    expect(new Set(held.map((j) => j.file)).size).toBe(2);
+    const bytes = await Promise.all(held.map((j) => readFile(library.jarPath(entry, j.file))));
     expect(bytes.map(sha).sort()).toEqual([sha(first), sha(second)].sort());
   });
 
@@ -318,6 +322,64 @@ describe("bringing the folder to the set", () => {
     expect(await jarsIn(modsDir)).toEqual(["A-2.jar"]);
     expect(summary.removed).toEqual(["A-1.jar"]);
     expect(summary.copied).toEqual(["A-2.jar"]);
+  });
+
+  /*
+   * The keep/replace decision, on the bytes rather than on the name.
+   *
+   * Deciding it by filename was a silent wrong-build launch: a different build
+   * of the right mod, sitting in the folder under the same name the library
+   * uses, was retained into the library (so nothing was lost) and then KEPT in
+   * the folder - so the game loaded that build while the library, the API and
+   * `verify` all reported the other one. Reachable on the live box today:
+   * `CorruptedRaidMod.jar` carries no version in its filename, so every rebuild
+   * of it lands under exactly the same name.
+   */
+  it("replaces a different build sharing the library jar's filename, and verify agrees", async () => {
+    await stock("Mod.jar", { id: "x.a", version: "1" });
+    const libraryBytes = await readFile(library.jarPath((await library.get("x.a"))!));
+    // A different build, same name, dropped into the folder by hand.
+    const other = await readFile(await install("Mod.jar", { id: "x.a", version: "1" }, "other-build"));
+    expect(sha(other)).not.toBe(sha(libraryBytes));
+
+    const summary = await run(["x.a"]);
+
+    // The folder holds the LIBRARY's bytes, which is what every surface reports.
+    expect(await jarsIn(modsDir)).toEqual(["Mod.jar"]);
+    expect(sha(await readFile(join(modsDir, "Mod.jar")))).toBe(sha(libraryBytes));
+    expect(summary.kept).toEqual([]);
+    expect(summary.removed).toEqual(["Mod.jar"]);
+    expect(summary.copied).toEqual(["Mod.jar"]);
+    // ...and the build that was displaced is still restorable, as ever.
+    expect(summary.adopted).toEqual(["Mod.jar"]);
+    const entry = (await library.get("x.a"))!;
+    const retained = library.jarsOf(entry).find((j) => j.sha256 === sha(other));
+    expect(retained).toBeDefined();
+    expect(await readFile(library.jarPath(entry, retained!.file))).toEqual(other);
+  });
+
+  /*
+   * `verify` must fail on bytes too. Checking ids alone would agree with a
+   * folder holding a different build of the right mod - exactly the state that
+   * makes the game run one thing while everything else reports another.
+   */
+  it("refuses to hand over a folder whose bytes are not the library's", async () => {
+    await stock("Mod.jar", { id: "x.a", version: "1" });
+    const entry = (await library.get("x.a"))!;
+    // Reconcile puts the right jar in place, then something else replaces it.
+    await run(["x.a"]);
+    await makeModJar(modsDir, "Mod.jar", { id: "x.a", version: "1" }, { filler: "swapped" });
+    // The library now already holds those bytes, so retaining is a no-op and the
+    // ONLY thing that can catch the swap is the hash comparison.
+    await library.retain(join(modsDir, "Mod.jar"), { kind: "local", how: "adopted" }, "Mod.jar");
+    const swapped = await readFile(join(modsDir, "Mod.jar"));
+
+    await run(["x.a"]);
+
+    expect(await readFile(join(modsDir, "Mod.jar"))).toEqual(
+      await readFile(library.jarPath(entry)),
+    );
+    expect(await readFile(join(modsDir, "Mod.jar"))).not.toEqual(swapped);
   });
 
   it("creates the mods folder when it is not there at all", async () => {

@@ -86,9 +86,10 @@ when the server is verified stopped and no task is in flight.
    dropping an old jar into the folder cannot silently downgrade a world.
 3. Resolve each id in the set to its current library jar; refuse if any is
    missing, or if two of them share a filename.
-4. Delete jars in the mods folder that the set does not name.
+4. Delete jars in the mods folder that the set does not name, **and any whose
+   bytes are not the library's current ones** for a mod it does name.
 5. Copy in the set's jars that are missing, then verify the folder contains
-   exactly the set, then spawn.
+   exactly the set — **by hash, not by filename** — then spawn.
 
 **Invariant: never delete a jar the library cannot restore — *that* jar, not
 merely something else carrying the same mod id.** Two versions of one mod are
@@ -96,6 +97,15 @@ two different files: the library holding `Mod-1.0.jar` does nothing for a
 hand-dropped `Mod-2.0.jar` that may be the only copy in existence. So step 2's
 test is a **hash of the bytes**, never the mod id — gating on the id deletes
 exactly that jar, which is the bug this wording exists to prevent recurring.
+
+**Every comparison about a jar is a comparison of its bytes.** Two builds of one
+mod routinely ship under one filename — `CorruptedRaidMod.jar` carries no
+version in its name at all — so a filename says nothing about which build a file
+is. Deciding step 2 by mod id destroys a jar; deciding steps 4 and 5 by filename
+is quieter and worse: the folder keeps a build the library did not choose, the
+game loads it, and the library, `GET /api/mods/library` and the verify step all
+report the other one. A filename is a label for humans and for the game's log;
+it is never evidence.
 
 If any step fails the server does not start and the failure is reported — a
 half-reconciled mods folder must never be launched, because the game would

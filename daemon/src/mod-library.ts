@@ -71,9 +71,16 @@ export class ModLibrary {
     return (await this.get(id)) !== undefined;
   }
 
-  /** Where a jar of this mod is, or would be. Defaults to the current one. */
-  jarPath(entry: Pick<ModLibraryEntry, "id" | "jar">, jar?: string): string {
-    return join(this.dir, safeModId(entry.id), jar ?? entry.jar);
+  /**
+   * Where a jar of this mod is on disk, or would be. Defaults to the current
+   * one. Addressed by its storage name (`file`), which is the only name that is
+   * unique within the folder - `jar` is the label the mods folder gets and two
+   * builds can share it.
+   */
+  jarPath(entry: Pick<ModLibraryEntry, "id" | "jar" | "file">, file?: string): string {
+    // `?? entry.jar` covers a manifest written before storage names were split
+    // out, where the two were always the same string.
+    return join(this.dir, safeModId(entry.id), file ?? entry.file ?? entry.jar);
   }
 
   /** Every jar the library holds for this mod, the current one first. */
@@ -81,12 +88,13 @@ export class ModLibrary {
     return [
       {
         jar: entry.jar,
+        file: entry.file ?? entry.jar,
         sha256: entry.sha256,
         sizeBytes: entry.sizeBytes,
         addedAt: entry.addedAt,
         source: entry.source,
       },
-      ...(entry.superseded ?? []),
+      ...(entry.superseded ?? []).map((j) => ({ ...j, file: j.file ?? j.jar })),
     ];
   }
 
@@ -197,16 +205,17 @@ export class ModLibrary {
     const previous = await this.get(info.id);
     const held = previous === undefined ? [] : this.jarsOf(previous);
 
-    // A filename already used by a *different* jar of this mod must not be
-    // written over - that is the whole invariant. The disambiguated name is ugly
-    // and rare, and it is what turns "two builds shipped under one filename"
-    // from a lost jar into a recoverable one.
-    const taken = new Set(held.filter((j) => j.sha256 !== sha).map((j) => j.jar));
-    const stored = taken.has(jarName) ? disambiguate(jarName, sha) : jarName;
-    await writeFile(join(folder, stored), bytes);
+    // A storage name already used by a *different* jar of this mod must not be
+    // written over - that is the whole invariant. Only the library's own copy is
+    // renamed; `jar` keeps the name it arrived under, so the disambiguation
+    // never reaches the mods folder and the game's log stays readable.
+    const taken = new Set(held.filter((j) => j.sha256 !== sha).map((j) => j.file));
+    const file = taken.has(jarName) ? disambiguate(jarName, sha) : jarName;
+    await writeFile(join(folder, file), bytes);
 
     const record: ModLibraryJar = {
-      jar: stored,
+      jar: jarName,
+      file,
       sha256: sha,
       sizeBytes: bytes.length,
       addedAt: new Date().toISOString(),
@@ -229,6 +238,17 @@ export class ModLibrary {
       ? { ...info, ...record, superseded }
       : { ...(previous as ModLibraryEntry), ...current, superseded };
     await this.write([...(await this.load()).filter((m) => m.id !== info.id), entry]);
+
+    // Re-adding bytes already held under a different name collapses two records
+    // onto one, which would otherwise leave the old FILE on disk with nothing
+    // in the manifest naming it. Nothing is lost - the surviving record has the
+    // same hash, so those exact bytes are still here - but a manifest that
+    // stops describing its own directory is how a later reader concludes the
+    // library is inconsistent.
+    const referenced = new Set(this.jarsOf(entry).map((j) => j.file));
+    for (const orphan of held.filter((j) => !referenced.has(j.file))) {
+      await rm(join(folder, orphan.file), { force: true });
+    }
     return entry;
   }
 
@@ -243,7 +263,7 @@ export class ModLibrary {
     const found = all.find((m) => m.id === id);
     if (found === undefined) return undefined;
     await this.write(all.filter((m) => m.id !== id));
-    for (const j of this.jarsOf(found)) await rm(this.jarPath(found, j.jar), { force: true });
+    for (const j of this.jarsOf(found)) await rm(this.jarPath(found, j.file), { force: true });
     return found;
   }
 

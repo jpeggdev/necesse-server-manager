@@ -136,8 +136,19 @@ export type ModSource =
 
 /** One jar file the library holds, current or superseded. */
 export interface ModLibraryJar {
-  /** Its filename inside the library, normally the name it arrived under. */
+  /**
+   * The filename it arrived under, and the name the mods folder receives. This
+   * is what the game logs and what a person recognises, so it is kept intact
+   * even when two builds of one mod ship under it.
+   */
   jar: string;
+  /**
+   * Its name on disk inside the library. Equal to `jar` except when a second
+   * build arrived under a filename already taken by different bytes, where it
+   * carries a hash suffix so neither overwrites the other. The disambiguation
+   * lives here, in the library's own storage, and never reaches the mods folder.
+   */
+  file: string;
   /** SHA-256 of the jar's bytes. What "the library already holds this" means. */
   sha256: string;
   sizeBytes: number;
@@ -162,13 +173,19 @@ export interface ModLibraryJar {
  * cheap; an unrecoverable jar is not.
  */
 export interface ModLibraryEntry extends ModInfo {
-  /** The current jar's filename: what reconcile puts in the mods folder. */
+  /** The current jar's filename: the name reconcile gives it in the mods folder. */
   jar: string;
+  /** The current jar's name on disk inside the library. See ModLibraryJar.file. */
+  file: string;
   source: ModSource;
   /** When the current jar was put into the library, ISO 8601. */
   addedAt: string;
   sizeBytes: number;
-  /** SHA-256 of the current jar's bytes. */
+  /**
+   * SHA-256 of the current jar's bytes. This, not the filename, is what
+   * reconcile compares a jar in the mods folder against to decide whether it is
+   * already the right one - two different builds routinely ship under one name.
+   */
   sha256: string;
   /** Earlier jars for this same mod, still on disk and still restorable. */
   superseded: ModLibraryJar[];

@@ -69,7 +69,20 @@ interface FolderJar {
   jar: string;
   path: string;
   info: ModInfo;
-  /** Of the file's bytes. What decides whether the library already holds it. */
+  /**
+   * Of the file's bytes. What decides both whether the library already holds
+   * this jar and whether the folder already has the right one - never the
+   * filename, which two different builds of one mod routinely share.
+   */
+  sha256: string;
+}
+
+/** One mod the set names, resolved to the library jar that will be installed. */
+interface WantedJar {
+  /** The name it gets in the mods folder. */
+  jar: string;
+  /** Where the library keeps it. */
+  path: string;
   sha256: string;
 }
 
@@ -108,12 +121,12 @@ export async function reconcileMods(options: ReconcileOptions): Promise<Reconcil
   // 3. Resolve the set. A missing mod refuses here, with the folder still
   //    exactly as it was found - launching a partial set is the one outcome
   //    that must never happen.
-  const resolved = new Map<string, { jar: string; path: string }>();
+  const resolved = new Map<string, WantedJar>();
   const missing: string[] = [];
   for (const id of wanted) {
     const hit = await library.resolve(id);
     if (hit === undefined) missing.push(id);
-    else resolved.set(id, { jar: hit.entry.jar, path: hit.path });
+    else resolved.set(id, { jar: hit.entry.jar, path: hit.path, sha256: hit.entry.sha256 });
   }
   if (missing.length > 0) {
     throw new ReconcileError(
@@ -130,15 +143,24 @@ export async function reconcileMods(options: ReconcileOptions): Promise<Reconcil
   // an unstartable world with no actionable diagnosis.
   assertNoFilenameCollision(resolved, world);
 
-  // 4. Prune, then copy. A jar stays only if the set names its id AND it is the
-  //    same filename the library holds as current - an older jar of a wanted mod
-  //    is replaced, which is what makes a set follow updates.
+  // 4. Prune, then copy. A jar stays only if the set names its id AND its BYTES
+  //    are the library's current ones for that mod - not merely its filename.
+  //
+  //    Matching on the name was a silent wrong-build launch: two builds of one
+  //    mod routinely ship under one filename (`CorruptedRaidMod.jar` carries no
+  //    version in its name at all), so a differing build sitting in the folder
+  //    was retained into the library, then kept in the folder, and the game ran
+  //    it while the library, GET /api/mods/library and `verify` all reported the
+  //    world was running the other one. The hash is the only thing that can tell
+  //    those apart. The name still has to match too, so that the folder ends up
+  //    a faithful mirror of the library rather than the right bytes under a
+  //    stale label.
   const kept: string[] = [];
   const removed: string[] = [];
   for (const found of present) {
     const want = resolved.get(found.info.id);
     const isDuplicate = duplicates.includes(found);
-    if (want !== undefined && !isDuplicate && want.jar === found.jar) {
+    if (want !== undefined && !isDuplicate && want.sha256 === found.sha256 && want.jar === found.jar) {
       kept.push(found.jar);
       continue;
     }
@@ -162,18 +184,17 @@ export async function reconcileMods(options: ReconcileOptions): Promise<Reconcil
   }
 
   // 5. Prove it, by reading the folder back rather than by trusting the work
-  //    above. The cost is one more pass over a handful of jars; the thing it
-  //    catches is the game being launched against a folder nobody verified.
-  await verify(modsDir, wanted, world);
+  //    above - and by hashing it, so "the right mods are there" is a claim about
+  //    the bytes the JVM will load rather than about the names on the files. The
+  //    cost is one more pass over a handful of jars; the thing it catches is the
+  //    game being launched against a folder nobody verified.
+  await verify(modsDir, resolved, world);
 
   return { world, modIds: wanted, adopted, removed, copied, kept };
 }
 
 /** Refuses a set whose mods would land on one filename in the mods folder. */
-function assertNoFilenameCollision(
-  resolved: Map<string, { jar: string; path: string }>,
-  world: string,
-): void {
+function assertNoFilenameCollision(resolved: Map<string, WantedJar>, world: string): void {
   const byJar = new Map<string, string[]>();
   for (const [id, want] of resolved) {
     byJar.set(want.jar.toLowerCase(), [...(byJar.get(want.jar.toLowerCase()) ?? []), id]);
@@ -313,12 +334,24 @@ function compareVersions(a: string, b: string): number {
   return 0;
 }
 
-/** Reads the folder back and insists it now holds exactly the set, once each. */
-async function verify(modsDir: string, wanted: string[], world: string): Promise<void> {
+/**
+ * Reads the folder back and insists it now holds exactly the set, once each,
+ * and with the library's current BYTES for every mod.
+ *
+ * Checking ids alone would agree with a folder holding a different build of the
+ * right mod - which is precisely the state that makes the game run one thing
+ * while every surface reports another. `scanModsFolder` already hashes what it
+ * reads, so this costs nothing extra.
+ */
+async function verify(
+  modsDir: string,
+  resolved: Map<string, WantedJar>,
+  world: string,
+): Promise<void> {
   const after = await scanModsFolder(modsDir);
-  const seen = new Map<string, string[]>();
+  const seen = new Map<string, FolderJar[]>();
   for (const found of after) {
-    seen.set(found.info.id, [...(seen.get(found.info.id) ?? []), found.jar]);
+    seen.set(found.info.id, [...(seen.get(found.info.id) ?? []), found]);
   }
   const fail = (why: string): never => {
     throw new ReconcileError(
@@ -328,12 +361,22 @@ async function verify(modsDir: string, wanted: string[], world: string): Promise
       "verify-failed",
     );
   };
-  for (const id of wanted) {
-    const jars = seen.get(id);
-    if (jars === undefined) fail(`mod ${id} is not there`);
-    else if (jars.length > 1) fail(`mod ${id} is there more than once, as ${jars.join(" and ")}`);
+  for (const [id, want] of resolved) {
+    const found = seen.get(id);
+    if (found === undefined) {
+      fail(`mod ${id} is not there`);
+    } else if (found.length > 1) {
+      fail(`mod ${id} is there more than once, as ${found.map((f) => f.jar).join(" and ")}`);
+    } else if (found[0].sha256 !== want.sha256) {
+      fail(
+        `mod ${id} is there as ${found[0].jar}, but those are not the bytes the library holds for ` +
+          `it - the game would load a different build of that mod than anything here reports`,
+      );
+    }
   }
-  for (const [id, jars] of seen) {
-    if (!wanted.includes(id)) fail(`mod ${id} (${jars.join(", ")}) is there but not in the set`);
+  for (const [id, found] of seen) {
+    if (!resolved.has(id)) {
+      fail(`mod ${id} (${found.map((f) => f.jar).join(", ")}) is there but not in the set`);
+    }
   }
 }

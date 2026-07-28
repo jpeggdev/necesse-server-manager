@@ -100,8 +100,14 @@ describe("add", () => {
 
     const entry = await library.add(b, { kind: "local", how: "upload" });
 
-    expect(entry.jar).not.toBe("Mod.jar");
-    expect(entry.jar).toMatch(/^Mod-[0-9a-f]{8}\.jar$/);
+    // The disambiguation is the LIBRARY's storage name only. `jar` - the name
+    // the mods folder will receive, and what the game logs - keeps the name the
+    // jar arrived under, so a re-upload cannot leave `Mod-d4471746.jar` sitting
+    // in %APPDATA%\Necesse\mods forever.
+    expect(entry.jar).toBe("Mod.jar");
+    expect(entry.file).not.toBe("Mod.jar");
+    expect(entry.file).toMatch(/^Mod-[0-9a-f]{8}\.jar$/);
+    // Both sets of bytes are still there, neither written over the other.
     expect(await readFile(library.jarPath(entry, "Mod.jar"))).toEqual(aBytes);
     expect(await readFile(library.jarPath(entry))).toEqual(await readFile(b));
   });
