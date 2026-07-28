@@ -7,17 +7,26 @@ import { openWorldSettings, WorldSettingsError } from "./world-settings.js";
 import type { WorldSettingsFile } from "./world-settings-file.js";
 import { knownField, checkChange, isSameValue } from "./world-settings-schema.js";
 import type { ModInstaller } from "./mod-installer.js";
+import type { ModLibrary } from "./mod-library.js";
+import type { ModSets } from "./mod-sets.js";
+import { NotAModJarError } from "./mod-info.js";
+import { installedModIds, ReconcileError, reconcileMods } from "./mod-reconcile.js";
 import type { ProcessManager } from "./process-manager.js";
 import type { SteamCmd } from "./steamcmd.js";
 import { WorkshopError, type SteamWorkshop } from "./steam-workshop.js";
 import type {
   DaemonConfig,
   InstallResult,
+  ModLibraryResponse,
   ModUpdateInfo,
+  ModUploadResponse,
   PublicDaemonConfig,
+  ReconcileResponse,
+  ReconcileSummary,
   StatusPayload,
   TaskKind,
   WorkshopItem,
+  WorldModsResponse,
   WorldSettingField,
   WorldSettingType,
   WorldSettingsResponse,
@@ -30,6 +39,8 @@ export interface Deps {
   configFile: string;
   pm: ProcessManager;
   installer: ModInstaller;
+  library: ModLibrary;
+  sets: ModSets;
   steam: SteamCmd;
   workshop: SteamWorkshop;
 }
@@ -82,7 +93,7 @@ const workshopFailureCode = (e: unknown): number =>
   e instanceof WorkshopError && e.kind === "not-configured" ? 503 : 502;
 
 export function buildServer(deps: Deps): FastifyInstance {
-  const { cfg, configFile, pm, installer, steam, workshop } = deps;
+  const { cfg, configFile, pm, installer, library, sets, steam, workshop } = deps;
   const app = Fastify({ logger: false });
   type Socket = { send(data: string): void };
   const sockets = new Set<Socket>();
@@ -291,6 +302,29 @@ export function buildServer(deps: Deps): FastifyInstance {
         err.statusCode = 400;
         done(err, undefined);
       }
+    },
+  );
+
+  /**
+   * Jar uploads arrive as a raw body under one of these types, deliberately
+   * rather than as multipart/form-data.
+   *
+   * A jar upload is one file and nothing else - there are no other form fields
+   * to carry - so multipart would buy nothing but a dependency, a streaming
+   * parser, and a second place for a size limit to be enforced. The filename is
+   * a query parameter, and it is only a label anyway: the mod's identity comes
+   * from the `mod.info` inside the bytes.
+   *
+   * The limit is applied here, one byte above the configured maximum, so that a
+   * body which is merely over the line still reaches the route and is refused
+   * with a message saying so, while anything wildly larger is cut off by Fastify
+   * before it is ever held in memory.
+   */
+  app.addContentTypeParser<Buffer>(
+    ["application/java-archive", "application/octet-stream", "application/zip"],
+    { parseAs: "buffer", bodyLimit: cfg.modUploadMaxBytes + 1 },
+    (_req, body, done) => {
+      done(null, body);
     },
   );
 
@@ -519,12 +553,69 @@ export function buildServer(deps: Deps): FastifyInstance {
     }
   });
 
+  /**
+   * The mod set a world will start with, seeding one if it has none.
+   *
+   * A world nobody has chosen a set for - one just typed into the header field,
+   * or one that appeared after the migration ran - inherits exactly what is
+   * installed right now. That is the same rule the migration applies, for the
+   * same reason: a world's first start under this feature must load what its
+   * last start loaded, and choosing anything else on the operator's behalf would
+   * silently change a save's mod list.
+   */
+  const setFor = async (world: string): Promise<string[]> => {
+    const existing = await sets.get(world);
+    if (existing !== undefined) return existing.modIds;
+    return (await sets.set(world, await installedModIds(cfg.modsDir))).modIds;
+  };
+
+  /**
+   * A reconcile failure mapped onto a status. All of them mean the same thing
+   * operationally - the server was not started - so what the code carries is
+   * whose problem it is: a set naming a mod that is gone, or a folder holding a
+   * jar nothing can account for, are both things an operator fixes (409), while
+   * an unreadable folder is the box misbehaving (500).
+   */
+  const reconcileFailure = (
+    reply: { code(c: number): { send(b: unknown): unknown } },
+    e: unknown,
+  ): unknown => {
+    const kind = e instanceof ReconcileError ? e.kind : "unreadable";
+    const code = kind === "missing-mod" || kind === "unknown-jar" ? 409 : 500;
+    return reply.code(code).send({ ok: false, error: (e as Error).message });
+  };
+
   app.post("/api/server/start", async (req, reply) => {
     const { world } = (req.body ?? {}) as { world?: string };
     if (typeof world !== "string" || !isValidWorldName(world)) {
       return reply.code(400).send({ ok: false, error: `Invalid world name: ${JSON.stringify(world)}` });
     }
     if (!requireNoActiveTask(reply, "start the server")) return reply;
+    // Asked before anything is reconciled rather than discovered by `pm.start`
+    // throwing afterwards: reconciling deletes jars out of the mods folder, and
+    // rewriting that folder for a launch that was never going to be allowed is
+    // exactly the damage this ordering prevents.
+    const refusal = pm.startRefusal();
+    if (refusal !== null) return reply.code(409).send({ ok: false, error: refusal });
+    // Claimed with nothing awaited since `requireNoActiveTask`, so the check and
+    // the claim stay atomic - reconcile mutates the mods folder and must
+    // serialize against every other mutation exactly as they do with each other.
+    const reservation = reserveTask();
+    try {
+      await reconcileMods({
+        modsDir: cfg.modsDir,
+        library,
+        world,
+        modIds: await setFor(world),
+      });
+    } catch (e) {
+      // The server is deliberately not started. A half-reconciled folder must
+      // never be launched: the game would run a set nobody chose and write it
+      // into the save.
+      return reconcileFailure(reply, e);
+    } finally {
+      releaseTask(reservation);
+    }
     try {
       pm.start(world);
     } catch (e) {
@@ -752,6 +843,184 @@ export function buildServer(deps: Deps): FastifyInstance {
       return { ok: results.every((r) => r.ok), results };
     });
     return { ok: true, taskId };
+  });
+
+  /**
+   * Every mod this daemon holds a jar for, whatever any world is set to load.
+   *
+   * This, not the mods folder, is what a set is chosen from: the folder only
+   * ever holds one world's worth at a time.
+   */
+  app.get("/api/mods/library", async () => {
+    return { ok: true, mods: await library.load() } satisfies ModLibraryResponse;
+  });
+
+  /**
+   * Takes a jar into the library by raw body.
+   *
+   * Everything is checked before a byte is written anywhere: the size, the
+   * filename if one was given, and then the `mod.info` inside the bytes. A jar
+   * with no parseable `mod.info` carrying an `id` is not a Necesse mod, and is
+   * refused saying exactly that rather than being stored under a guess.
+   *
+   * Not gated on the server being stopped: this writes only into the library,
+   * never into the folder the game reads, so it cannot disturb a running
+   * session. It does serialize against the other mutations, because reconcile
+   * reads the library it writes.
+   */
+  app.post("/api/mods/upload", async (req, reply) => {
+    const filename = (req.query as { filename?: unknown }).filename;
+    if (filename !== undefined && typeof filename !== "string") {
+      return reply
+        .code(400)
+        .send({ ok: false, error: `Query parameter "filename" must be given at most once.` });
+    }
+    const body = req.body;
+    if (!Buffer.isBuffer(body) || body.length === 0) {
+      return reply.code(400).send({
+        ok: false,
+        error:
+          `Send the jar as the raw request body with Content-Type: application/java-archive ` +
+          `(application/octet-stream and application/zip are accepted too), and the original ` +
+          `filename as ?filename=. Nothing was uploaded.`,
+      });
+    }
+    if (body.length > cfg.modUploadMaxBytes) {
+      return reply.code(413).send({
+        ok: false,
+        error:
+          `That jar is ${body.length} bytes, over this daemon's ${cfg.modUploadMaxBytes}-byte upload ` +
+          `limit. Nothing was written.`,
+      });
+    }
+    if (!requireNoActiveTask(reply, "upload a mod")) return reply;
+    const reservation = reserveTask();
+    try {
+      const before = await library.load();
+      const mod = await library.addBytes(body, filename, { kind: "local", how: "upload" });
+      return {
+        ok: true,
+        mod,
+        replaced: before.some((m) => m.id === mod.id),
+      } satisfies ModUploadResponse;
+    } catch (e) {
+      if (e instanceof NotAModJarError) {
+        return reply.code(400).send({ ok: false, error: e.message });
+      }
+      return reply.code(500).send({ ok: false, error: (e as Error).message });
+    } finally {
+      releaseTask(reservation);
+    }
+  });
+
+  /**
+   * Applies a world's set to the mods folder without starting the server.
+   *
+   * The same work `POST /api/server/start` does first, exposed on its own so an
+   * operator can see what a set would do - and so the guards around it are
+   * testable as themselves. It rewrites the folder the game reads, so it is
+   * refused while the server is running and while any other task is in flight,
+   * exactly like every other mutation of that folder.
+   */
+  app.post("/api/mods/reconcile", async (req, reply) => {
+    const { world } = (req.body ?? {}) as { world?: string };
+    if (typeof world !== "string" || !isValidWorldName(world)) {
+      return reply.code(400).send({ ok: false, error: `Invalid world name: ${JSON.stringify(world)}` });
+    }
+    if (!requireStopped(reply)) {
+      return reply.send({
+        ok: false,
+        error:
+          `Cannot reconcile the mods folder while the server is ${pm.status.state}. It reads its ` +
+          `mod set once at startup, and rewriting the folder underneath a running server is not ` +
+          `something this daemon will do. Stop it first.`,
+      });
+    }
+    if (!requireNoActiveTask(reply, "reconcile the mods folder")) return reply;
+    const reservation = reserveTask();
+    try {
+      const reconcile: ReconcileSummary = await reconcileMods({
+        modsDir: cfg.modsDir,
+        library,
+        world,
+        modIds: await setFor(world),
+      });
+      return { ok: true, reconcile } satisfies ReconcileResponse;
+    } catch (e) {
+      return reconcileFailure(reply, e);
+    } finally {
+      releaseTask(reservation);
+    }
+  });
+
+  /** Which mods a world is set to load, and which of them the library has lost. */
+  app.get("/api/worlds/:name/mods", async (req, reply) => {
+    const { name } = req.params as { name: string };
+    if (!isValidWorldName(name)) {
+      return reply.code(400).send({ ok: false, error: `Invalid world name: ${JSON.stringify(name)}` });
+    }
+    const existing = await sets.get(name);
+    const modIds = existing?.modIds ?? [];
+    const held = new Set((await library.load()).map((m) => m.id));
+    return {
+      ok: true,
+      world: existing?.world ?? name,
+      modIds,
+      missing: modIds.filter((id) => !held.has(id)),
+      configured: existing !== undefined,
+    } satisfies WorldModsResponse;
+  });
+
+  /**
+   * Chooses which mods a world loads. Takes effect at that world's next start,
+   * because the game reads its mod set once, at startup.
+   *
+   * Every id is checked against the library before anything is written, so a set
+   * cannot be saved in a state that would refuse to start later. Nothing here
+   * touches the mods folder, so it is allowed while the server is running - the
+   * running session keeps the mods it started with either way.
+   *
+   * Removing a mod whose content is already placed in the world is a real way to
+   * damage a save. It is allowed: the operator decides, and this daemon does not
+   * pretend to know which mods a world has content from.
+   */
+  app.put("/api/worlds/:name/mods", async (req, reply) => {
+    const { name } = req.params as { name: string };
+    if (!isValidWorldName(name)) {
+      return reply.code(400).send({ ok: false, error: `Invalid world name: ${JSON.stringify(name)}` });
+    }
+    const { modIds } = (req.body ?? {}) as { modIds?: unknown };
+    if (!Array.isArray(modIds) || !modIds.every((m) => typeof m === "string" && m.trim().length > 0)) {
+      return reply
+        .code(400)
+        .send({ ok: false, error: "Body must be { modIds: string[] } of mod ids from the library." });
+    }
+    if (!requireNoActiveTask(reply, "change a world's mod set")) return reply;
+    const reservation = reserveTask();
+    try {
+      const wanted = (modIds as string[]).map((m) => m.trim());
+      const held = new Set((await library.load()).map((m) => m.id));
+      const unknown = wanted.filter((id) => !held.has(id));
+      if (unknown.length > 0) {
+        return reply.code(400).send({
+          ok: false,
+          error:
+            `The library has no jar for ${unknown.join(", ")}. A set may only name mods the ` +
+            `library holds, so that a world can never be set to something it would then refuse ` +
+            `to start with.`,
+        });
+      }
+      const written = await sets.set(name, wanted);
+      return {
+        ok: true,
+        world: written.world,
+        modIds: written.modIds,
+        missing: [],
+        configured: true,
+      } satisfies WorldModsResponse;
+    } finally {
+      releaseTask(reservation);
+    }
   });
 
   app.get("/api/config", async () => publicConfig(cfg));

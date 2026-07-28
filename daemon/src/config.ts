@@ -1,5 +1,17 @@
 import { readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { DaemonConfig } from "./types.js";
+
+/**
+ * The daemon's own directory - the parent of `src/` when running from source
+ * and of `dist/` when running the build, which resolve to the same place. It is
+ * where `config.json` and `mods.json` already live, and where the mod library
+ * and the per-world sets default to, for the reason spelled out on
+ * `DaemonConfig.modLibraryDir`: not `serverRoot`, which steamcmd validates and
+ * prunes.
+ */
+export const DAEMON_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 export const DEFAULT_CONFIG: DaemonConfig = {
   port: 8710,
@@ -9,6 +21,10 @@ export const DEFAULT_CONFIG: DaemonConfig = {
   steamcmdExe: "C:\\Users\\jeffp\\steam\\steamcmd.exe",
   modsDir: "C:\\Users\\jeffp\\AppData\\Roaming\\Necesse\\mods",
   worldsDir: "C:\\Users\\jeffp\\AppData\\Roaming\\Necesse\\saves\\worlds",
+  modLibraryDir: join(DAEMON_DIR, "mod-library"),
+  modLibraryFile: join(DAEMON_DIR, "mod-library.json"),
+  modSetsFile: join(DAEMON_DIR, "mod-sets.json"),
+  modUploadMaxBytes: 64 * 1024 * 1024,
   jvmArgs: [
     "-XX:+UnlockExperimentalVMOptions",
     "-XX:+UseG1GC",

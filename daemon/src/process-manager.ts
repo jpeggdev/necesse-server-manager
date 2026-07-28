@@ -115,16 +115,32 @@ export class ProcessManager extends EventEmitter {
     this.setState("stopped");
   }
 
-  start(world: string): void {
+  /**
+   * Why `start` would refuse right now, or null if it would go ahead.
+   *
+   * Split out of `start` so that work which must happen *before* the spawn -
+   * reconciling the mods folder to the world's set, which deletes jars out of
+   * it - can find out whether the spawn is going to be allowed at all before it
+   * touches anything, and refuse in the same words. Two copies of this rule
+   * would be two chances for the folder to be rewritten for a launch that was
+   * never going to happen.
+   */
+  startRefusal(): string | null {
     if (this.state === "unmanaged") {
-      throw new Error(
+      return (
         `An unmanaged Necesse server (pid ${this.externalPid}) is already running. ` +
-          `It was not started by this daemon and must be shut down before starting a new one.`,
+        `It was not started by this daemon and must be shut down before starting a new one.`
       );
     }
     if (this.state !== "stopped" && this.state !== "crashed") {
-      throw new Error(`Server is already ${this.state}; stop it before starting again.`);
+      return `Server is already ${this.state}; stop it before starting again.`;
     }
+    return null;
+  }
+
+  start(world: string): void {
+    const refusal = this.startRefusal();
+    if (refusal !== null) throw new Error(refusal);
     this.world = world;
     this.port = null;
     this.slots = null;

@@ -7,6 +7,8 @@ import { buildServer, TASK_EXPIRY_MS } from "../src/http.js";
 import { ProcessManager } from "../src/process-manager.js";
 import { ModInstaller } from "../src/mod-installer.js";
 import { ModRegistry } from "../src/mod-registry.js";
+import { ModLibrary } from "../src/mod-library.js";
+import { ModSets } from "../src/mod-sets.js";
 import { SteamCmd } from "../src/steamcmd.js";
 import { SteamWorkshop } from "../src/steam-workshop.js";
 import { DEFAULT_CONFIG } from "../src/config.js";
@@ -15,6 +17,12 @@ import { makeFakeFetch, detailsBody, type FakeFetch } from "./fixtures/fake-fetc
 import type { DaemonConfig, WsMessage } from "../src/types.js";
 import * as F from "./fixtures/log-fixtures.js";
 import { makeWorldZip, WORLD_SETTINGS_CFG } from "./fixtures/world-zip.js";
+import {
+  MOD_INFO_SUMMONER_EXPANSION,
+  makeModJar,
+  makeNonModJar,
+  modJarBytes,
+} from "./fixtures/mod-jar.js";
 import { openWorldSettings } from "../src/world-settings.js";
 /** What `app.inject` resolves to; naming it lets a helper declare its own return type. */
 import type { Response as Injected } from "light-my-request";
@@ -28,6 +36,8 @@ let spawn: ReturnType<typeof makeFakeSpawn>;
 let pm: ProcessManager;
 let installer: ModInstaller;
 let registry: ModRegistry;
+let library: ModLibrary;
+let sets: ModSets;
 let steam: SteamCmd;
 let net: FakeFetch;
 let workshop: SteamWorkshop;
@@ -40,16 +50,33 @@ beforeEach(async () => {
   await mkdir(modsDir, { recursive: true });
   await mkdir(worldsDir, { recursive: true });
   await writeFile(join(worldsDir, "Tulsa.zip"), "x");
-  cfg = { ...DEFAULT_CONFIG, modsDir, worldsDir, stopTimeoutMs: 50 };
+  cfg = {
+    ...DEFAULT_CONFIG,
+    modsDir,
+    worldsDir,
+    stopTimeoutMs: 50,
+    // Every path the library and the sets write to lives in this test's own
+    // temp dir. DEFAULT_CONFIG points them at the daemon's real directory, and
+    // a suite that started the server would otherwise write a mod-sets.json
+    // into the repo.
+    modLibraryDir: join(root, "mod-library"),
+    modLibraryFile: join(root, "mod-library.json"),
+    modSetsFile: join(root, "mod-sets.json"),
+    // Small enough that the oversize case is a few hundred bytes rather than
+    // 64MB of test payload.
+    modUploadMaxBytes: 4096,
+  };
   configFile = join(root, "config.json");
   spawn = makeFakeSpawn();
   pm = new ProcessManager(cfg, spawn.spawn);
   steam = new SteamCmd(cfg, spawn.spawn);
   registry = new ModRegistry(join(root, "mods.json"));
   installer = new ModInstaller(cfg, registry, steam);
+  library = new ModLibrary(cfg.modLibraryFile, cfg.modLibraryDir);
+  sets = new ModSets(cfg.modSetsFile);
   net = makeFakeFetch();
   workshop = new SteamWorkshop(cfg, net.fetch);
-  app = buildServer({ cfg, configFile, pm, installer, steam, workshop });
+  app = buildServer({ cfg, configFile, pm, installer, library, sets, steam, workshop });
 });
 
 describe("GET /api/status", () => {
@@ -67,7 +94,16 @@ describe("GET /api/status", () => {
     };
     const deadPm = new ProcessManager(cfg, spawn.spawn, esrch);
     deadPm.markUnmanaged(9001);
-    const selfHealApp = buildServer({ cfg, configFile, pm: deadPm, installer, steam, workshop });
+    const selfHealApp = buildServer({
+      cfg,
+      configFile,
+      pm: deadPm,
+      installer,
+      library,
+      sets,
+      steam,
+      workshop,
+    });
 
     const res = await selfHealApp.inject({ method: "GET", url: "/api/status" });
 
@@ -114,6 +150,8 @@ describe("activeTasks in the status payload", () => {
       configFile,
       pm,
       installer,
+      library,
+      sets,
       steam: throwingSteam,
       workshop,
     });
@@ -917,6 +955,448 @@ describe("PUT /api/config", () => {
     expect(res.statusCode).toBe(200);
     expect(res.payload).not.toContain(FAKE_KEY);
     expect(res.json().steamApiKeyConfigured).toBe(true);
+  });
+});
+
+/*
+ * Per-world mod sets, the library they are chosen from, and the reconcile that
+ * makes the mods folder match the set the instant before the game reads it.
+ *
+ * The jars here are real zips with real `mod.info` entries (see
+ * `fixtures/mod-jar.ts`), not stubs: the whole feature turns on reading a real
+ * jar, so a test that faked the zip layer would prove nothing about it.
+ */
+describe("mod library and per-world sets", () => {
+  /** A jar in the mods folder, as steamcmd or a person's file explorer would leave it. */
+  const installJar = (
+    filename: string,
+    fields: Parameters<typeof makeModJar>[2],
+  ): Promise<string> => makeModJar(cfg.modsDir, filename, fields);
+
+  const upload = (
+    bytes: Buffer,
+    filename?: string,
+    type = "application/java-archive",
+  ): Promise<Injected> =>
+    app.inject({
+      method: "POST",
+      url: `/api/mods/upload${filename === undefined ? "" : `?filename=${encodeURIComponent(filename)}`}`,
+      headers: { "content-type": type },
+      payload: bytes,
+    });
+
+  const jarsInMods = async (): Promise<string[]> =>
+    (await readdir(cfg.modsDir)).filter((f) => f.endsWith(".jar")).sort();
+
+  describe("GET /api/mods/library", () => {
+    it("is empty before anything has been put in it", async () => {
+      const res = await app.inject({ method: "GET", url: "/api/mods/library" });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true, mods: [] });
+    });
+
+    it("lists what a jar's own mod.info says, and where the jar came from", async () => {
+      await library.add(
+        await makeModJar(join(cfg.modsDir, "..", "incoming"), "SummonerExpansion-1.2.0-7.7.jar", {}, {
+          info: MOD_INFO_SUMMONER_EXPANSION,
+        }),
+        { kind: "local", how: "adopted" },
+      );
+
+      const [mod] = (await app.inject({ method: "GET", url: "/api/mods/library" })).json().mods;
+
+      expect(mod).toMatchObject({
+        id: "gagadoliano.summonerexpansion",
+        name: "Summoner Expansion",
+        version: "7.7",
+        gameVersion: "1.2.0",
+        author: "Gagadoliano",
+        jar: "SummonerExpansion-1.2.0-7.7.jar",
+        source: { kind: "local", how: "adopted" },
+      });
+    });
+  });
+
+  describe("POST /api/mods/upload", () => {
+    it("takes a real jar into the library and reports what it is", async () => {
+      const bytes = await modJarBytes({
+        id: "someone.newmod",
+        name: "New Mod",
+        version: "3.1",
+        gameVersion: "1.2.0",
+      });
+
+      const res = await upload(bytes, "NewMod-3.1.jar");
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json().mod).toMatchObject({
+        id: "someone.newmod",
+        name: "New Mod",
+        version: "3.1",
+        jar: "NewMod-3.1.jar",
+        source: { kind: "local", how: "upload" },
+      });
+      expect(res.json().replaced).toBe(false);
+      const held = await library.resolve("someone.newmod");
+      expect(await readFile(held!.path)).toEqual(bytes);
+      // The library, never the folder the game reads. An upload must not change
+      // what a running or a stopped server would load.
+      expect(await jarsInMods()).toEqual([]);
+    });
+
+    it("says so when it replaced an existing jar for the same mod", async () => {
+      await upload(await modJarBytes({ id: "a.b", version: "1" }), "A-1.jar");
+      const res = await upload(await modJarBytes({ id: "a.b", version: "2" }), "A-2.jar");
+      expect(res.json().replaced).toBe(true);
+      expect((await library.load()).map((m) => m.version)).toEqual(["2"]);
+    });
+
+    /*
+     * The two refusals that must happen before a byte is written. An
+     * unauthenticated LAN endpoint that wrote first and checked afterwards
+     * would be a way to put arbitrary files on this box.
+     */
+    it("refuses an oversize jar, writing nothing", async () => {
+      // One byte over the configured limit: large enough to be refused, small
+      // enough to still reach this route rather than being cut off in transit.
+      const res = await upload(Buffer.alloc(cfg.modUploadMaxBytes + 1, 7), "Huge.jar");
+
+      expect(res.statusCode).toBe(413);
+      expect(res.json().error).toMatch(/upload limit/);
+      expect(res.json().error).toMatch(/Nothing was written/);
+      expect(await library.load()).toEqual([]);
+    });
+
+    it("cuts off a wildly oversize body rather than holding it in memory", async () => {
+      const res = await upload(Buffer.alloc(cfg.modUploadMaxBytes * 4, 7), "Huge.jar");
+      expect(res.statusCode).toBe(413);
+      expect(await library.load()).toEqual([]);
+    });
+
+    it("refuses a jar with no mod.info, saying it is not a Necesse mod, and writes nothing", async () => {
+      const bytes = await modJarBytes({ id: "irrelevant" }, { omitInfo: true });
+
+      const res = await upload(bytes, "NotAMod.jar");
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toMatch(/no mod\.info at its root/);
+      expect(await library.load()).toEqual([]);
+      await expect(readdir(cfg.modLibraryDir)).rejects.toMatchObject({ code: "ENOENT" });
+    });
+
+    it("refuses a mod.info with no id", async () => {
+      const res = await upload(await modJarBytes({ name: "Nameless" }), "Nameless.jar");
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toMatch(/no "id" line/);
+      expect(await library.load()).toEqual([]);
+    });
+
+    it("refuses a filename that is a path rather than a name", async () => {
+      const res = await upload(await modJarBytes({ id: "a.b" }), "..\\..\\Server.jar");
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toMatch(/not a plain filename/);
+      expect(await library.load()).toEqual([]);
+    });
+
+    it("refuses an empty body rather than storing nothing under a mod's name", async () => {
+      const res = await upload(Buffer.alloc(0), "Empty.jar");
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toMatch(/Nothing was uploaded/);
+    });
+
+    it("names the jar after the mod when no filename is given", async () => {
+      const res = await upload(await modJarBytes({ id: "a.b", version: "1" }));
+      expect(res.statusCode).toBe(200);
+      expect(res.json().mod.jar).toBe("a.b.jar");
+    });
+
+    it("accepts the other content types a client might reasonably send", async () => {
+      for (const type of ["application/octet-stream", "application/zip"]) {
+        const res = await upload(await modJarBytes({ id: `a.${type.length}` }), "A.jar", type);
+        expect(res.statusCode, type).toBe(200);
+      }
+    });
+
+    it("refuses while a background task is rewriting the same library", async () => {
+      await app.inject({ method: "POST", url: "/api/server/update" });
+      const res = await upload(await modJarBytes({ id: "a.b" }), "A.jar");
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error).toMatch(/background task/i);
+      expect(await library.load()).toEqual([]);
+    });
+
+    it("releases its slot on every path out, including the refusals", async () => {
+      await upload(await modJarBytes({ id: "irrelevant" }, { omitInfo: true }), "NotAMod.jar");
+      expect((await app.inject({ method: "GET", url: "/api/status" })).json().activeTasks).toEqual([]);
+      await upload(await modJarBytes({ id: "a.b" }), "A.jar");
+      expect((await app.inject({ method: "GET", url: "/api/status" })).json().activeTasks).toEqual([]);
+    });
+  });
+
+  describe("GET and PUT /api/worlds/:name/mods", () => {
+    const getSet = (world: string): Promise<Injected> =>
+      app.inject({ method: "GET", url: `/api/worlds/${encodeURIComponent(world)}/mods` });
+
+    const putSet = (world: string, payload: object): Promise<Injected> =>
+      app.inject({ method: "PUT", url: `/api/worlds/${encodeURIComponent(world)}/mods`, payload });
+
+    it("reports a world nobody has chosen a set for as unconfigured, not as empty", async () => {
+      const res = await getSet("Tulsa");
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toMatchObject({ modIds: [], missing: [], configured: false });
+    });
+
+    it("writes a set and reads it back", async () => {
+      await upload(await modJarBytes({ id: "a.one" }), "A.jar");
+      await upload(await modJarBytes({ id: "b.two" }), "B.jar");
+
+      const put = await putSet("Tulsa", { modIds: ["a.one", "b.two"] });
+
+      expect(put.statusCode).toBe(200);
+      expect(put.json().modIds).toEqual(["a.one", "b.two"]);
+      expect((await getSet("Tulsa")).json()).toMatchObject({
+        modIds: ["a.one", "b.two"],
+        configured: true,
+      });
+    });
+
+    // Windows world names are case-insensitive and listWorlds reads them off
+    // disk, so a set must not be findable only in the case it was written in.
+    it("finds a world's set whatever case it is asked for", async () => {
+      await upload(await modJarBytes({ id: "a.one" }), "A.jar");
+      await putSet("Summoner World", { modIds: ["a.one"] });
+      expect((await getSet("summoner world")).json().modIds).toEqual(["a.one"]);
+      expect((await getSet("SUMMONER WORLD")).json().configured).toBe(true);
+    });
+
+    /*
+     * A set may only name mods the library holds, so that a world can never be
+     * saved into a state that would then refuse to start.
+     */
+    it("refuses an id the library has no jar for, naming it", async () => {
+      await upload(await modJarBytes({ id: "a.one" }), "A.jar");
+      const res = await putSet("Tulsa", { modIds: ["a.one", "not.here"] });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toMatch(/not\.here/);
+      expect((await getSet("Tulsa")).json().configured).toBe(false);
+    });
+
+    it("rejects a body that is not a list of ids", async () => {
+      for (const payload of [{}, { modIds: "a.one" }, { modIds: [1, 2] }, { modIds: [""] }]) {
+        const res = await putSet("Tulsa", payload);
+        expect(res.statusCode, JSON.stringify(payload)).toBe(400);
+        expect(res.json().error).toMatch(/modIds/);
+      }
+    });
+
+    it("refuses a world name that could escape the worlds directory", async () => {
+      for (const name of ["a/b", "a|b", "..\\..\\Server"]) {
+        expect((await getSet(name)).statusCode, name).toBe(400);
+        expect((await putSet(name, { modIds: [] })).statusCode, name).toBe(400);
+      }
+    });
+
+    // Editing a set writes no jars, so it is allowed while the server is up; it
+    // takes effect at that world's next start, because the game reads its mods
+    // once, at startup.
+    it("is allowed while the server is running", async () => {
+      await upload(await modJarBytes({ id: "a.one" }), "A.jar");
+      await app.inject({ method: "POST", url: "/api/server/start", payload: { world: "Tulsa" } });
+      spawn.calls[0].child.emitLine(F.READY_LINE_WITH_TS);
+      expect((await putSet("Later World", { modIds: ["a.one"] })).statusCode).toBe(200);
+    });
+
+    it("reports an id the library has since lost, so the refusal to start is not a surprise", async () => {
+      await upload(await modJarBytes({ id: "a.one" }), "A.jar");
+      await putSet("Tulsa", { modIds: ["a.one"] });
+      await library.remove("a.one");
+      expect((await getSet("Tulsa")).json().missing).toEqual(["a.one"]);
+    });
+  });
+
+  describe("POST /api/mods/reconcile", () => {
+    it("makes the mods folder hold exactly the world's set", async () => {
+      await installJar("Old-1.jar", { id: "x.old", version: "1" });
+      await upload(await modJarBytes({ id: "x.new", version: "2" }), "New-2.jar");
+      await app.inject({
+        method: "PUT",
+        url: "/api/worlds/Tulsa/mods",
+        payload: { modIds: ["x.new"] },
+      });
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/mods/reconcile",
+        payload: { world: "Tulsa" },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(await jarsInMods()).toEqual(["New-2.jar"]);
+      // Adopt before prune: the jar it removed is still restorable.
+      expect(res.json().reconcile.adopted).toEqual(["Old-1.jar"]);
+      expect(await library.resolve("x.old")).toBeDefined();
+    });
+
+    // It rewrites the folder the game reads its mod set from, so it is refused
+    // exactly like every other mutation of that folder.
+    it("refuses while the server is running or still starting", async () => {
+      await installJar("A-1.jar", { id: "x.a", version: "1" });
+      await app.inject({ method: "POST", url: "/api/server/start", payload: { world: "Tulsa" } });
+      const before = await jarsInMods();
+
+      const starting = await app.inject({
+        method: "POST",
+        url: "/api/mods/reconcile",
+        payload: { world: "Tulsa" },
+      });
+      expect(starting.statusCode).toBe(409);
+      expect(starting.json().error).toMatch(/starting/);
+
+      spawn.calls[0].child.emitLine(F.READY_LINE_WITH_TS);
+      const running = await app.inject({
+        method: "POST",
+        url: "/api/mods/reconcile",
+        payload: { world: "Tulsa" },
+      });
+      expect(running.statusCode).toBe(409);
+      expect(running.json().error).toMatch(/running/);
+      expect(await jarsInMods()).toEqual(before);
+    });
+
+    it("refuses while a background task is in flight, and works once it clears", async () => {
+      await app.inject({ method: "POST", url: "/api/server/update" });
+
+      const blocked = await app.inject({
+        method: "POST",
+        url: "/api/mods/reconcile",
+        payload: { world: "Tulsa" },
+      });
+      expect(blocked.statusCode).toBe(409);
+      expect(blocked.json().error).toMatch(/background task/i);
+
+      spawn.calls[0].child.exit(0);
+      await vi.waitFor(async () => {
+        expect((await app.inject({ method: "GET", url: "/api/status" })).json().activeTasks).toEqual([]);
+      });
+      const allowed = await app.inject({
+        method: "POST",
+        url: "/api/mods/reconcile",
+        payload: { world: "Tulsa" },
+      });
+      expect(allowed.statusCode).toBe(200);
+    });
+
+    it("holds a slot in activeTasks while it runs and releases it afterwards", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/mods/reconcile",
+        payload: { world: "Tulsa" },
+      });
+      expect(res.statusCode).toBe(200);
+      expect((await app.inject({ method: "GET", url: "/api/status" })).json().activeTasks).toEqual([]);
+    });
+
+    it("rejects an invalid world name", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/mods/reconcile",
+        payload: { world: "bad:name" },
+      });
+      expect(res.statusCode).toBe(400);
+    });
+  });
+
+  describe("POST /api/server/start reconciles first", () => {
+    it("brings the folder to the set before the game is spawned", async () => {
+      await installJar("Unwanted-1.jar", { id: "x.unwanted", version: "1" });
+      await upload(await modJarBytes({ id: "x.wanted", version: "1" }), "Wanted-1.jar");
+      await sets.set("Tulsa", ["x.wanted"]);
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/server/start",
+        payload: { world: "Tulsa" },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(await jarsInMods()).toEqual(["Wanted-1.jar"]);
+      expect(spawn.calls).toHaveLength(1);
+    });
+
+    /*
+     * The refusal that matters most. Launching with a mod missing would have
+     * the game silently run a set nobody chose and write it into the save, so
+     * the server is not started at all.
+     */
+    it("refuses to start when the set names a mod the library has lost, and spawns nothing", async () => {
+      await sets.set("Tulsa", ["x.vanished"]);
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/server/start",
+        payload: { world: "Tulsa" },
+      });
+
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error).toMatch(/x\.vanished/);
+      expect(res.json().error).toMatch(/was not started/);
+      expect(spawn.calls).toHaveLength(0);
+      expect(pm.status.state).toBe("stopped");
+      // The slot it claimed for the attempt is released either way.
+      expect((await app.inject({ method: "GET", url: "/api/status" })).json().activeTasks).toEqual([]);
+    });
+
+    it("refuses, and leaves the folder alone, when it holds a jar it cannot account for", async () => {
+      await makeNonModJar(cfg.modsDir, "Mystery.jar");
+      await sets.set("Tulsa", []);
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/server/start",
+        payload: { world: "Tulsa" },
+      });
+
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error).toMatch(/Mystery\.jar/);
+      expect(await jarsInMods()).toEqual(["Mystery.jar"]);
+      expect(spawn.calls).toHaveLength(0);
+    });
+
+    /*
+     * A world typed into the header field for the first time has no set. It
+     * inherits exactly what is installed right now, so its first start loads
+     * what the folder already held - the same rule the migration applies.
+     */
+    it("seeds a set from what is installed for a world that has none", async () => {
+      await installJar("A-1.jar", { id: "x.a", version: "1" });
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/server/start",
+        payload: { world: "Brand New" },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect((await sets.get("Brand New"))?.modIds).toEqual(["x.a"]);
+      expect(await jarsInMods()).toEqual(["A-1.jar"]);
+    });
+
+    it("does not rewrite the mods folder for a start that was never going to be allowed", async () => {
+      await installJar("A-1.jar", { id: "x.a", version: "1" });
+      await sets.set("Tulsa", []);
+      pm.markUnmanaged(4321);
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/server/start",
+        payload: { world: "Tulsa" },
+      });
+
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error).toMatch(/unmanaged/i);
+      // Refused before reconciling, so the folder is untouched.
+      expect(await jarsInMods()).toEqual(["A-1.jar"]);
+    });
   });
 });
 

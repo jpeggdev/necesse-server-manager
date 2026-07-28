@@ -13,6 +13,8 @@ import { buildServer } from "../../daemon/src/http.js";
 import { ProcessManager } from "../../daemon/src/process-manager.js";
 import { ModInstaller } from "../../daemon/src/mod-installer.js";
 import { ModRegistry } from "../../daemon/src/mod-registry.js";
+import { ModLibrary } from "../../daemon/src/mod-library.js";
+import { ModSets } from "../../daemon/src/mod-sets.js";
 import { SteamCmd } from "../../daemon/src/steamcmd.js";
 import { SteamWorkshop } from "../../daemon/src/steam-workshop.js";
 import { DEFAULT_CONFIG } from "../../daemon/src/config.js";
@@ -30,19 +32,31 @@ beforeEach(async () => {
   const worldsDir = join(root, "worlds");
   await mkdir(modsDir, { recursive: true });
   await mkdir(worldsDir, { recursive: true });
-  const cfg = { ...DEFAULT_CONFIG, modsDir, worldsDir, stopTimeoutMs: 50 };
+  const cfg = {
+    ...DEFAULT_CONFIG,
+    modsDir,
+    worldsDir,
+    stopTimeoutMs: 50,
+    // Temp dirs only, per the rule at the top of this file: DEFAULT_CONFIG
+    // points the library and the sets at the daemon's own directory in the repo.
+    modLibraryDir: join(root, "mod-library"),
+    modLibraryFile: join(root, "mod-library.json"),
+    modSetsFile: join(root, "mod-sets.json"),
+  };
   const configFile = join(root, "config.json");
   const spawn = makeFakeSpawn();
   const pm = new ProcessManager(cfg, spawn.spawn);
   const steam = new SteamCmd(cfg, spawn.spawn);
   const installer = new ModInstaller(cfg, new ModRegistry(join(root, "mods.json")), steam);
+  const library = new ModLibrary(cfg.modLibraryFile, cfg.modLibraryDir);
+  const sets = new ModSets(cfg.modSetsFile);
   // Same rule as the fake spawn: this test stands up a real daemon, so its
   // fetch is stubbed to refuse rather than reach Steam. Anything that tries
   // fails loudly instead of quietly making a live call from the test suite.
   const workshop = new SteamWorkshop(cfg, () =>
     Promise.reject(new Error("no network in tests")),
   );
-  app = buildServer({ cfg, configFile, pm, installer, steam, workshop });
+  app = buildServer({ cfg, configFile, pm, installer, library, sets, steam, workshop });
   baseUrl = await app.listen({ port: 0, host: "127.0.0.1" });
 });
 

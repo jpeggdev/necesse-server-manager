@@ -24,6 +24,15 @@ confirm nobody is playing — `GET /api/status` reporting `stopped` is the check
 deliberate: `mods.json` is the only record of which jar belongs to which
 workshop id, and clobbering it strands every installed mod as untracked.
 
+**The daemon's own directory holds state, not just code.** Alongside those two,
+`mod-library/`, `mod-library.json` and `mod-sets.json` live there (see
+`docs/mod-sets-design.md`); the library is the only copy of every uploaded and
+hand-placed jar, and the sets are what each world loads. Deploy copies `dist/`
+and the two manifests in and never removes anything, which is what makes that
+safe — a deploy step that mirrored or cleaned the directory would destroy jars
+that exist nowhere else. Not `C:\necesseserver`, ever: steamcmd's
+`app_update ... validate` prunes unknown files out of that tree.
+
 SSH: `ssh -i "$env:USERPROFILE\.ssh\necesse_server" jeffp@192.168.1.106`.
 **The remote default shell is cmd.exe.** Do not fight nested quoting — `scp` a
 `.ps1` over and run it with `powershell -NoProfile -ExecutionPolicy Bypass -File`.

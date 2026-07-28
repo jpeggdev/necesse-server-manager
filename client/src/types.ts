@@ -44,6 +44,26 @@ export interface DaemonConfig {
   steamcmdExe: string;
   modsDir: string;
   worldsDir: string;
+  /**
+   * Where the mod library keeps its jars, one subfolder per mod id, and where
+   * its manifest and the per-world sets are written.
+   *
+   * Deliberately under the daemon's own directory and never under `serverRoot`:
+   * that tree is steamcmd-managed (it holds `steamapps/appmanifest_1169370.acf`)
+   * and this daemon's own server update runs `app_update ... validate`, which
+   * reconciles it against Steam's manifest. Anything of ours in there is an
+   * unknown file a validate pass may prune - and the library is the only copy of
+   * a hand-placed or uploaded jar.
+   */
+  modLibraryDir: string;
+  modLibraryFile: string;
+  modSetsFile: string;
+  /**
+   * Largest jar POST /api/mods/upload will accept, in bytes. Real mods run to a
+   * few megabytes; the limit exists so an unauthenticated LAN endpoint cannot be
+   * used to fill the disk, not to be tight.
+   */
+  modUploadMaxBytes: number;
   jvmArgs: string[];
   owners: string[];
   lastWorld: string | null;
@@ -79,6 +99,117 @@ export interface ModEntry {
 
 export interface UntrackedMod {
   jar: string;
+}
+
+/**
+ * What a jar's own `mod.info` says about it.
+ *
+ * `id` is the identity everything in the mod library and the per-world sets is
+ * keyed by. It is what the game records in `modlist.data`, it survives a
+ * version bump that renames the jar, and it is identical whether the jar came
+ * from the workshop or from an upload. The remaining fields are descriptive:
+ * they are recorded and shown, and nothing is decided by them - `gameVersion`
+ * in particular is surfaced but never enforced, because the game itself is what
+ * decides whether a mod loads.
+ */
+export interface ModInfo {
+  id: string;
+  /** `name` from the file, or the id when the file gives none. Never empty. */
+  name: string;
+  version: string;
+  gameVersion: string;
+  author: string;
+  clientside: boolean;
+}
+
+/**
+ * Where a library jar came from.
+ *
+ * A workshop mod carries its published-file id, so `Update All` knows what to
+ * re-download. A local one has no such id and never will - `upload` arrived
+ * through the API, `adopted` was found sitting in the mods folder and taken into
+ * the library so that reconcile could safely remove it from there.
+ */
+export type ModSource =
+  | { kind: "workshop"; workshopId: string }
+  | { kind: "local"; how: "upload" | "adopted" };
+
+/**
+ * One mod the library holds a jar for, exactly one per `id`.
+ *
+ * The jar itself lives at `<modLibraryDir>/<safe mod id>/<jar>`: a per-id
+ * subfolder, so the original filename survives (it is what the game logs, and
+ * what a person recognises) while two mods that happen to ship the same jar name
+ * still cannot collide.
+ */
+export interface ModLibraryEntry extends ModInfo {
+  /** The jar's original filename, and its name inside the library. */
+  jar: string;
+  source: ModSource;
+  /** When this jar was put into the library, ISO 8601. */
+  addedAt: string;
+  sizeBytes: number;
+}
+
+export interface ModLibraryResponse {
+  ok: true;
+  mods: ModLibraryEntry[];
+}
+
+/**
+ * Which mods one world loads, as mod ids.
+ *
+ * Ids, not jar filenames: a filename carries the version (`AutoTorch-1.0.jar` ->
+ * `-1.1.jar`), so a set stored as filenames would break on every update, while a
+ * set stored as ids picks the new jar up at the world's next start.
+ *
+ * `world` is the name as it was last written. The set is looked up
+ * case-insensitively, because Windows filenames are and `listWorlds` reads world
+ * names off disk.
+ */
+export interface ModSet {
+  world: string;
+  modIds: string[];
+  updatedAt: string;
+}
+
+export interface WorldModsResponse {
+  ok: true;
+  world: string;
+  modIds: string[];
+  /**
+   * Ids in the set that the library has no jar for. A world in this state will
+   * not start: reconcile refuses rather than launching a partial set.
+   */
+  missing: string[];
+  /** Whether a set has ever been written for this world. */
+  configured: boolean;
+}
+
+/** What reconciling the mods folder to a world's set actually did. */
+export interface ReconcileSummary {
+  world: string;
+  modIds: string[];
+  /** Jars found in the mods folder that the library did not have, and now does. */
+  adopted: string[];
+  /** Jar filenames removed from the mods folder because the set does not name them. */
+  removed: string[];
+  /** Jar filenames copied into the mods folder from the library. */
+  copied: string[];
+  /** Jar filenames already in place and left exactly as they were. */
+  kept: string[];
+}
+
+export interface ReconcileResponse {
+  ok: true;
+  reconcile: ReconcileSummary;
+}
+
+export interface ModUploadResponse {
+  ok: true;
+  mod: ModLibraryEntry;
+  /** True when a jar for this mod id was already in the library and was replaced. */
+  replaced: boolean;
 }
 
 export interface ModListResponse {

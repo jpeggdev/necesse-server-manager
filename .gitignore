@@ -4,3 +4,10 @@ target/
 .remember/
 *.log
 .env
+
+# Runtime state the daemon writes into its own directory. mod-library/ holds
+# actual mod jars, including uploaded ones that exist nowhere else - it is data,
+# not source, and it must never be committed or clobbered by a deploy.
+daemon/mod-library/
+daemon/mod-library.json
+daemon/mod-sets.json
