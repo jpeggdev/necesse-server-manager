@@ -1,9 +1,13 @@
 import type {
+  ModLibraryResponse,
   ModListResponse,
   ModUpdatesResponse,
+  ModUploadResponse,
+  ReconcileResponse,
   StatusPayload,
   WorkshopSearchResponse,
   WorldInfo,
+  WorldModsResponse,
   WorldSettingsResponse,
   WorldSettingsWriteResponse,
 } from "./types";
@@ -143,6 +147,63 @@ export function makeApi(base: string) {
     removeMod: (id: string) =>
       request<{ ok: true }>(`${base}/api/mods/${id}`, { method: "DELETE" }),
     updateAllMods: () => post<{ ok: true; taskId: string }>("/api/mods/update-all"),
+    /**
+     * Every mod the daemon holds a jar for. This, not the mods folder, is what a
+     * world's set is chosen from: the folder only ever holds one world's worth
+     * at a time.
+     */
+    modLibrary: () => request<ModLibraryResponse>(`${base}/api/mods/library`),
+    /**
+     * Which mods a world will load. For a world nobody has chosen a set for
+     * this reports what starting it would seed the set with - what is installed
+     * right now - with `configured: false` saying the choice has not been made.
+     */
+    worldMods: (world: string) =>
+      request<WorldModsResponse>(`${base}/api/worlds/${encodeURIComponent(world)}/mods`),
+    /**
+     * Chooses which mods a world loads. Takes effect at that world's next
+     * start, because the game reads its mod set once, at startup. Every id must
+     * be one the library holds; the daemon answers 400 naming any that is not.
+     */
+    saveWorldMods: (world: string, modIds: string[]) =>
+      request<WorldModsResponse>(`${base}/api/worlds/${encodeURIComponent(world)}/mods`, {
+        method: "PUT",
+        body: JSON.stringify({ modIds }),
+      }),
+    /**
+     * Uploads a jar into the library as a RAW body, not multipart: a jar upload
+     * is one file with no other form fields, so multipart would buy only a
+     * dependency. The content-type is what routes it to the daemon's buffer
+     * parser and must be set - `request()` above only sets a JSON one, so this
+     * call deliberately does not go through it.
+     *
+     * `filename` is a label; the mod's identity comes from the `mod.info` inside
+     * the bytes, which the daemon validates before storing anything.
+     */
+    uploadMod: async (bytes: ArrayBuffer | Uint8Array, filename?: string) => {
+      const url =
+        `${base}/api/mods/upload` +
+        (filename === undefined ? "" : `?filename=${encodeURIComponent(filename)}`);
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          method: "POST",
+          headers: { "content-type": "application/java-archive" },
+          body: bytes as BodyInit,
+        });
+      } catch (e) {
+        throw new Error(`Could not reach the daemon at ${url}: ${(e as Error).message}`);
+      }
+      const body = (await res.json().catch(() => null)) as { error?: string } | null;
+      if (!res.ok) throw new DaemonError(body?.error ?? `${res.status} ${res.statusText}`, res.status);
+      return body as ModUploadResponse;
+    },
+    /**
+     * Applies a world's set to the mods folder without starting the server -
+     * the same work `start` does first. Refused while the server is running,
+     * because the game reads that folder once at startup.
+     */
+    reconcileMods: (world: string) => post<ReconcileResponse>("/api/mods/reconcile", { world }),
   };
 }
 

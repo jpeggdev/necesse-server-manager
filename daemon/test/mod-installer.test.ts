@@ -1,21 +1,35 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { mkdtemp, writeFile, mkdir, readdir } from "node:fs/promises";
+import { mkdtemp, writeFile, mkdir, readdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
+import { reconcileMods } from "../src/mod-reconcile.js";
 import { ModInstaller } from "../src/mod-installer.js";
+import { ModLibrary } from "../src/mod-library.js";
 import { ModRegistry } from "../src/mod-registry.js";
 import { SteamCmd } from "../src/steamcmd.js";
 import { DEFAULT_CONFIG } from "../src/config.js";
+import { makeModJar } from "./fixtures/mod-jar.js";
 import type { DaemonConfig } from "../src/types.js";
 
 let modsDir: string;
 let steamRoot: string;
 let cfg: DaemonConfig;
 let registry: ModRegistry;
+let library: ModLibrary;
 let steam: SteamCmd;
 let installer: ModInstaller;
 
-/** Places a jar where steamcmd would have downloaded it, then reports success. */
+/** The mod id a jar downloaded for workshop item `id` declares in its mod.info. */
+const modIdFor = (id: string): string => `vendor.mod${id}`;
+
+/**
+ * Places a jar where steamcmd would have downloaded it, then reports success.
+ *
+ * A REAL jar, with a real `mod.info` inside it: the installer now files every
+ * download into the mod library, which reads that file, so a stub of a few bytes
+ * would be rejected as not a Necesse mod and the test would be exercising the
+ * failure path while claiming to test the success one.
+ */
 function fakeSteam(jarByModId: Record<string, string | null>): SteamCmd {
   const s = new SteamCmd(cfg, (() => {
     throw new Error("spawn should not be called");
@@ -27,7 +41,11 @@ function fakeSteam(jarByModId: Record<string, string | null>): SteamCmd {
     }
     const dir = s.workshopItemDir(id);
     await mkdir(dir, { recursive: true });
-    await writeFile(join(dir, jar), "jarbytes");
+    await makeModJar(dir, jar, { id: modIdFor(id), name: `Mod ${id}`, version: "1.0" }, {
+      // Distinct bytes per filename, so "the library holds these exact bytes" is
+      // a claim with teeth when a version bump renames the jar.
+      filler: jar,
+    });
     return { ok: true, exitCode: 0, output: `Success. Downloaded item ${id}` };
   });
   return s;
@@ -41,11 +59,12 @@ beforeEach(async () => {
   await mkdir(steamRoot, { recursive: true });
   cfg = { ...DEFAULT_CONFIG, modsDir, steamcmdExe: join(steamRoot, "steamcmd.exe") };
   registry = new ModRegistry(join(root, "mods.json"));
+  library = new ModLibrary(join(root, "mod-library.json"), join(root, "mod-library"));
 });
 
 function build(jars: Record<string, string | null>): ModInstaller {
   steam = fakeSteam(jars);
-  installer = new ModInstaller(cfg, registry, steam);
+  installer = new ModInstaller(cfg, registry, steam, library);
   return installer;
 }
 
@@ -150,6 +169,61 @@ describe("install", () => {
     expect(r.error).toContain("Two.jar");
     expect(await readdir(modsDir)).toEqual([]);
     expect(await registry.get("88")).toBeUndefined();
+  });
+});
+
+/*
+ * The library is what reconcile applies a world's set from, so an install that
+ * wrote only the mods folder was silently reverted at the next start: reconcile
+ * deleted the freshly downloaded jar and restored the older one, with no
+ * message. That is decision row 1 of docs/mod-sets-design.md - "Update All
+ * refreshes the library and every world picks the new version up at its next
+ * start" - and these are the tests that hold it up.
+ */
+describe("installing writes the library, so reconcile does not undo it", () => {
+  it("files the download as that mod's current jar", async () => {
+    const inst = build({ "3731244177": "SafeHavenQOL-1.2.0-2.6.jar" });
+    await inst.install("3731244177", "Safe Haven QOL", () => {});
+
+    const entry = await library.get(modIdFor("3731244177"));
+    expect(entry?.jar).toBe("SafeHavenQOL-1.2.0-2.6.jar");
+    expect(entry?.source).toEqual({ kind: "workshop", workshopId: "3731244177" });
+    expect(await readFile(library.jarPath(entry!))).toEqual(
+      await readFile(join(modsDir, "SafeHavenQOL-1.2.0-2.6.jar")),
+    );
+  });
+
+  it("survives the reconcile that follows: the NEW jar is what the world starts with", async () => {
+    // The state after migration: v2.6 installed, and a world set to load it.
+    await build({ "3731244177": "SafeHavenQOL-1.2.0-2.6.jar" }).install("3731244177", "Safe Haven QOL", () => {});
+    const modId = modIdFor("3731244177");
+
+    // Update All lands v2.7.
+    const update = await build({ "3731244177": "SafeHavenQOL-1.2.0-2.7.jar" }).updateAll(() => {});
+    expect(update.every((r) => r.ok)).toBe(true);
+
+    // ...and the next start reconciles the folder to the set.
+    await reconcileMods({ modsDir, library, world: "Tulsa", modIds: [modId], log: () => {} });
+
+    expect(await readdir(modsDir)).toEqual(["SafeHavenQOL-1.2.0-2.7.jar"]);
+    expect((await library.get(modId))?.jar).toBe("SafeHavenQOL-1.2.0-2.7.jar");
+    // The version it replaced is retained, not destroyed.
+    expect((await library.get(modId))?.superseded.map((j) => j.jar)).toEqual([
+      "SafeHavenQOL-1.2.0-2.6.jar",
+    ]);
+  });
+
+  it("fails the install rather than leaving a jar the next start would revert", async () => {
+    const inst = build({ "42": "Thing-1.jar" });
+    vi.spyOn(library, "add").mockRejectedValue(new Error("disk full"));
+
+    const r = await inst.install("42", "Thing", () => {});
+
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("disk full");
+    expect(r.error).toMatch(/undone at the next start/);
+    // Not recorded as installed, so nothing claims a mod the library lacks.
+    expect(await registry.get("42")).toBeUndefined();
   });
 });
 

@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readdir, readFile, rename, rm } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import JSZip from "jszip";
+import { writeDurable } from "./durable-write.js";
 import { WorldSettingsFile } from "./world-settings-file.js";
 
 /**
@@ -99,31 +100,16 @@ const sha256 = (b: Buffer): string => createHash("sha256").update(b).digest("hex
 
 const stamp = (): string => new Date().toISOString().replace(/[:.]/g, "-");
 
-/**
- * Writes a file and does not come back until the bytes are on the disk.
- *
- * A resolved `writeFile` means the data reached the OS page cache. It says
- * nothing about the platter. Without the fsync below, a power loss or a BSOD
- * in the seconds around a save can leave NTFS having journalled the rename
- * while the replacement's data blocks were never written - and the backup,
- * written the same way, is just as unflushed. That is the one sequence that
- * can leave a world with neither a good original nor a good replacement. A
- * process crash was always survivable; hardware loss was not.
- *
- * This is not redundant with the write above it and must not be removed as
- * such. (There is no matching fsync of the directory: Windows cannot open one
- * for syncing, so the rename's own metadata durability is left to the NTFS
- * journal, which is what orders it against the data writes this forces.)
+/*
+ * `writeDurable` lives in `durable-write.ts` now, shared with the mod library's
+ * manifest. The reason it exists is unchanged and worth restating here, because
+ * this is the caller it was written for: a resolved `writeFile` means the data
+ * reached the OS page cache, not the platter, so a power loss in the seconds
+ * around a save can leave NTFS having journalled the rename while the
+ * replacement's data blocks were never written - and the backup, written the
+ * same way, is just as unflushed. That is the one sequence that can leave a
+ * world with neither a good original nor a good replacement.
  */
-async function writeDurable(path: string, data: Buffer): Promise<void> {
-  const handle = await open(path, "w");
-  try {
-    await handle.writeFile(data);
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-}
 
 /** Every non-directory entry's name mapped to the hash of its *uncompressed* bytes. */
 async function hashEntries(zip: JSZip): Promise<Map<string, string>> {

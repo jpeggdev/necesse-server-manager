@@ -88,12 +88,14 @@ export async function migrateModSets(options: MigrationOptions): Promise<Migrati
       continue;
     }
     if (!installed.includes(id)) installed.push(id);
-    if (await library.has(id)) continue;
     const workshopId = byJar.get(jar.toLowerCase());
     const source: ModSource =
       workshopId === undefined ? { kind: "local", how: "adopted" } : { kind: "workshop", workshopId };
-    await library.add(path, source, jar);
-    summary.adopted.push(id);
+    // `retain`, so a jar is taken in whenever the library does not already hold
+    // those exact bytes - the same hash test reconcile uses. Gating on the id
+    // would skip a second build of a mod already known and leave it deletable.
+    const { stored } = await library.retain(path, source, jar);
+    if (stored) summary.adopted.push(id);
   }
 
   // Managed mods that are not in the folder any more, recovered from the
@@ -107,9 +109,10 @@ export async function migrateModSets(options: MigrationOptions): Promise<Migrati
     const path = join(dir, cached);
     try {
       const info = await readModInfo(path);
-      if (await library.has(info.id)) continue;
-      await library.add(path, { kind: "workshop", workshopId: mod.id }, cached);
-      summary.recovered.push(info.id);
+      // Retained, never promoted: a jar sitting in steamcmd's cache is not
+      // evidence of what anybody currently wants installed.
+      const { stored } = await library.retain(path, { kind: "workshop", workshopId: mod.id }, cached);
+      if (stored) summary.recovered.push(info.id);
     } catch (e) {
       summary.skipped.push(`${path}: ${(e as Error).message}`);
       log(`Mod library migration skipped cached ${path}: ${(e as Error).message}`);

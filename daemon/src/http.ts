@@ -92,6 +92,18 @@ const publicConfig = (c: DaemonConfig): PublicDaemonConfig => {
 const workshopFailureCode = (e: unknown): number =>
   e instanceof WorkshopError && e.kind === "not-configured" ? 503 : 502;
 
+/**
+ * The text of something thrown, whatever it was.
+ *
+ * `(e as Error).message` is undefined for anything that is not an Error - a
+ * thrown string, a rejected non-Error from a library - and the client then shows
+ * the user the word "undefined", which says nothing about what went wrong and
+ * cannot be searched for. Nothing is reworded here; this only ensures there is
+ * something to report.
+ */
+const errorText = (e: unknown): string =>
+  e instanceof Error ? e.message : `Non-error thrown: ${String(e)}`;
+
 export function buildServer(deps: Deps): FastifyInstance {
   const { cfg, configFile, pm, installer, library, sets, steam, workshop } = deps;
   const app = Fastify({ logger: false });
@@ -581,8 +593,8 @@ export function buildServer(deps: Deps): FastifyInstance {
     e: unknown,
   ): unknown => {
     const kind = e instanceof ReconcileError ? e.kind : "unreadable";
-    const code = kind === "missing-mod" || kind === "unknown-jar" ? 409 : 500;
-    return reply.code(code).send({ ok: false, error: (e as Error).message });
+    const operator = kind === "missing-mod" || kind === "unknown-jar" || kind === "jar-collision";
+    return reply.code(operator ? 409 : 500).send({ ok: false, error: errorText(e) });
   };
 
   app.post("/api/server/start", async (req, reply) => {
@@ -907,7 +919,7 @@ export function buildServer(deps: Deps): FastifyInstance {
       if (e instanceof NotAModJarError) {
         return reply.code(400).send({ ok: false, error: e.message });
       }
-      return reply.code(500).send({ ok: false, error: (e as Error).message });
+      return reply.code(500).send({ ok: false, error: errorText(e) });
     } finally {
       releaseTask(reservation);
     }
@@ -953,14 +965,29 @@ export function buildServer(deps: Deps): FastifyInstance {
     }
   });
 
-  /** Which mods a world is set to load, and which of them the library has lost. */
+  /**
+   * Which mods a world will load, and which of them the library has lost.
+   *
+   * For a world nobody has chosen a set for, this reports what `start` would
+   * seed the set with - what is installed right now - rather than an empty list,
+   * which would read as "this world loads no mods" when it is about to load
+   * eight. `configured: false` is what says the choice has not been made yet.
+   */
   app.get("/api/worlds/:name/mods", async (req, reply) => {
     const { name } = req.params as { name: string };
     if (!isValidWorldName(name)) {
       return reply.code(400).send({ ok: false, error: `Invalid world name: ${JSON.stringify(name)}` });
     }
     const existing = await sets.get(name);
-    const modIds = existing?.modIds ?? [];
+    let modIds: string[];
+    try {
+      modIds = existing?.modIds ?? (await installedModIds(cfg.modsDir));
+    } catch (e) {
+      // The mods folder holds something that cannot be accounted for, so `start`
+      // would refuse too. Answering with the same failure is more use than an
+      // empty list that would turn into a refusal only on the next start.
+      return reconcileFailure(reply, e);
+    }
     const held = new Set((await library.load()).map((m) => m.id));
     return {
       ok: true,

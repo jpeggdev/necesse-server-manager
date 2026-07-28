@@ -1,5 +1,6 @@
 import { copyFile, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
+import type { ModLibrary } from "./mod-library.js";
 import type { ModRegistry } from "./mod-registry.js";
 import type { SteamCmd } from "./steamcmd.js";
 import type { DaemonConfig, InstallResult, ModListResponse } from "./types.js";
@@ -9,6 +10,7 @@ export class ModInstaller {
     private cfg: DaemonConfig,
     private registry: ModRegistry,
     private steam: SteamCmd,
+    private library: ModLibrary,
   ) {}
 
   async list(): Promise<ModListResponse> {
@@ -83,10 +85,40 @@ export class ModInstaller {
       return { id, name, jar: null, ok: false, error: `Failed to copy ${jar}: ${(e as Error).message}` };
     }
 
+    // Into the library, and made the CURRENT jar for its mod, before anything
+    // else is recorded.
+    //
+    // Without this, an install or an `Update All` would be silently reverted:
+    // reconcile installs whatever jar the library holds as current, so a new
+    // version copied only into the mods folder is deleted at the next start and
+    // the old one restored, with no message and no way to notice. That is
+    // decision row 1 of docs/mod-sets-design.md - "Update All refreshes the
+    // library and every world picks the new version up at its next start" - and
+    // this line is what implements it. The library is the source of truth;
+    // writing the mods folder alone does not change what a world loads.
+    try {
+      await this.library.add(join(this.cfg.modsDir, jar), { kind: "workshop", workshopId: id }, jar);
+    } catch (e) {
+      // A hard failure, not a warning: leaving the jar in the folder but out of
+      // the library is exactly the state where the next start quietly undoes
+      // this install.
+      return {
+        id,
+        name,
+        jar: null,
+        ok: false,
+        error:
+          `${jar} was downloaded but could not be put into the mod library ` +
+          `(${(e as Error).message}). The mod library is what a world's mod set is applied from, ` +
+          `so this install would have been undone at the next start.`,
+      };
+    }
+
     const previous = await this.registry.get(id);
     let replacedJar: string | undefined;
     if (previous && previous.jar !== jar) {
       // Necesse loads every jar in the mods folder, so leaving the old one duplicates the mod.
+      // The library keeps its copy either way, so this is never the last one.
       await rm(join(this.cfg.modsDir, previous.jar), { force: true });
       replacedJar = previous.jar;
     }

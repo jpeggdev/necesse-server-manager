@@ -6,7 +6,7 @@
 // with the real makeApi() over real HTTP. Never point this at the live
 // daemon on the LAN - temp dirs + a fake spawn only.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildServer } from "../../daemon/src/http.js";
@@ -20,7 +20,11 @@ import { SteamWorkshop } from "../../daemon/src/steam-workshop.js";
 import { DEFAULT_CONFIG } from "../../daemon/src/config.js";
 import { makeFakeSpawn } from "../../daemon/test/fixtures/fake-spawn.js";
 import { makeWorldZip } from "../../daemon/test/fixtures/world-zip.js";
+import { modJarBytes } from "../../daemon/test/fixtures/mod-jar.js";
 import { makeApi } from "../src/api";
+
+/** Small enough that the oversize case is a few KB rather than 64MB of payload. */
+const UPLOAD_LIMIT = 4096;
 
 let app: ReturnType<typeof buildServer>;
 let baseUrl: string;
@@ -42,14 +46,15 @@ beforeEach(async () => {
     modLibraryDir: join(root, "mod-library"),
     modLibraryFile: join(root, "mod-library.json"),
     modSetsFile: join(root, "mod-sets.json"),
+    modUploadMaxBytes: UPLOAD_LIMIT,
   };
   const configFile = join(root, "config.json");
   const spawn = makeFakeSpawn();
   const pm = new ProcessManager(cfg, spawn.spawn);
   const steam = new SteamCmd(cfg, spawn.spawn);
-  const installer = new ModInstaller(cfg, new ModRegistry(join(root, "mods.json")), steam);
   const library = new ModLibrary(cfg.modLibraryFile, cfg.modLibraryDir);
   const sets = new ModSets(cfg.modSetsFile);
+  const installer = new ModInstaller(cfg, new ModRegistry(join(root, "mods.json")), steam, library);
   // Same rule as the fake spawn: this test stands up a real daemon, so its
   // fetch is stubbed to refuse rather than reach Steam. Anything that tries
   // fails loudly instead of quietly making a live call from the test suite.
@@ -95,6 +100,78 @@ describe("makeApi against a real daemon instance", () => {
     // Same root cause, same request() codepath, different verb: confirm the
     // fix isn't accidentally POST-specific.
     await expect(makeApi(baseUrl).removeMod("999")).rejects.toThrow(/not managed/i);
+  });
+});
+
+/*
+ * The mod library over a real socket.
+ *
+ * `/api/mods/upload` is exactly the shape of defect this file exists for: it is
+ * the only route with a non-JSON body, so it depends on a content-type parser
+ * that `inject()` never exercises (it sets no content-type) and that a mocked
+ * fetch never reaches. A daemon suite alone would pass with the parser
+ * unregistered, the header wrong, or the size limit applied in the wrong place.
+ */
+describe("mod library and reconcile over a real daemon instance", () => {
+  /** A real jar: real zip, real mod.info, built the way a workshop mod is. */
+  const jar = (id: string, version = "1.0", filler?: string): Promise<Buffer> =>
+    modJarBytes({ id, name: id, version, gameVersion: "1.2.0" }, filler === undefined ? {} : { filler });
+
+  it("uploads a jar as a raw body and reads it back out of the library", async () => {
+    const api = makeApi(baseUrl);
+    const bytes = await jar("someone.realmod", "3.1");
+
+    const res = await api.uploadMod(bytes, "RealMod-3.1.jar");
+
+    expect(res.mod).toMatchObject({
+      id: "someone.realmod",
+      version: "3.1",
+      gameVersion: "1.2.0",
+      jar: "RealMod-3.1.jar",
+      source: { kind: "local", how: "upload" },
+    });
+    expect(res.replaced).toBe(false);
+    const library = await api.modLibrary();
+    expect(library.mods.map((m) => m.id)).toEqual(["someone.realmod"]);
+  });
+
+  // The header is what routes the body to the daemon's buffer parser. Getting it
+  // wrong is a 415 that no daemon-side test can see.
+  it("is refused with the daemon's own message when the jar is not a Necesse mod", async () => {
+    const bytes = await modJarBytes({ id: "irrelevant" }, { omitInfo: true });
+    await expect(makeApi(baseUrl).uploadMod(bytes, "NotAMod.jar")).rejects.toThrow(
+      /no mod\.info at its root/,
+    );
+  });
+
+  it("cuts an oversize body off at the wire and answers 413, not a truncated success", async () => {
+    const api = makeApi(baseUrl);
+    await expect(api.uploadMod(Buffer.alloc(UPLOAD_LIMIT + 1, 7), "Huge.jar")).rejects.toMatchObject({
+      status: 413,
+    });
+    // Way past the limit: cut off by the parser rather than held in memory.
+    await expect(api.uploadMod(Buffer.alloc(UPLOAD_LIMIT * 4, 7), "Huge.jar")).rejects.toMatchObject({
+      status: 413,
+    });
+    expect((await api.modLibrary()).mods).toEqual([]);
+  });
+
+  it("writes a world's set and applies it with a real reconcile", async () => {
+    const api = makeApi(baseUrl);
+    await api.uploadMod(await jar("a.wanted"), "Wanted-1.0.jar");
+    await api.uploadMod(await jar("b.unwanted"), "Unwanted-1.0.jar");
+
+    await api.saveWorldMods("Tulsa", ["a.wanted"]);
+    expect((await api.worldMods("Tulsa")).modIds).toEqual(["a.wanted"]);
+
+    const res = await api.reconcileMods("Tulsa");
+
+    expect(res.reconcile.copied).toEqual(["Wanted-1.0.jar"]);
+    expect((await readdir(join(root, "mods"))).sort()).toEqual(["Wanted-1.0.jar"]);
+  });
+
+  it("hands the daemon's refusal back as its own text for an id the library lacks", async () => {
+    await expect(makeApi(baseUrl).saveWorldMods("Tulsa", ["not.here"])).rejects.toThrow(/not\.here/);
   });
 });
 

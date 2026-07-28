@@ -1,6 +1,7 @@
-import { copyFile, mkdir, readdir, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { copyFile, mkdir, readFile, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { NotAModJarError, readModInfo } from "./mod-info.js";
+import { NotAModJarError, readModInfoFromBytes } from "./mod-info.js";
 import type { ModLibrary } from "./mod-library.js";
 import type { ModInfo, ReconcileSummary } from "./types.js";
 
@@ -15,14 +16,20 @@ import type { ModInfo, ReconcileSummary } from "./types.js";
  *
  * The whole procedure is arranged around one rule:
  *
- *   **Never delete a jar the library cannot restore.**
+ *   **Never delete a jar the library cannot restore - THAT jar, not merely
+ *   something else carrying the same mod id.**
  *
- * Every jar in the folder is therefore copied into the library *before* anything
- * is removed from it, which is what makes the removal reversible. A jar somebody
- * dropped in by hand is adopted, never discarded. And if any step fails, the
- * server does not start: a half-reconciled folder must never be launched,
- * because the game would then silently run a set nobody chose and write it into
- * a save.
+ * Every jar in the folder whose exact bytes the library does not already hold is
+ * therefore copied into it *before* anything is removed, which is what makes the
+ * removal reversible. That test is a hash, not an id, and the difference is not
+ * academic: the library holding `Mod-1.0.jar` does nothing for a hand-dropped
+ * `Mod-2.0.jar` that may be the only copy in existence, and gating on the id
+ * alone deletes it. Every jar is retained, including the loser of a duplicate
+ * pair, before a single one is pruned.
+ *
+ * And if any step fails, the server does not start: a half-reconciled folder
+ * must never be launched, because the game would then silently run a set nobody
+ * chose and write it into a save.
  */
 
 export type ReconcileErrorKind =
@@ -30,6 +37,8 @@ export type ReconcileErrorKind =
   | "missing-mod"
   /** A jar in the mods folder is not a Necesse mod, so it can be neither adopted nor removed. */
   | "unknown-jar"
+  /** Two mods in the set have jars of the same name, so only one could exist in the folder. */
+  | "jar-collision"
   /** The mods folder, or a jar in it, could not be read. */
   | "unreadable"
   /** After the work, the folder does not hold exactly the set. */
@@ -60,6 +69,8 @@ interface FolderJar {
   jar: string;
   path: string;
   info: ModInfo;
+  /** Of the file's bytes. What decides whether the library already holds it. */
+  sha256: string;
 }
 
 export async function reconcileMods(options: ReconcileOptions): Promise<ReconcileSummary> {
@@ -72,15 +83,26 @@ export async function reconcileMods(options: ReconcileOptions): Promise<Reconcil
   const present = await scanModsFolder(modsDir);
   const { keepers, duplicates } = resolveDuplicates(present);
 
-  // 2. Adopt before pruning. Anything the library does not already hold a jar
-  //    for goes in first, so that step 3 below is reversible. This is additive
-  //    only - it never touches the mods folder - so it is safe to do before the
-  //    set has even been checked.
+  // 2. Retain before pruning - EVERY jar whose exact bytes the library does not
+  //    already hold, losers of a duplicate pair included, because step 4 deletes
+  //    those too and a jar it cannot restore must never be one of them.
+  //
+  //    Keepers go first so that, for a mod the library has never heard of, the
+  //    jar this pass would install is the one that becomes current. `retain`
+  //    never promotes over an existing entry: dropping an old jar into the
+  //    folder must not silently downgrade every world that loads that mod, nor
+  //    undo an `Update All`.
+  //
+  //    Additive only - it never touches the mods folder - so it is safe to do
+  //    before the set has even been checked.
   const adopted: string[] = [];
-  for (const found of keepers) {
-    if (await library.has(found.info.id)) continue;
-    await library.add(found.path, { kind: "local", how: "adopted" }, found.jar);
-    adopted.push(found.jar);
+  for (const found of [...keepers, ...duplicates]) {
+    const { stored } = await library.retain(
+      found.path,
+      { kind: "local", how: "adopted" },
+      found.jar,
+    );
+    if (stored) adopted.push(found.jar);
   }
 
   // 3. Resolve the set. A missing mod refuses here, with the folder still
@@ -101,10 +123,16 @@ export async function reconcileMods(options: ReconcileOptions): Promise<Reconcil
       "missing-mod",
     );
   }
+  // Two mods whose current jars share a filename cannot both sit in one folder:
+  // the second copy would silently overwrite the first, and the set would be
+  // one mod short. Caught here, named, and refused before anything is written -
+  // `verify` would catch it too, but only as "some mod is not there", which is
+  // an unstartable world with no actionable diagnosis.
+  assertNoFilenameCollision(resolved, world);
 
   // 4. Prune, then copy. A jar stays only if the set names its id AND it is the
-  //    same filename the library holds - an older jar of a wanted mod is
-  //    replaced, which is what makes a set follow updates.
+  //    same filename the library holds as current - an older jar of a wanted mod
+  //    is replaced, which is what makes a set follow updates.
   const kept: string[] = [];
   const removed: string[] = [];
   for (const found of present) {
@@ -117,7 +145,8 @@ export async function reconcileMods(options: ReconcileOptions): Promise<Reconcil
     if (isDuplicate) {
       log(
         `Removing ${found.path}: mod ${found.info.id} is present more than once in the mods folder, ` +
-          `and the game would load it twice. The library's single copy is what the server will run.`,
+          `and the game would load it twice. Both jars are in the mod library; the current one is ` +
+          `what the server will run.`,
       );
     }
     await rm(found.path, { force: true });
@@ -138,6 +167,27 @@ export async function reconcileMods(options: ReconcileOptions): Promise<Reconcil
   await verify(modsDir, wanted, world);
 
   return { world, modIds: wanted, adopted, removed, copied, kept };
+}
+
+/** Refuses a set whose mods would land on one filename in the mods folder. */
+function assertNoFilenameCollision(
+  resolved: Map<string, { jar: string; path: string }>,
+  world: string,
+): void {
+  const byJar = new Map<string, string[]>();
+  for (const [id, want] of resolved) {
+    byJar.set(want.jar.toLowerCase(), [...(byJar.get(want.jar.toLowerCase()) ?? []), id]);
+  }
+  for (const [jar, ids] of byJar) {
+    if (ids.length < 2) continue;
+    throw new ReconcileError(
+      `World ${JSON.stringify(world)} is set to load ${ids.length} mods whose jars are all named ` +
+        `"${jar}": ${ids.join(", ")}. Only one of them can exist in the mods folder at a time, so ` +
+        `the server was not started. Re-upload one of them under a different filename, or take it ` +
+        `out of this world's set.`,
+      "jar-collision",
+    );
+  }
 }
 
 /**
@@ -181,8 +231,13 @@ async function scanModsFolder(modsDir: string): Promise<FolderJar[]> {
   for (const jar of files.filter((f) => f.toLowerCase().endsWith(".jar")).sort()) {
     const path = join(modsDir, jar);
     let info: ModInfo;
+    let sha: string;
     try {
-      info = await readModInfo(path);
+      // Read once and hash the same bytes the mod.info was parsed from, so the
+      // hash the library is asked about is provably this file's.
+      const bytes = await readFile(path);
+      sha = createHash("sha256").update(bytes).digest("hex");
+      info = await readModInfoFromBytes(bytes, path);
     } catch (e) {
       if (e instanceof NotAModJarError) {
         throw new ReconcileError(
@@ -197,20 +252,26 @@ async function scanModsFolder(modsDir: string): Promise<FolderJar[]> {
         "unreadable",
       );
     }
-    out.push({ jar, path, info });
+    out.push({ jar, path, info, sha256: sha });
   }
   return out;
 }
 
 /**
- * Splits the folder's jars into the one to keep per mod id and the rest.
+ * Splits the folder's jars into the one to install per mod id and the rest.
  *
- * Two jars declaring the same id - an old and a new version both sitting in the
- * folder - is a state the game reads as the mod being present twice. The
- * library holds one jar per id and so must the folder, so the higher declared
- * `version` wins, with the filename as a tie-break. The loser is removed only
- * after the winner is safely in the library, so the *mod* is always restorable
- * even though that particular jar is not.
+ * Two jars declaring the same id - an old and a new build both sitting in the
+ * folder - is a state the game reads as the mod being present twice, so only one
+ * can stay. **Which one is a heuristic, and it can be wrong.** The higher
+ * declared `mod.info` version wins; when both declare the same version, or
+ * neither declares one at all - and mods routinely ship a new build without
+ * bumping it - the filename decides, on the game's own `Mod-1.2.0-7.7.jar`
+ * naming, where the later-sorting name is usually the later build. "Usually".
+ *
+ * Nothing rests on getting it right, which is why a heuristic is acceptable
+ * here: BOTH jars are retained in the library before either is pruned, so a
+ * wrong guess costs a start with the wrong build and is undone by pointing the
+ * set at the other one. It would not be acceptable if the loser were deleted.
  */
 function resolveDuplicates(present: FolderJar[]): { keepers: FolderJar[]; duplicates: FolderJar[] } {
   const best = new Map<string, FolderJar>();
@@ -221,14 +282,27 @@ function resolveDuplicates(present: FolderJar[]): { keepers: FolderJar[]; duplic
       best.set(found.info.id, found);
       continue;
     }
-    const winner = compareVersions(found.info.version, current.info.version) > 0 ? found : current;
+    const winner = preferred(found, current);
     duplicates.push(winner === found ? current : found);
     best.set(found.info.id, winner);
   }
   return { keepers: [...best.values()], duplicates };
 }
 
-/** Compares two `mod.info` version strings numerically, component by component. */
+/** Which of two jars for one mod this pass installs. See `resolveDuplicates`. */
+function preferred(a: FolderJar, b: FolderJar): FolderJar {
+  const byVersion = compareVersions(a.info.version, b.info.version);
+  if (byVersion !== 0) return byVersion > 0 ? a : b;
+  // Deliberately the FILENAMES, not the version strings - which are equal by the
+  // time control reaches here, so comparing them again would decide nothing and
+  // leave the outcome to readdir's ordering.
+  return a.jar.localeCompare(b.jar) >= 0 ? a : b;
+}
+
+/**
+ * Compares two `mod.info` version strings numerically, component by component.
+ * Returns 0 when they carry the same numbers, including when both are empty.
+ */
 function compareVersions(a: string, b: string): number {
   const parts = (v: string): number[] => v.split(/[^0-9]+/).filter((s) => s.length > 0).map(Number);
   const [pa, pb] = [parts(a), parts(b)];
@@ -236,9 +310,7 @@ function compareVersions(a: string, b: string): number {
     const diff = (pa[i] ?? 0) - (pb[i] ?? 0);
     if (diff !== 0) return diff;
   }
-  // Neither declares a higher version: keep the one whose filename sorts later,
-  // which for the game's own naming (`Mod-1.2.0-7.7.jar`) is the newer build.
-  return a.localeCompare(b);
+  return 0;
 }
 
 /** Reads the folder back and insists it now holds exactly the set, once each. */

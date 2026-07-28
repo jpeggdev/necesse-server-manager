@@ -71,9 +71,9 @@ beforeEach(async () => {
   pm = new ProcessManager(cfg, spawn.spawn);
   steam = new SteamCmd(cfg, spawn.spawn);
   registry = new ModRegistry(join(root, "mods.json"));
-  installer = new ModInstaller(cfg, registry, steam);
   library = new ModLibrary(cfg.modLibraryFile, cfg.modLibraryDir);
   sets = new ModSets(cfg.modSetsFile);
+  installer = new ModInstaller(cfg, registry, steam, library);
   net = makeFakeFetch();
   workshop = new SteamWorkshop(cfg, net.fetch);
   app = buildServer({ cfg, configFile, pm, installer, library, sets, steam, workshop });
@@ -1044,11 +1044,26 @@ describe("mod library and per-world sets", () => {
       expect(await jarsInMods()).toEqual([]);
     });
 
-    it("says so when it replaced an existing jar for the same mod", async () => {
-      await upload(await modJarBytes({ id: "a.b", version: "1" }), "A-1.jar");
+    it("says so when it replaced an existing jar, and keeps the one it replaced", async () => {
+      const first = await modJarBytes({ id: "a.b", version: "1" });
+      await upload(first, "A-1.jar");
+
       const res = await upload(await modJarBytes({ id: "a.b", version: "2" }), "A-2.jar");
+
       expect(res.json().replaced).toBe(true);
       expect((await library.load()).map((m) => m.version)).toEqual(["2"]);
+      // Superseded, never deleted: an uploaded jar may be the only copy there is.
+      const entry = (await library.get("a.b"))!;
+      expect(entry.superseded.map((j) => j.jar)).toEqual(["A-1.jar"]);
+      expect(await readFile(library.jarPath(entry, "A-1.jar"))).toEqual(first);
+    });
+
+    it("refuses a filename Windows cannot make a file out of", async () => {
+      for (const name of ["CON.jar", "con.jar", ".jar", "  .jar"]) {
+        const res = await upload(await modJarBytes({ id: "a.b" }), name);
+        expect(res.statusCode, name).toBe(400);
+      }
+      expect(await library.load()).toEqual([]);
     });
 
     /*
@@ -1144,6 +1159,31 @@ describe("mod library and per-world sets", () => {
       const res = await getSet("Tulsa");
       expect(res.statusCode).toBe(200);
       expect(res.json()).toMatchObject({ modIds: [], missing: [], configured: false });
+    });
+
+    /*
+     * An unconfigured world would start with whatever is installed right now,
+     * because that is what `start` seeds its set from. Reporting an empty list
+     * read as "this world loads no mods" while it was about to load eight;
+     * `configured` is what says the choice has not been made yet.
+     */
+    it("reports what start would seed an unconfigured world with, not an empty list", async () => {
+      await installJar("A-1.jar", { id: "x.a", version: "1" });
+      await installJar("B-1.jar", { id: "x.b", version: "1" });
+
+      const res = await getSet("Never Started");
+
+      expect(res.json().configured).toBe(false);
+      expect([...res.json().modIds].sort()).toEqual(["x.a", "x.b"]);
+      // Nothing was written by reading: it is still unconfigured afterwards.
+      expect(await sets.get("Never Started")).toBeUndefined();
+    });
+
+    it("answers with the same refusal start would, when the folder holds a jar it cannot account for", async () => {
+      await makeNonModJar(cfg.modsDir, "Mystery.jar");
+      const res = await getSet("Never Started");
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error).toMatch(/Mystery\.jar/);
     });
 
     it("writes a set and reads it back", async () => {
@@ -1379,6 +1419,31 @@ describe("mod library and per-world sets", () => {
       expect(res.statusCode).toBe(200);
       expect((await sets.get("Brand New"))?.modIds).toEqual(["x.a"]);
       expect(await jarsInMods()).toEqual(["A-1.jar"]);
+    });
+
+    /*
+     * Two mods whose jars are named the same thing cannot both be in the folder.
+     * `verify` catches the result, but its message ("some mod is not there")
+     * leaves an unstartable world with no actionable diagnosis - so the
+     * collision is detected by name, before anything is written.
+     */
+    it("refuses with both mod ids and the shared filename when two jars collide", async () => {
+      await upload(await modJarBytes({ id: "a.one" }), "mod.jar");
+      await upload(await modJarBytes({ id: "b.two" }), "mod.jar");
+      await sets.set("Tulsa", ["a.one", "b.two"]);
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/server/start",
+        payload: { world: "Tulsa" },
+      });
+
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error).toMatch(/a\.one/);
+      expect(res.json().error).toMatch(/b\.two/);
+      expect(res.json().error).toMatch(/mod\.jar/);
+      expect(spawn.calls).toHaveLength(0);
+      expect(await jarsInMods()).toEqual([]);
     });
 
     it("does not rewrite the mods folder for a start that was never going to be allowed", async () => {

@@ -134,21 +134,44 @@ export type ModSource =
   | { kind: "workshop"; workshopId: string }
   | { kind: "local"; how: "upload" | "adopted" };
 
+/** One jar file the library holds, current or superseded. */
+export interface ModLibraryJar {
+  /** Its filename inside the library, normally the name it arrived under. */
+  jar: string;
+  /** SHA-256 of the jar's bytes. What "the library already holds this" means. */
+  sha256: string;
+  sizeBytes: number;
+  /** When it was put into the library, ISO 8601. */
+  addedAt: string;
+  source: ModSource;
+}
+
 /**
- * One mod the library holds a jar for, exactly one per `id`.
+ * One mod the library knows about, with exactly one *current* jar per `id` -
+ * the one reconcile installs - and every earlier jar retained beside it.
  *
- * The jar itself lives at `<modLibraryDir>/<safe mod id>/<jar>`: a per-id
- * subfolder, so the original filename survives (it is what the game logs, and
- * what a person recognises) while two mods that happen to ship the same jar name
- * still cannot collide.
+ * The jars live at `<modLibraryDir>/<safe mod id>/<jar>`: a per-id subfolder, so
+ * the original filename survives (it is what the game logs, and what a person
+ * recognises) while two mods that happen to ship the same jar name still cannot
+ * collide.
+ *
+ * `superseded` is not history for its own sake. The library is the only copy of
+ * a hand-placed or uploaded jar, and reconcile deletes from the mods folder on
+ * the strength of the library holding those bytes - so a newer jar arriving must
+ * never overwrite an older one, or the older one is gone for good. Disk is
+ * cheap; an unrecoverable jar is not.
  */
 export interface ModLibraryEntry extends ModInfo {
-  /** The jar's original filename, and its name inside the library. */
+  /** The current jar's filename: what reconcile puts in the mods folder. */
   jar: string;
   source: ModSource;
-  /** When this jar was put into the library, ISO 8601. */
+  /** When the current jar was put into the library, ISO 8601. */
   addedAt: string;
   sizeBytes: number;
+  /** SHA-256 of the current jar's bytes. */
+  sha256: string;
+  /** Earlier jars for this same mod, still on disk and still restorable. */
+  superseded: ModLibraryJar[];
 }
 
 export interface ModLibraryResponse {
@@ -176,6 +199,13 @@ export interface ModSet {
 export interface WorldModsResponse {
   ok: true;
   world: string;
+  /**
+   * What this world will start with. For a world nobody has chosen a set for,
+   * that is what is installed in the mods folder right now, because that is what
+   * `start` would seed the set with - reporting an empty list there would read
+   * as "this world loads no mods", which is the opposite of the truth.
+   * `configured` is what tells the two apart.
+   */
   modIds: string[];
   /**
    * Ids in the set that the library has no jar for. A world in this state will

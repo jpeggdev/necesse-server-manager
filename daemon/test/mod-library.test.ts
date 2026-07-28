@@ -56,13 +56,22 @@ describe("add", () => {
     expect(sources["x.b"]).toEqual({ kind: "local", how: "adopted" });
   });
 
-  // Two jars for one mod is precisely the state that makes the game load it
-  // twice, so the library holds exactly one per id and the old jar goes.
-  it("keeps one jar per mod id, replacing the old file when the version renames it", async () => {
-    await library.add(
-      await makeModJar(incoming, "AutoTorch-1.0.jar", { id: "jpegg.autotorch", version: "1.0" }),
-      { kind: "workshop", workshopId: "1" },
-    );
+  /*
+   * Two jars for one mod in the MODS FOLDER is what makes the game load it
+   * twice, so exactly one per id is current. In the library both are kept: the
+   * library is the only copy of a hand-placed or uploaded jar, and reconcile
+   * deletes from the folder on the strength of the library holding those bytes,
+   * so overwriting an older jar with a newer one destroys the older one for
+   * good. Disk is cheap.
+   */
+  it("makes the new jar current and RETAINS the one it replaced", async () => {
+    const first = await makeModJar(incoming, "AutoTorch-1.0.jar", {
+      id: "jpegg.autotorch",
+      version: "1.0",
+    });
+    const firstBytes = await readFile(first);
+    await library.add(first, { kind: "workshop", workshopId: "1" });
+
     const entry = await library.add(
       await makeModJar(incoming, "AutoTorch-1.1.jar", { id: "jpegg.autotorch", version: "1.1" }),
       { kind: "workshop", workshopId: "1" },
@@ -70,7 +79,88 @@ describe("add", () => {
 
     expect(await library.load()).toHaveLength(1);
     expect(entry.version).toBe("1.1");
-    expect(await readdir(join(libraryDir, "jpegg.autotorch"))).toEqual(["AutoTorch-1.1.jar"]);
+    expect(entry.jar).toBe("AutoTorch-1.1.jar");
+    expect(entry.superseded.map((j) => j.jar)).toEqual(["AutoTorch-1.0.jar"]);
+    expect((await readdir(join(libraryDir, "jpegg.autotorch"))).sort()).toEqual([
+      "AutoTorch-1.0.jar",
+      "AutoTorch-1.1.jar",
+    ]);
+    // Byte for byte, still restorable.
+    expect(await readFile(library.jarPath(entry, "AutoTorch-1.0.jar"))).toEqual(firstBytes);
+  });
+
+  it("never writes over a different jar that already uses that filename", async () => {
+    const a = await makeModJar(join(incoming, "a"), "Mod.jar", { id: "x.a", version: "1" });
+    const aBytes = await readFile(a);
+    await library.add(a, { kind: "local", how: "upload" });
+    // A rebuild shipped under the same name: same filename, different bytes.
+    const b = await makeModJar(join(incoming, "b"), "Mod.jar", { id: "x.a", version: "1" }, {
+      filler: "rebuilt",
+    });
+
+    const entry = await library.add(b, { kind: "local", how: "upload" });
+
+    expect(entry.jar).not.toBe("Mod.jar");
+    expect(entry.jar).toMatch(/^Mod-[0-9a-f]{8}\.jar$/);
+    expect(await readFile(library.jarPath(entry, "Mod.jar"))).toEqual(aBytes);
+    expect(await readFile(library.jarPath(entry))).toEqual(await readFile(b));
+  });
+
+  it("recognises bytes it already holds rather than filing them twice", async () => {
+    const path = await makeModJar(incoming, "A.jar", { id: "x.a", version: "1" });
+    const entry = await library.add(path, { kind: "local", how: "upload" });
+    expect(await library.holds("x.a", entry.sha256)).toBe(true);
+    expect(await library.holds("x.a", "0".repeat(64))).toBe(false);
+    expect(await library.holds("nobody.nothing", entry.sha256)).toBe(false);
+
+    await library.add(path, { kind: "local", how: "upload" });
+
+    expect(library.jarsOf((await library.get("x.a"))!)).toHaveLength(1);
+  });
+});
+
+/*
+ * `retain` is what adopting out of the mods folder uses. It must guarantee the
+ * bytes are held WITHOUT changing which jar is current: dropping an old jar into
+ * the folder must not silently downgrade every world that loads that mod, and
+ * an `Update All` writing a new version here must not be undone by the old jar
+ * still sitting in the folder.
+ */
+describe("retain", () => {
+  it("keeps the bytes without promoting them over the current jar", async () => {
+    await library.add(
+      await makeModJar(incoming, "A-2.jar", { id: "x.a", version: "2" }),
+      { kind: "workshop", workshopId: "1" },
+    );
+    const old = await makeModJar(join(incoming, "old"), "A-1.jar", { id: "x.a", version: "1" });
+
+    const { entry, stored } = await library.retain(old, { kind: "local", how: "adopted" });
+
+    expect(stored).toBe(true);
+    expect(entry.jar).toBe("A-2.jar");
+    expect(entry.version).toBe("2");
+    expect(entry.superseded.map((j) => j.jar)).toEqual(["A-1.jar"]);
+    expect(await readFile(library.jarPath(entry, "A-1.jar"))).toEqual(await readFile(old));
+  });
+
+  it("makes a mod the library has never heard of current, since there is nothing to preserve", async () => {
+    const { entry, stored } = await library.retain(
+      await makeModJar(incoming, "A-1.jar", { id: "x.a", version: "1" }),
+      { kind: "local", how: "adopted" },
+    );
+    expect(stored).toBe(true);
+    expect(entry.jar).toBe("A-1.jar");
+    expect(entry.superseded).toEqual([]);
+  });
+
+  it("stores nothing when the exact bytes are already held", async () => {
+    const path = await makeModJar(incoming, "A-1.jar", { id: "x.a", version: "1" });
+    await library.add(path, { kind: "local", how: "upload" });
+
+    const { stored } = await library.retain(path, { kind: "local", how: "adopted" });
+
+    expect(stored).toBe(false);
+    expect(library.jarsOf((await library.get("x.a"))!)).toHaveLength(1);
   });
 
   // Same jar name, two different mods: the per-id folder is what stops one
@@ -176,14 +266,48 @@ describe("the manifest", () => {
 });
 
 describe("remove", () => {
-  it("drops the entry and the jar, and reports an id it never had", async () => {
-    const entry = await library.add(await makeModJar(incoming, "A.jar", { id: "x.a" }), {
+  it("drops the entry and every jar it held, and reports an id it never had", async () => {
+    await library.add(await makeModJar(incoming, "A-1.jar", { id: "x.a", version: "1" }), {
       kind: "local",
       how: "upload",
     });
+    const entry = await library.add(
+      await makeModJar(join(incoming, "two"), "A-2.jar", { id: "x.a", version: "2" }),
+      { kind: "local", how: "upload" },
+    );
+    expect(entry.superseded).toHaveLength(1);
+
     expect((await library.remove("x.a"))?.id).toBe("x.a");
+
     expect(await library.load()).toEqual([]);
-    await expect(readFile(library.jarPath(entry))).rejects.toMatchObject({ code: "ENOENT" });
+    for (const jar of ["A-1.jar", "A-2.jar"]) {
+      await expect(readFile(library.jarPath(entry, jar))).rejects.toMatchObject({ code: "ENOENT" });
+    }
     expect(await library.remove("x.a")).toBeUndefined();
+  });
+});
+
+/*
+ * The manifest indexes jars that exist nowhere else. A crash mid-write used to
+ * be able to truncate it, after which `load` throws on every call and every
+ * start refuses until somebody repairs it by hand - so it is replaced by
+ * rename, never written in place.
+ */
+describe("the manifest is replaced atomically", () => {
+  it("leaves no partial file and no temp file behind", async () => {
+    await library.add(await makeModJar(incoming, "A.jar", { id: "x.a" }), {
+      kind: "local",
+      how: "upload",
+    });
+    await library.add(await makeModJar(join(incoming, "b"), "B.jar", { id: "x.b" }), {
+      kind: "local",
+      how: "upload",
+    });
+
+    expect((await library.load()).map((m) => m.id)).toEqual(["x.a", "x.b"]);
+    // The temp file the rename consumed is gone, and nothing that is not the
+    // manifest is sitting beside it.
+    expect((await readdir(root)).filter((f) => f.includes(".tmp"))).toEqual([]);
+    expect(JSON.parse(await readFile(manifestFile, "utf8"))).toHaveLength(2);
   });
 });

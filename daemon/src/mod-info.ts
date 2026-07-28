@@ -166,4 +166,16 @@ export function checkJarFilename(name: string): void {
       `Jar filename ${JSON.stringify(name)} is not a plain filename. It must name a file, not a path.`,
     );
   }
+  const stem = name.slice(0, -".jar".length);
+  if (stem.trim().length === 0) {
+    throw new NotAModJarError(`Jar filename ${JSON.stringify(name)} is only an extension.`);
+  }
+  // `CON.jar` does not open a file on Windows, it opens the console device -
+  // the extension makes no difference to that, so it has to be refused by name.
+  if (RESERVED.test(stem.toLowerCase())) {
+    throw new NotAModJarError(
+      `Jar filename ${JSON.stringify(name)} uses a reserved Windows device name, which cannot be ` +
+        `a file on this box.`,
+    );
+  }
 }

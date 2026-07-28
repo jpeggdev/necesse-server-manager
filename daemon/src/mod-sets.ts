@@ -1,5 +1,6 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { writeJsonDurable } from "./durable-write.js";
 import type { ModSet } from "./types.js";
 
 /**
@@ -78,6 +79,9 @@ export class ModSets {
 
   private async write(all: Record<string, ModSet>): Promise<void> {
     await mkdir(dirname(this.file), { recursive: true });
-    await writeFile(this.file, JSON.stringify(all, null, 2), "utf8");
+    // Atomic, for the same reason the library's manifest is: a file truncated
+    // by a crash mid-write makes `load` throw on every call, and every start
+    // then refuses until somebody repairs it by hand.
+    await writeJsonDurable(this.file, all);
   }
 }

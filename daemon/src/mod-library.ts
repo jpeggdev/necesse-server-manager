@@ -1,23 +1,40 @@
-import { copyFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { writeJsonDurable } from "./durable-write.js";
 import { checkJarFilename, readModInfo, readModInfoFromBytes, safeModId } from "./mod-info.js";
-import type { ModLibraryEntry, ModSource } from "./types.js";
+import type { ModInfo, ModLibraryEntry, ModLibraryJar, ModSource } from "./types.js";
 
 /**
- * The library: one jar per mod id, kept where nothing else will touch it.
+ * The library: every jar this daemon has ever seen, kept where nothing else will
+ * touch it, with one of them per mod id marked as the current one.
  *
  * The mods folder the game reads is not a safe place to keep anything, because
  * reconciling it to a world's set deletes from it. The library is what makes
- * that deletion reversible: every jar the mods folder has ever held is copied in
- * here first, so a set can be swapped freely and any mod put back. That is the
- * one invariant the whole feature rests on - never delete a jar the library
- * cannot restore - and it is why `add` is the only side effect reconcile is
- * allowed to perform before it prunes.
+ * that deletion reversible, and the rule it has to satisfy is stronger than it
+ * first looks:
  *
- * Layout: `<dir>/<safe mod id>/<original filename>.jar`, manifest at
- * `<manifestFile>`. The per-id subfolder keeps the original filename, which is
- * what the game logs and what a person recognises, while making two mods that
- * happen to ship the same jar name impossible to collide.
+ *   **Never delete a jar the library cannot restore - THAT jar, not merely
+ *   something else carrying the same mod id.**
+ *
+ * Two versions of one mod are two different files. A hand-dropped
+ * `Mod-2.0.jar`, which may be the only copy in existence, is not made
+ * restorable by the library happening to hold `Mod-1.0.jar` under the same id.
+ * So membership is decided by the **hash of the bytes** (`holds`), never by the
+ * id, and adding a jar never overwrites one already there: the old one moves
+ * into `superseded` and stays on disk. Disk is cheap; a jar that exists nowhere
+ * is not.
+ *
+ * `add` makes a jar current - what an install, an `Update All` and an upload do,
+ * so that reconcile, which installs the current jar, actually picks a new
+ * version up. `retain` guarantees the bytes are held without disturbing which
+ * jar is current - what adopting out of the mods folder does, so that dropping
+ * an old jar into that folder cannot silently downgrade a world.
+ *
+ * Layout: `<dir>/<safe mod id>/<filename>.jar`, manifest at `<manifestFile>`.
+ * The per-id subfolder keeps the original filename, which is what the game logs
+ * and what a person recognises, while making two mods that happen to ship the
+ * same jar name impossible to collide.
  */
 export class ModLibrary {
   constructor(
@@ -54,98 +71,188 @@ export class ModLibrary {
     return (await this.get(id)) !== undefined;
   }
 
-  /** Where this entry's jar is, or would be. */
-  jarPath(entry: Pick<ModLibraryEntry, "id" | "jar">): string {
-    return join(this.dir, safeModId(entry.id), entry.jar);
+  /** Where a jar of this mod is, or would be. Defaults to the current one. */
+  jarPath(entry: Pick<ModLibraryEntry, "id" | "jar">, jar?: string): string {
+    return join(this.dir, safeModId(entry.id), jar ?? entry.jar);
+  }
+
+  /** Every jar the library holds for this mod, the current one first. */
+  jarsOf(entry: ModLibraryEntry): ModLibraryJar[] {
+    return [
+      {
+        jar: entry.jar,
+        sha256: entry.sha256,
+        sizeBytes: entry.sizeBytes,
+        addedAt: entry.addedAt,
+        source: entry.source,
+      },
+      ...(entry.superseded ?? []),
+    ];
   }
 
   /**
-   * Copies a jar on disk into the library, keyed by the id in its own
-   * `mod.info`.
+   * Whether the library already holds these exact bytes for this mod.
    *
-   * The jar is read and validated before anything is written, so a file that is
-   * not a Necesse mod never reaches the library at all. An id already in the
-   * library is replaced: the library holds exactly one jar per id, because two
-   * jars for one mod is precisely the state that makes the game load a mod twice.
+   * The question reconcile must answer before it deletes anything, and the
+   * reason it is asked about a hash rather than about an id: "we have some jar
+   * for this mod" does not make *this* jar restorable, and acting as though it
+   * did is how the only copy of a hand-placed jar gets destroyed.
+   */
+  async holds(id: string, sha256Hex: string): Promise<boolean> {
+    const entry = await this.get(id);
+    if (entry === undefined) return false;
+    return this.jarsOf(entry).some((j) => j.sha256 === sha256Hex);
+  }
+
+  /**
+   * Puts a jar in and makes it the current one for its mod.
+   *
+   * What an install, an `Update All` and an upload do: the current jar is what
+   * reconcile copies into the mods folder, so a new version has to land here or
+   * the next start quietly reinstates the old one. Whatever it replaces is
+   * retained, never deleted.
    */
   async add(sourcePath: string, source: ModSource, jarName?: string): Promise<ModLibraryEntry> {
-    const info = await readModInfo(sourcePath);
-    const name = jarName ?? basenameOf(sourcePath);
-    checkJarFilename(name);
-    const size = (await stat(sourcePath)).size;
-    const entry: ModLibraryEntry = {
-      ...info,
-      jar: name,
-      source,
-      addedAt: new Date().toISOString(),
-      sizeBytes: size,
-    };
-    return this.place(entry, (target) => copyFile(sourcePath, target));
+    return this.store(sourcePath, source, jarName, true);
   }
 
   /**
-   * The same, for jar bytes already in hand - an upload, which must be
-   * validated before it is written anywhere on this box.
+   * Guarantees the library holds these bytes, without changing which jar is
+   * current.
+   *
+   * What adopting out of the mods folder does. Promotion would be wrong there:
+   * somebody dropping an old jar into the folder must not silently downgrade
+   * every world that loads that mod, and `Update All` writing a new version into
+   * the library must not be undone by the old jar still sitting in the folder.
+   * When the library has never heard of the mod there is nothing to preserve, so
+   * the jar becomes current by default.
+   *
+   * Reports whether anything was actually written, so a caller can say what it
+   * adopted rather than guessing.
+   */
+  async retain(
+    sourcePath: string,
+    source: ModSource,
+    jarName?: string,
+  ): Promise<{ entry: ModLibraryEntry; stored: boolean }> {
+    const info = await readModInfo(sourcePath);
+    const sha = sha256(await readFile(sourcePath));
+    const existing = await this.get(info.id);
+    if (existing !== undefined && this.jarsOf(existing).some((j) => j.sha256 === sha)) {
+      return { entry: existing, stored: false };
+    }
+    return { entry: await this.store(sourcePath, source, jarName, false), stored: true };
+  }
+
+  /**
+   * `add`, for jar bytes already in hand - an upload, which must be validated
+   * before it is written anywhere on this box.
    *
    * `jarName` is only a label: the mod's identity is the `id` in its own
-   * `mod.info`, so a caller that has no filename to offer (curl, a script) gets
-   * one built from that id rather than a refusal.
+   * `mod.info`, so a caller with no filename to offer (curl, a script) gets one
+   * built from that id rather than a refusal.
    */
-  async addBytes(bytes: Buffer, jarName: string | undefined, source: ModSource): Promise<ModLibraryEntry> {
+  async addBytes(
+    bytes: Buffer,
+    jarName: string | undefined,
+    source: ModSource,
+  ): Promise<ModLibraryEntry> {
     // Checked before the zip is opened, so an obviously bad name fails without
     // this daemon doing several megabytes of work to find out.
     if (jarName !== undefined) checkJarFilename(jarName);
     const info = await readModInfoFromBytes(bytes, jarName ?? "the uploaded jar");
     const name = jarName ?? `${safeModId(info.id)}.jar`;
-    const entry: ModLibraryEntry = {
-      ...info,
-      jar: name,
-      source,
-      addedAt: new Date().toISOString(),
-      sizeBytes: bytes.length,
-    };
-    return this.place(entry, (target) => writeFile(target, bytes));
+    return this.place(info, name, bytes, source, true);
+  }
+
+  private async store(
+    sourcePath: string,
+    source: ModSource,
+    jarName: string | undefined,
+    promote: boolean,
+  ): Promise<ModLibraryEntry> {
+    const info = await readModInfo(sourcePath);
+    const name = jarName ?? basenameOf(sourcePath);
+    checkJarFilename(name);
+    return this.place(info, name, await readFile(sourcePath), source, promote);
   }
 
   /**
-   * Writes the jar, then the manifest, then removes a superseded jar - in that
-   * order, and the order is the point. A crash between the first two leaves a
-   * jar no manifest entry names, which is inert; the reverse would leave a
-   * manifest entry pointing at a jar that does not exist, which is a library
-   * that cannot restore what it claims to hold.
+   * Writes the jar, then the manifest - in that order, and the order is the
+   * point. A crash between the two leaves a jar no manifest entry names, which
+   * is inert; the reverse would leave a manifest entry pointing at a jar that
+   * does not exist, which is a library that cannot restore what it claims to
+   * hold. Nothing is ever removed here.
    */
   private async place(
-    entry: ModLibraryEntry,
-    write: (target: string) => Promise<void>,
+    info: ModInfo,
+    jarName: string,
+    bytes: Buffer,
+    source: ModSource,
+    promote: boolean,
   ): Promise<ModLibraryEntry> {
-    const folder = join(this.dir, safeModId(entry.id));
+    const sha = sha256(bytes);
+    const folder = join(this.dir, safeModId(info.id));
     await mkdir(folder, { recursive: true });
-    const previous = await this.get(entry.id);
-    await write(join(folder, entry.jar));
-    await this.write([...(await this.load()).filter((m) => m.id !== entry.id), entry]);
-    if (previous !== undefined && previous.jar !== entry.jar) {
-      await rm(this.jarPath(previous), { force: true });
-    }
+    const previous = await this.get(info.id);
+    const held = previous === undefined ? [] : this.jarsOf(previous);
+
+    // A filename already used by a *different* jar of this mod must not be
+    // written over - that is the whole invariant. The disambiguated name is ugly
+    // and rare, and it is what turns "two builds shipped under one filename"
+    // from a lost jar into a recoverable one.
+    const taken = new Set(held.filter((j) => j.sha256 !== sha).map((j) => j.jar));
+    const stored = taken.has(jarName) ? disambiguate(jarName, sha) : jarName;
+    await writeFile(join(folder, stored), bytes);
+
+    const record: ModLibraryJar = {
+      jar: stored,
+      sha256: sha,
+      sizeBytes: bytes.length,
+      addedAt: new Date().toISOString(),
+      source,
+    };
+    // Which jar stays current, with everything else retained beside it. Re-
+    // adding bytes already held collapses onto one record rather than listing
+    // the same file twice.
+    const others = held.filter((j) => j.sha256 !== sha);
+    const promoting = promote || previous === undefined;
+    const current = promoting ? record : held[0];
+    const superseded = [record, ...others].filter((j) => j.sha256 !== current.sha256);
+
+    // The descriptive fields (name, version, gameVersion, author) describe the
+    // CURRENT jar, so they come from `info` only when this jar is becoming the
+    // current one. Retaining an old build must not relabel the entry with that
+    // old build's version while the library still installs the new one - the
+    // manifest would then describe a jar it does not hand out.
+    const entry: ModLibraryEntry = promoting
+      ? { ...info, ...record, superseded }
+      : { ...(previous as ModLibraryEntry), ...current, superseded };
+    await this.write([...(await this.load()).filter((m) => m.id !== info.id), entry]);
     return entry;
   }
 
-  /** Drops a mod from the library and deletes its jar. */
+  /**
+   * Drops a mod from the library and deletes every jar it held.
+   *
+   * The one place this class deletes anything, and it only ever runs because
+   * somebody named this mod.
+   */
   async remove(id: string): Promise<ModLibraryEntry | undefined> {
     const all = await this.load();
     const found = all.find((m) => m.id === id);
     if (found === undefined) return undefined;
     await this.write(all.filter((m) => m.id !== id));
-    await rm(this.jarPath(found), { force: true });
+    for (const j of this.jarsOf(found)) await rm(this.jarPath(found, j.jar), { force: true });
     return found;
   }
 
   /**
-   * Confirms the library really can hand back a jar for this id.
+   * Confirms the library really can hand back the current jar for this id.
    *
    * The manifest is a claim; this checks the file. Reconcile calls it before it
-   * deletes anything, because "the library has an entry" and "the library can
-   * restore this mod" are different statements and only the second one licenses
-   * a delete.
+   * copies anything, because "the library has an entry" and "the library can
+   * hand over this jar" are different statements.
    */
   async resolve(id: string): Promise<{ entry: ModLibraryEntry; path: string } | undefined> {
     const entry = await this.get(id);
@@ -164,8 +271,18 @@ export class ModLibrary {
     await mkdir(this.dir, { recursive: true });
     await mkdir(dirname(this.manifestFile), { recursive: true });
     const sorted = [...entries].sort((a, b) => a.id.localeCompare(b.id));
-    await writeFile(this.manifestFile, JSON.stringify(sorted, null, 2), "utf8");
+    // Atomic. This file is the index of jars that exist nowhere else, and a
+    // manifest truncated by a crash mid-write makes `load` throw on every call,
+    // which makes every start refuse until somebody repairs it by hand.
+    await writeJsonDurable(this.manifestFile, sorted);
   }
+}
+
+const sha256 = (b: Buffer): string => createHash("sha256").update(b).digest("hex");
+
+/** `Mod-1.0.jar` -> `Mod-1.0-a1b2c3d4.jar`, so a second build under one name still fits. */
+function disambiguate(jarName: string, sha: string): string {
+  return `${jarName.slice(0, -".jar".length)}-${sha.slice(0, 8)}.jar`;
 }
 
 /** The last path segment, for either separator. Windows paths reach here. */
