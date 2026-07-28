@@ -38,6 +38,31 @@ if (-not $node) { throw "node.exe not found on PATH or at the default winget ins
 if (-not (Test-Path $node)) { throw "Resolved node.exe path does not exist: $node" }
 if (-not (Test-Path $dir))  { throw "Daemon directory not found: $dir. Deploy before registering the task." }
 
+# Stop a running instance before re-registering, and wait for it to actually
+# exit. -Force replaces the registration but does not reliably take the running
+# process with it, and a surviving node still holds 0.0.0.0:8710 -- the
+# Start-ScheduledTask at the bottom would then launch a second daemon that dies
+# on EADDRINUSE while the old build kept answering every check in this script.
+$existing = Get-ScheduledTask -TaskName "NecesseDaemon" -ErrorAction SilentlyContinue
+if ($existing) {
+  if ($existing.State -eq 'Running') { Stop-ScheduledTask -TaskName "NecesseDaemon" }
+  $deadline = (Get-Date).AddSeconds(20)
+  while ((Get-Date) -lt $deadline) {
+    if ((Get-ScheduledTask -TaskName "NecesseDaemon").State -ne 'Running') { break }
+    Start-Sleep -Milliseconds 500
+  }
+  if ((Get-ScheduledTask -TaskName "NecesseDaemon").State -eq 'Running') {
+    throw "NecesseDaemon is still Running 20s after Stop-ScheduledTask; refusing to re-register over a live daemon."
+  }
+  # The task can report not-Running while node is still winding down, and the
+  # port goes with the process, not the task.
+  $portDeadline = (Get-Date).AddSeconds(15)
+  while ((Get-Date) -lt $portDeadline) {
+    if (-not (Get-NetTCPConnection -LocalPort 8710 -State Listen -ErrorAction SilentlyContinue)) { break }
+    Start-Sleep -Milliseconds 500
+  }
+}
+
 $action = New-ScheduledTaskAction -Execute $node -Argument "dist\index.js" -WorkingDirectory $dir
 
 # 30s after boot rather than at boot. The daemon binds 0.0.0.0:8710 as almost

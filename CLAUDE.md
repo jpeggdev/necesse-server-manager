@@ -74,12 +74,23 @@ set. `dataDirConflict` in `config.ts` is checked in `index.ts` before anything
 reads a folder or spawns anything, and **refuses to boot** rather than pick a
 winner. Change one of the three and you change all three.
 
-Everything SYSTEM touches was verified to be reachable by it before the switch —
-the worlds folder, the mods folder (read *and* write), and the daemon
-directory. **steamcmd under SYSTEM is the one thing still unproven**: mod
-installs and `Update All` write into
-`C:\Users\jeffp\steam`, and whether steamcmd's own bootstrap is happy with
-SYSTEM's profile has not been exercised. Try a mod install before trusting it.
+Verified live on 2026-07-28 with the daemon running as `NT AUTHORITY\SYSTEM`:
+all 5 worlds listed, 8 managed / 0 untracked mods, and a real Tulsa start that
+loaded all 8 jars from `ModsFolderModProvider`, named `Tulsa.zip` on the ready
+line, and saved the world on a graceful stop.
+`C:\Windows\system32\config\systemprofile\AppData\Roaming\Necesse` was never
+created, which is the negative control — its absence is the proof `-datadir`
+took.
+
+**steamcmd under SYSTEM is still unproven.** Both invocations mutate
+(`workshop_download_item` downloads a mod, `app_update ... validate` rewrites
+`C:\necesseserver`), so there is no read-only way to exercise it and it was
+deliberately left untested rather than run unattended. What *is* confirmed is
+the filesystem prerequisite: SYSTEM holds inherited FullControl on
+`C:\Users\jeffp\steam`, `steamcmd.exe`, the workshop content folder and
+`C:\necesseserver`, and steamcmd keeps its `config/` and `userdata/` inside its
+own tree rather than in a user profile. The unknown is the anonymous-login
+handshake under SYSTEM's token. Watch the first mod install.
 
 ## Constraints that bite
 
