@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { WorkshopSearch } from "./WorkshopSearch";
+import { sameWorld } from "./world-name";
 import type {
   ModLibraryEntry,
   ModListResponse,
@@ -46,8 +47,15 @@ export interface ModsPanelProps {
   world?: string | null;
   /** That world's set, or null while it is being read. */
   worldMods?: WorldModsResponse | null;
-  /** Why the set could not be read. Belongs beside the list, not in the app banner. */
-  worldModsError?: string | null;
+  /**
+   * Why the set could not be read, and which world it was being read for.
+   *
+   * Tagged with the world for the same reason the payload is checked against
+   * one: it is held across a world change too, and an untagged string renders
+   * the previous world's failure under the new world's name - which reads as
+   * "this world is broken" about a world nothing has been asked about yet.
+   */
+  worldModsError?: { world: string; message: string } | null;
   /** Writes the world's set. Absent means set editing is not offered. */
   onSaveSet?: (modIds: string[]) => Promise<WorldModsResponse>;
   /** Puts a jar into the library. Absent means upload is not offered. */
@@ -120,7 +128,13 @@ export function ModsPanel({
    */
   const [selection, setSelection] = useState<string[] | null>(null);
   const [savingSet, setSavingSet] = useState(false);
-  const [setError, setSetError] = useState<string | null>(null);
+  /**
+   * A save failure, tagged with the world it was a save of. The success message
+   * names its world in its own text; this one carries the daemon's words
+   * verbatim, which say nothing about which world, so the tag is what stops a
+   * refusal for one world appearing under another.
+   */
+  const [setError, setSetError] = useState<{ world: string; message: string } | null>(null);
   const [setSaved, setSetSaved] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -148,16 +162,19 @@ export function ModsPanel({
    * the world it describes, so that name is what decides, and everything below
    * treats a mismatch exactly like "not read yet".
    *
-   * Compared case-insensitively because the daemon looks a set up
-   * case-insensitively (Windows filenames are) and echoes the name back as it
-   * was last written - so asking about "tulsa" legitimately answers "Tulsa", and
-   * an exact match would leave this permanently "reading".
+   * Compared with `sameWorld`, which is the daemon's own normalisation: it looks
+   * a set up trimmed and lowercased and echoes the name back as it was last
+   * written, so asking about "tulsa" legitimately answers "Tulsa" and an exact
+   * match would leave this permanently "reading".
    */
   const set =
-    worldMods !== null &&
-    world !== null &&
-    worldMods.world.toLowerCase() === world.toLowerCase()
+    worldMods !== null && world !== null && sameWorld(worldMods.world, world)
       ? worldMods
+      : null;
+  /** The read failure, on the same terms: this world's, or none. */
+  const readError =
+    worldModsError !== null && world !== null && sameWorld(worldModsError.world, world)
+      ? worldModsError.message
       : null;
   const saved = set?.modIds ?? [];
   /**
@@ -228,7 +245,10 @@ export function ModsPanel({
   };
 
   const saveSet = (): void => {
-    if (onSaveSet === undefined) return;
+    if (onSaveSet === undefined || world === null) return;
+    // Captured now: the response can land after the header has moved on, and a
+    // failure is only about the world it was a save of.
+    const forWorld = world;
     setSavingSet(true);
     setSetError(null);
     setSetSaved(null);
@@ -241,7 +261,7 @@ export function ModsPanel({
       })
       // The daemon's own words: it names the ids it has no jar for, which is
       // the only actionable thing in the response.
-      .catch((e: Error) => setSetError(e.message))
+      .catch((e: Error) => setSetError({ world: forWorld, message: e.message }))
       .finally(() => setSavingSet(false));
   };
 
@@ -338,9 +358,9 @@ export function ModsPanel({
               <p className="hint">
                 Type a world name in the header to choose which mods it loads.
               </p>
-            ) : worldModsError !== null ? (
+            ) : readError !== null ? (
               <p className="hint hint-bad">
-                Could not read {world}&apos;s mod set: {worldModsError}
+                Could not read {world}&apos;s mod set: {readError}
               </p>
             ) : set === null ? (
               <p className="hint">Reading {world}&apos;s mod set&hellip;</p>
@@ -565,9 +585,9 @@ export function ModsPanel({
                   Revert
                 </button>
               </div>
-              {setError !== null && (
+              {setError !== null && sameWorld(setError.world, world) && (
                 <p className="hint hint-bad" role="alert">
-                  {setError}
+                  {setError.message}
                 </p>
               )}
               {setSaved !== null && <p className="hint hint-ok">{setSaved}</p>}

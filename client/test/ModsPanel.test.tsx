@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ModsPanel, type ModsPanelProps } from "../src/ModsPanel";
 import type { ModLibraryEntry, WorldModsResponse } from "../src/types";
@@ -360,6 +360,26 @@ describe("ModsPanel set checkboxes", () => {
     expect(screen.queryByRole("button", { name: /save/i })).toBeNull();
   });
 
+  /*
+   * The read failure is a second per-world value on the same held path, so it
+   * needs the same check. Untagged, it renders the previous world's failure
+   * under this world's name - "Could not read Jeff and Eli's mod set: Tulsa.zip
+   * is gone" - and, being ahead of the Reading branch, hides the fact that
+   * nothing has been read for this world at all.
+   */
+  it("does not report the previous world's read failure under this world's name", () => {
+    const view = setupSet({
+      worldMods: null,
+      worldModsError: { world: "Tulsa", message: "ENOENT: Tulsa.zip is gone" },
+    });
+    expect(screen.getByText(/ENOENT: Tulsa\.zip is gone/)).toBeTruthy();
+
+    view.rerender({ world: "Jeff and Eli" });
+
+    expect(screen.queryByText(/ENOENT/)).toBeNull();
+    expect(screen.getByText(/reading jeff and eli's mod set/i)).toBeTruthy();
+  });
+
   it("matches the world case-insensitively, exactly as the daemon looks a set up", () => {
     // Asking about "tulsa" legitimately answers "Tulsa": the daemon echoes the
     // name as it was last written. An exact match would read as "still reading"
@@ -471,6 +491,28 @@ describe("ModsPanel changing a set", () => {
     await userEvent.click(tick("Summoner Expansion"));
     await userEvent.click(screen.getByRole("button", { name: /save tulsa's mod set/i }));
     expect(await screen.findByText(message)).toBeTruthy();
+  });
+
+  it("keeps a refusal with the world it was a save of, when the header has moved on", async () => {
+    // The success message names its own world in its text; the daemon's refusal
+    // does not, so it has to carry the tag instead.
+    let fail: (e: Error) => void = () => {};
+    const onSaveSet = vi.fn(
+      () => new Promise<WorldModsResponse>((_resolve, reject) => (fail = reject)),
+    );
+    const view = setupSet({ onSaveSet });
+    await userEvent.click(tick("Summoner Expansion"));
+    await userEvent.click(screen.getByRole("button", { name: /save tulsa's mod set/i }));
+
+    view.rerender({
+      world: "Jeff and Eli",
+      worldMods: worldMods({ world: "Jeff and Eli", modIds: [] }),
+    });
+    await act(async () => {
+      fail(new Error("The library has no jar for gone.mod."));
+    });
+
+    expect(screen.queryByText(/no jar for gone\.mod/)).toBeNull();
   });
 
   it("drops that refusal the moment the ticks change, since it described the old ones", async () => {

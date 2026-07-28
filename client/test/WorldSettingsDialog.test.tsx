@@ -5,7 +5,7 @@
 // followed the response rather than a copy of the schema kept here.
 import { describe, it, expect, vi } from "vitest";
 import { useState } from "react";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { act, render, screen, waitFor, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { WorldSettingsDialog } from "../src/WorldSettingsDialog";
 import type { WorldSettingField, WorldSettingsResponse, WorldSettingsWriteResponse } from "../src/types";
@@ -77,6 +77,96 @@ async function openDialog(over: Partial<Parameters<typeof Host>[0]> = {}) {
   await screen.findByLabelText("allowCheats");
   return { load, save, trigger };
 }
+
+/*
+ * The world changing underneath a mounted dialog.
+ *
+ * App gives this component a `key` per world, so today it remounts and none of
+ * this can happen - but that is the caller's guarantee, not this component's,
+ * and it would stop holding the day the dialog stops being modal, gains a world
+ * switcher, or is reused anywhere else. What it costs is not a stale label:
+ * `save(world, changes)` writes the diff on screen into the named world's zip,
+ * which is the only copy of that save. So the component defends itself, and this
+ * pins that it does.
+ */
+describe("WorldSettingsDialog when the world changes under it", () => {
+  const OTHER_FIELDS: WorldSettingField[] = [
+    { key: "allowCheats", value: "true", type: "boolean", editable: true },
+  ];
+
+  it("keeps nothing of the previous world, and cannot save its diff to the new one", async () => {
+    let arriveSecond: ((r: WorldSettingsResponse) => void) | null = null;
+    const load = vi.fn((w: string) =>
+      w === "Tulsa"
+        ? Promise.resolve(response())
+        : new Promise<WorldSettingsResponse>((resolve) => (arriveSecond = resolve)),
+    );
+    const save = vi.fn(async () => writeResponse());
+    const view = render(
+      <WorldSettingsDialog world="Tulsa" load={load} save={save} onClose={() => {}} />,
+    );
+    await screen.findByLabelText("allowCheats");
+    // A real pending edit against Tulsa: this is what must never be written to
+    // another world.
+    fireEvent.click(screen.getByLabelText("allowCheats"));
+    expect(screen.getByRole("button", { name: /^save$/i })).toBeEnabled();
+
+    view.rerender(
+      <WorldSettingsDialog world="Jeff and Eli" load={load} save={save} onClose={() => {}} />,
+    );
+
+    expect(screen.getByRole("dialog")).toHaveAccessibleName(/jeff and eli/i);
+    expect(screen.queryByLabelText("allowCheats")).toBeNull();
+    expect(screen.getByText(/reading the world/i)).toBeTruthy();
+    const saveBtn = screen.getByRole("button", { name: /^save$/i });
+    expect(saveBtn).toBeDisabled();
+    fireEvent.click(saveBtn);
+    expect(save).not.toHaveBeenCalled();
+
+    // The new world's own file, when it lands, is what fills the form.
+    await act(async () => {
+      arriveSecond?.({
+        ok: true,
+        world: "Jeff and Eli",
+        entry: "Jeff and Eli/worldSettings.cfg",
+        fields: OTHER_FIELDS,
+      });
+    });
+    expect((await screen.findByLabelText("allowCheats")) as HTMLInputElement).toBeChecked();
+    expect(screen.queryByLabelText("difficulty")).toBeNull();
+  });
+
+  it("ignores a response that names a different world than the one it is showing", async () => {
+    // The response carries the world it describes; trusting the request we think
+    // we made instead is what adopts another world's file.
+    const load = vi.fn(async () => response());
+    render(
+      <WorldSettingsDialog
+        world="Jeff and Eli"
+        load={load}
+        save={vi.fn(async () => writeResponse())}
+        onClose={() => {}}
+      />,
+    );
+    await waitFor(() => expect(load).toHaveBeenCalled());
+
+    expect(screen.queryByLabelText("allowCheats")).toBeNull();
+    expect(screen.getByText(/reading the world/i)).toBeTruthy();
+  });
+
+  it("adopts it when the names differ only in case, as the daemon's lookup does", async () => {
+    const load = vi.fn(async () => response());
+    render(
+      <WorldSettingsDialog
+        world="tulsa "
+        load={load}
+        save={vi.fn(async () => writeResponse())}
+        onClose={() => {}}
+      />,
+    );
+    expect(await screen.findByLabelText("allowCheats")).toBeTruthy();
+  });
+});
 
 describe("WorldSettingsDialog", () => {
   it("is a labelled modal dialog naming the world", async () => {

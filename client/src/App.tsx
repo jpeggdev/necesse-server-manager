@@ -150,7 +150,13 @@ export default function App() {
    */
   const modSetWorld = candidate !== null && candidate.valid ? candidate.name : null;
   const [worldMods, setWorldMods] = useState<WorldModsResponse | null>(null);
-  const [worldModsError, setWorldModsError] = useState<string | null>(null);
+  // Tagged with the world it is about. Both this and the payload above are held
+  // across a world change, and the panel discards whichever does not name the
+  // world it is rendering - an untagged message would slip past that check and
+  // report one world's failure under another's name.
+  const [worldModsError, setWorldModsError] = useState<
+    { world: string; message: string } | null
+  >(null);
   const worldModsSeq = useRef(0);
 
   // Re-read on every library change as well as every world change: an install,
@@ -180,7 +186,7 @@ export default function App() {
         // it could not fill in.
         if (seq !== worldModsSeq.current) return;
         setWorldMods(null);
-        setWorldModsError(e.message);
+        setWorldModsError({ world: modSetWorld, message: e.message });
       });
   }, [api, modSetWorld, library, libraryError]);
 
@@ -297,6 +303,12 @@ export default function App() {
       </div>
       {settingsWorld !== null && (
         <WorldSettingsDialog
+          // A fresh mount per world, so no state can outlive the world it
+          // describes. The dialog checks the name on its own response too, but
+          // this is the structural half: nothing here has to reason about what
+          // a changed prop would do to fields, drafts and a save in flight
+          // against a world zip, because it cannot happen.
+          key={settingsWorld}
           world={settingsWorld}
           load={loadWorldSettings}
           save={saveWorldSettings}

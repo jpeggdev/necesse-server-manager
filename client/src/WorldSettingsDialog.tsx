@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { WorldSettingValue } from "./api";
+import { sameWorld } from "./world-name";
 import type {
   WorldSettingField,
   WorldSettingsResponse,
@@ -62,9 +63,30 @@ export function WorldSettingsDialog({
 
   useEffect(() => {
     let cancelled = false;
+    /*
+     * Everything this component holds is one world's, so a change of world
+     * drops all of it before the next one is read.
+     *
+     * App mounts this fresh per world (`key={settingsWorld}`), so today the
+     * effect only ever runs once - but that is the caller's guarantee, not this
+     * component's, and what it would cost to lose is not a stale label: the
+     * previous world's fields and half-typed drafts would render under the new
+     * world's name and `save(world, changes)` would write that diff into the new
+     * world's zip, which is the only copy of somebody's save. It defends itself.
+     */
+    setFields(null);
+    setDraft({});
+    setLoadError(null);
+    setSaveError(null);
+    setResult(null);
     load(world)
       .then((r) => {
-        if (!cancelled) adopt(r.fields);
+        if (cancelled) return;
+        // The response names the world it describes. Trusting the request we
+        // think we made instead would adopt an answer about another world in
+        // exactly the case this is here for.
+        if (!sameWorld(r.world, world)) return;
+        adopt(r.fields);
       })
       .catch((e: Error) => {
         // The daemon's own text: a missing zip, a zip with no settings entry
