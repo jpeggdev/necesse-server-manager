@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { makeApi, type Api, type WorldsResponse } from "./api";
-import type { ModListResponse, ModUpdateInfo, StatusPayload, WsMessage } from "./types";
+import type {
+  ModLibraryEntry,
+  ModListResponse,
+  ModUpdateInfo,
+  StatusPayload,
+  WsMessage,
+} from "./types";
 
 export const DAEMON_BASE = "http://192.168.1.106:8710";
 const WS_URL = "ws://192.168.1.106:8710/ws";
@@ -28,6 +34,15 @@ export interface DaemonState {
   worlds: WorldsResponse | null;
   lastWorld: string | null;
   mods: ModListResponse | null;
+  /**
+   * Every mod the daemon holds a jar for, or null before the first read.
+   *
+   * Read alongside the mod list rather than on its own schedule: an install, an
+   * `Update All` and an upload all write it, and each of those already ends in a
+   * refresh(), so folding it in is what keeps the set checkboxes describing the
+   * library that exists rather than the one that did a minute ago.
+   */
+  library: ModLibraryEntry[] | null;
   /**
    * Per-mod workshop update status, or null when it is unknown - which is the
    * state before the first check lands AND the state after a failed one. Null
@@ -69,6 +84,7 @@ export function useDaemon(): DaemonState {
   const [status, setStatus] = useState<StatusPayload | null>(null);
   const [worlds, setWorlds] = useState<WorldsResponse | null>(null);
   const [mods, setMods] = useState<ModListResponse | null>(null);
+  const [library, setLibrary] = useState<ModLibraryEntry[] | null>(null);
   const [modUpdates, setModUpdates] = useState<ModUpdateInfo[] | null>(null);
   const [updatesError, setUpdatesError] = useState<string | null>(null);
   const [lines, setLines] = useState<ConsoleEntry[]>([]);
@@ -77,10 +93,16 @@ export function useDaemon(): DaemonState {
 
   const refresh = useCallback(async () => {
     try {
-      const [s, w, m] = await Promise.all([api.status(), api.worlds(), api.mods()]);
+      const [s, w, m, l] = await Promise.all([
+        api.status(),
+        api.worlds(),
+        api.mods(),
+        api.modLibrary(),
+      ]);
       setStatus(s);
       setWorlds(w);
       setMods(m);
+      setLibrary(l.mods);
       setError(null);
     } catch (e) {
       // Surface the daemon's/fetch's own message verbatim rather than
@@ -252,6 +274,7 @@ export function useDaemon(): DaemonState {
     worlds,
     lastWorld: worlds?.lastWorld ?? null,
     mods,
+    library,
     modUpdates,
     updatesError,
     console: lines,

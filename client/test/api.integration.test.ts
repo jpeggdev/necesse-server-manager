@@ -6,7 +6,7 @@
 // with the real makeApi() over real HTTP. Never point this at the live
 // daemon on the LAN - temp dirs + a fake spawn only.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, mkdir, readdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildServer } from "../../daemon/src/http.js";
@@ -172,6 +172,54 @@ describe("mod library and reconcile over a real daemon instance", () => {
 
   it("hands the daemon's refusal back as its own text for an id the library lacks", async () => {
     await expect(makeApi(baseUrl).saveWorldMods("Tulsa", ["not.here"])).rejects.toThrow(/not\.here/);
+  });
+
+  /*
+   * The distinction the panel's wording rests on, over the wire. A world nobody
+   * has chosen a set for reports what starting it would load - and would then
+   * save - while a world deliberately set to load nothing reports an empty list.
+   * The two payloads are the same shape and differ only in `configured`, so a
+   * client that dropped that flag would show "no mods" for a world about to
+   * load eight.
+   */
+  it("tells a world with no set apart from a world whose set is empty", async () => {
+    const api = makeApi(baseUrl);
+    await writeFile(join(root, "mods", "Wanted-1.0.jar"), await jar("a.wanted"));
+
+    expect(await api.worldMods("Fresh")).toMatchObject({
+      configured: false,
+      modIds: ["a.wanted"],
+    });
+
+    expect(await api.saveWorldMods("Fresh", [])).toMatchObject({ configured: true, modIds: [] });
+    expect(await api.worldMods("Fresh")).toMatchObject({ configured: true, modIds: [] });
+    // Reading an unconfigured world's set must not quietly write one: the world
+    // above still had none until the save, or opening the panel would decide a
+    // set for every world it looked at.
+    expect(await api.worldMods("Untouched")).toMatchObject({ configured: false });
+  });
+
+  /*
+   * Decision row 1 of docs/mod-sets-design.md, end to end: a set names mod
+   * identities, not jars, so a new version of a mod is picked up with no edit to
+   * any world. Uploading is the version of that this client can drive without
+   * Steam.
+   */
+  it("carries a set onto a newer jar of the same mod, with no edit to the set", async () => {
+    const api = makeApi(baseUrl);
+    await api.uploadMod(await jar("a.mod", "1.0"), "Mod-1.0.jar");
+    await api.saveWorldMods("Tulsa", ["a.mod"]);
+    await api.reconcileMods("Tulsa");
+    expect(await readdir(join(root, "mods"))).toEqual(["Mod-1.0.jar"]);
+
+    const second = await api.uploadMod(await jar("a.mod", "2.0"), "Mod-2.0.jar");
+
+    expect(second.replaced).toBe(true);
+    expect((await api.worldMods("Tulsa")).modIds).toEqual(["a.mod"]);
+    const applied = await api.reconcileMods("Tulsa");
+    expect(applied.reconcile.copied).toEqual(["Mod-2.0.jar"]);
+    expect(applied.reconcile.removed).toEqual(["Mod-1.0.jar"]);
+    expect(await readdir(join(root, "mods"))).toEqual(["Mod-2.0.jar"]);
   });
 });
 

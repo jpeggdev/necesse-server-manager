@@ -7,6 +7,7 @@ import { Splitter } from "./Splitter";
 import { WorldSettingsDialog } from "./WorldSettingsDialog";
 import { useDaemon } from "./useDaemon";
 import { DaemonError, STOP_TIMEOUT_STATUS, type WorldSettingValue } from "./api";
+import type { WorldModsResponse } from "./types";
 import "./App.css";
 
 const MODS_WIDTH_KEY = "necesse.modsWidth";
@@ -20,6 +21,7 @@ export default function App() {
     status,
     worlds,
     mods,
+    library,
     modUpdates,
     updatesError,
     console: lines,
@@ -134,7 +136,90 @@ export default function App() {
     [api],
   );
 
-  if (!connected || !status || !worlds || !mods) {
+  /**
+   * The world whose mod set the panel shows: the name in the header's field,
+   * but only once the daemon has answered about it.
+   *
+   * Taken from `candidate` rather than from a second copy of the field, and
+   * that is the whole reason it is not a third piece of state: `candidate` is
+   * already the debounced, sequence-guarded answer the header draws its own
+   * verdict from, so the checkboxes and the "Will load existing world" hint
+   * can never end up describing two different worlds. An invalid name has no
+   * set to show, and asking for one would only earn a 400.
+   */
+  const modSetWorld = candidate !== null && candidate.valid ? candidate.name : null;
+  const [worldMods, setWorldMods] = useState<WorldModsResponse | null>(null);
+  const [worldModsError, setWorldModsError] = useState<string | null>(null);
+  const worldModsSeq = useRef(0);
+
+  // Re-read on every library change as well as every world change: an install,
+  // an upload or an `Update All` can be what makes a set's missing mod stop
+  // being missing, and the panel says a world will not start on the strength of
+  // that list.
+  useEffect(() => {
+    const seq = ++worldModsSeq.current;
+    if (modSetWorld === null) {
+      setWorldMods(null);
+      setWorldModsError(null);
+      return;
+    }
+    api
+      .worldMods(modSetWorld)
+      .then((r) => {
+        if (seq !== worldModsSeq.current) return;
+        setWorldMods(r);
+        setWorldModsError(null);
+      })
+      .catch((e: Error) => {
+        // Deliberately not the app-wide banner: one panel's read failing is not
+        // the daemon being unreachable, and the message belongs beside the list
+        // it could not fill in.
+        if (seq !== worldModsSeq.current) return;
+        setWorldMods(null);
+        setWorldModsError(e.message);
+      });
+  }, [api, modSetWorld, library]);
+
+  /**
+   * Writes the set the panel has ticked.
+   *
+   * Not through guard(): the panel owns the whole read/tick/save exchange, so
+   * the daemon's refusal - which names the ids it has no jar for - belongs
+   * beside the checkboxes that caused it rather than in the banner behind them.
+   * The refresh is still fired, because a set change is what the next start
+   * reads.
+   */
+  const saveWorldModSet = useCallback(
+    async (modIds: string[]) => {
+      if (modSetWorld === null) throw new Error("No world is selected.");
+      const written = await api.saveWorldMods(modSetWorld, modIds);
+      // Bumped before the write lands so a read still in flight from before it
+      // cannot overwrite the result with what the set used to be.
+      worldModsSeq.current += 1;
+      setWorldMods(written);
+      setWorldModsError(null);
+      await refresh();
+      return written;
+    },
+    [api, modSetWorld, refresh],
+  );
+
+  /**
+   * Sends a picked jar's bytes to the daemon, which validates its `mod.info`
+   * before it stores anything. Read here rather than in the panel so the panel
+   * never touches the transport, and refreshed on success because the library
+   * it just grew is what the checkboxes above are drawn from.
+   */
+  const uploadMod = useCallback(
+    async (file: File) => {
+      const written = await api.uploadMod(await file.arrayBuffer(), file.name);
+      await refresh();
+      return written;
+    },
+    [api, refresh],
+  );
+
+  if (!connected || !status || !worlds || !mods || !library) {
     return (
       <main className="app">
         <ErrorBanner error={error} onDismiss={() => setError(null)} />
@@ -174,10 +259,16 @@ export default function App() {
         <div className="mods-pane" style={{ width: modsWidth }}>
           <ModsPanel
             mods={mods}
+            library={library}
             updates={modUpdates}
             updatesError={updatesError}
             busy={busy}
             running={running}
+            world={modSetWorld}
+            worldMods={worldMods}
+            worldModsError={worldModsError}
+            onSaveSet={saveWorldModSet}
+            onUpload={uploadMod}
             onSearch={searchWorkshop}
             onAdd={(id, name) => guard(() => api.addMod(id, name))()}
             onRemove={(id) => guard(() => api.removeMod(id))()}

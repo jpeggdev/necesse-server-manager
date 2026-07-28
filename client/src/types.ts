@@ -147,8 +147,15 @@ export interface ModLibraryJar {
    * build arrived under a filename already taken by different bytes, where it
    * carries a hash suffix so neither overwrites the other. The disambiguation
    * lives here, in the library's own storage, and never reaches the mods folder.
+   *
+   * Optional because a manifest written before storage names were split out of
+   * `jar` does not carry it, and those manifests are on disk on the live server
+   * right now - the daemon's own directory is never rewritten by a deploy. For
+   * them the two names were always the same string, so every reader falls back
+   * to `jar`. Declaring it required would make the type describe a file that
+   * does not exist yet rather than the ones that do.
    */
-  file: string;
+  file?: string;
   /** SHA-256 of the jar's bytes. What "the library already holds this" means. */
   sha256: string;
   sizeBytes: number;
@@ -161,10 +168,12 @@ export interface ModLibraryJar {
  * One mod the library knows about, with exactly one *current* jar per `id` -
  * the one reconcile installs - and every earlier jar retained beside it.
  *
- * The jars live at `<modLibraryDir>/<safe mod id>/<jar>`: a per-id subfolder, so
- * the original filename survives (it is what the game logs, and what a person
+ * The jars live at `<modLibraryDir>/<safe mod id>/<file>`: a per-id subfolder,
+ * so the original filename survives (it is what the game logs, and what a person
  * recognises) while two mods that happen to ship the same jar name still cannot
- * collide.
+ * collide. The storage name is `file`, not `jar`, because two builds of one mod
+ * routinely arrive under one filename and only one of them could be written
+ * there; `jar` stays the name the mods folder receives.
  *
  * `superseded` is not history for its own sake. The library is the only copy of
  * a hand-placed or uploaded jar, and reconcile deletes from the mods folder on
@@ -175,8 +184,11 @@ export interface ModLibraryJar {
 export interface ModLibraryEntry extends ModInfo {
   /** The current jar's filename: the name reconcile gives it in the mods folder. */
   jar: string;
-  /** The current jar's name on disk inside the library. See ModLibraryJar.file. */
-  file: string;
+  /**
+   * The current jar's name on disk inside the library, absent in a manifest
+   * written before the two names were split. See ModLibraryJar.file.
+   */
+  file?: string;
   source: ModSource;
   /** When the current jar was put into the library, ISO 8601. */
   addedAt: string;

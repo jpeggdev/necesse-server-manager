@@ -20,17 +20,21 @@ button.danger { background: #5a2020; border-color: #7a2a2a; }
 .mods-head-actions { display: flex; gap: .4rem; flex: 0 0 auto; }
 .mods-head-actions button[aria-pressed="true"] { background: #2b4a6b; border-color: #3d6a97; }
 .mod-list { list-style: none; padding: 0; }
-/* One row per mod: [X] name. Workshop id and jar filename live in the row's
-   title, so the list stays scannable at any panel width. */
+/* One row per mod: [tick] name, with the remove button pushed to the far end.
+   Mod id, workshop id and jar filename live in the row's title, so the list
+   stays scannable at any panel width even with a checkbox column added. */
 .mod-list li { display: flex; align-items: center; gap: .5rem; padding: .3rem 0; border-bottom: 1px solid #23282e; }
-.mod-list li.untracked { padding-left: calc(32px + .5rem); }
+.mod-check { flex: 0 0 auto; width: 1.05rem; height: 1.05rem; margin: 0; accent-color: #4a7fb5; }
+.mod-list li.untracked { padding-left: calc(1.05rem + .5rem); }
 /* 24px, not the search view's 32px: it has to sit inside the existing row
    height so adding thumbnails never turns one line into two. */
 .mod-thumb { flex: 0 0 24px; width: 24px; height: 24px; object-fit: cover; border-radius: 3px; background: #1f242a; }
 .mod-thumb-empty { background: #1c2126; }
-/* Untracked rows have no X and no thumb, so they indent past both to keep
-   every name on the list starting at the same place. */
-.mod-list.with-thumbs li.untracked { padding-left: calc(32px + .5rem + 24px + .5rem); }
+/* Untracked rows have no checkbox and no thumb, so they indent past both to
+   keep every name on the list starting at the same place. */
+.mod-list.with-thumbs li.untracked { padding-left: calc(1.05rem + .5rem + 24px + .5rem); }
+.mod-list li.missing .mod-name { color: #e07c7c; }
+.mod-tag-missing { color: #e07c7c; border-color: #7a2a2a; }
 .mod-name { flex: 1 1 auto; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mod-tag { flex: 0 0 auto; font-size: .7rem; text-transform: uppercase; letter-spacing: .04em; color: #e0b25c; border: 1px solid #5a4a1a; border-radius: 3px; padding: .05rem .35rem; }
 .mod-list li.untracked .mod-name { color: #e0b25c; }
@@ -41,8 +45,29 @@ button.danger { background: #5a2020; border-color: #7a2a2a; }
 .x:hover:not(:disabled) { background: #7f3f3f; }
 .mod-tag-update { color: #6fd39b; border-color: #2f6b4a; }
 .mod-add { display: grid; grid-template-columns: auto 1fr; gap: .4rem; align-items: center; margin-top: 1rem; }
-.mod-add button, .mod-add-hint { grid-column: 1 / span 2; }
+.mod-add button, .mod-add-hint, .mod-add h3, .mod-upload-progress { grid-column: 1 / span 2; }
 .mod-add-hint { margin: 0; }
+/* Both ways of getting a jar into the library - by workshop id and by file -
+   share one aligned block rather than growing a second section: the list and
+   its checkboxes are what the panel is for, and these sit under it. */
+.mod-add h3 { margin: .4rem 0 0; font-size: .9rem; color: #9aa6b2; font-weight: 600; }
+.mod-add input[type="file"] { font-size: .8rem; min-width: 0; }
+.mod-upload-progress { width: 100%; height: .4rem; }
+
+/* Which mods this world loads. The name of the world is repeated here on
+   purpose: the ticks mean nothing without it, and the header is a long way
+   from the bottom of a tall list. */
+.mod-set-head { margin: .4rem 0; }
+.mod-set-world { margin: 0 0 .2rem; font-size: .9rem; }
+.mod-set-edit { margin-top: .6rem; display: flex; flex-direction: column; gap: .4rem; }
+.mod-set-actions { display: flex; gap: .4rem; }
+/* Loud on purpose. Taking a mod out of a world whose save has its content in
+   it is a genuine way to lose that save, so it does not get to look like a
+   hint. It still only warns: the decision is the operator's. */
+.mod-set-danger {
+  margin: 0; padding: .5rem .6rem; font-size: .85rem; line-height: 1.35;
+  background: #4a1c1c; border: 1px solid #7a2a2a; border-radius: 4px; color: #f0d6d6;
+}
 
 /* Search results follow the mod list's one-row-per-mod rule: thumbnail, title,
    subscriber count, Install. Everything else is in the row's title. */

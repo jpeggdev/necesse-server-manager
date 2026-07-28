@@ -1,7 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { ModsPanel } from "../src/ModsPanel";
+import { ModsPanel, type ModsPanelProps } from "../src/ModsPanel";
+import type { ModLibraryEntry, WorldModsResponse } from "../src/types";
 
 const mods = {
   managed: [
@@ -9,6 +10,56 @@ const mods = {
   ],
   untracked: [{ jar: "MysteryMod.jar" }],
 };
+
+/*
+ * The library, which is what the panel lists and what a world's set is chosen
+ * from. Two entries with two different origins on purpose: a workshop mod (the
+ * one the mod list also manages, so it keeps its remove button and its update
+ * badge) and a hand-placed jar the library adopted, which has no workshop entry
+ * and never will.
+ */
+const safeHaven: ModLibraryEntry = {
+  id: "safehaven.qol",
+  name: "Safe Haven QOL",
+  version: "2.6",
+  gameVersion: "1.2.0",
+  author: "SafeHaven",
+  clientside: false,
+  jar: "SafeHavenQOL-1.2.0-2.6.jar",
+  file: "SafeHavenQOL-1.2.0-2.6.jar",
+  source: { kind: "workshop", workshopId: "3731244177" },
+  addedAt: "2026-07-26T00:00:00.000Z",
+  sizeBytes: 2048,
+  sha256: "a".repeat(64),
+  superseded: [],
+};
+
+const summoner: ModLibraryEntry = {
+  id: "gagadoliano.summonerexpansion",
+  name: "Summoner Expansion",
+  version: "7.7",
+  gameVersion: "1.2.0",
+  author: "Gagadoliano",
+  clientside: false,
+  jar: "SummonerExpansion-1.2.0-7.7.jar",
+  file: "SummonerExpansion-1.2.0-7.7.jar",
+  source: { kind: "local", how: "adopted" },
+  addedAt: "2026-07-26T00:00:00.000Z",
+  sizeBytes: 4096,
+  sha256: "b".repeat(64),
+  superseded: [],
+};
+
+const library = [safeHaven, summoner];
+
+const worldMods = (over: Partial<WorldModsResponse> = {}): WorldModsResponse => ({
+  ok: true,
+  world: "Tulsa",
+  modIds: ["safehaven.qol"],
+  missing: [],
+  configured: true,
+  ...over,
+});
 
 const updateAvailable = [
   {
@@ -23,9 +74,10 @@ const updateAvailable = [
   },
 ];
 
-function setup(overrides = {}) {
-  const props = {
+function setup(overrides: Partial<ModsPanelProps> = {}) {
+  const props: ModsPanelProps = {
     mods,
+    library,
     busy: false,
     running: false,
     onAdd: vi.fn(),
@@ -33,9 +85,26 @@ function setup(overrides = {}) {
     onUpdateAll: vi.fn(),
     ...overrides,
   };
-  render(<ModsPanel {...props} />);
-  return props;
+  const view = render(<ModsPanel {...props} />);
+  return {
+    ...props,
+    rerender: (next: Partial<ModsPanelProps> = {}) =>
+      view.rerender(<ModsPanel {...props} {...next} />),
+  };
 }
+
+/** The set editor's props, for the tests that are about the set rather than the list. */
+function setupSet(overrides: Partial<ModsPanelProps> = {}) {
+  return setup({
+    world: "Tulsa",
+    worldMods: worldMods(),
+    onSaveSet: vi.fn(async () => worldMods()),
+    ...overrides,
+  });
+}
+
+const tick = (name: RegExp | string): HTMLInputElement =>
+  screen.getByRole("checkbox", { name }) as HTMLInputElement;
 
 describe("ModsPanel", () => {
   it("lists managed mods by name, keeping the row scannable", () => {
@@ -218,6 +287,268 @@ describe("ModsPanel adding by id alone", () => {
   it("tells the user the name may be left empty", () => {
     setup();
     expect(screen.getByText(/leave the name empty/i)).toBeTruthy();
+  });
+});
+
+/*
+ * The set checkboxes. The panel lists the LIBRARY - every mod any world could
+ * load - and the ticks are one world's set within it, so the two things it must
+ * never confuse are "this mod exists here" and "this world loads it".
+ */
+describe("ModsPanel set checkboxes", () => {
+  it("ticks exactly the mods in the selected world's set", () => {
+    setupSet();
+    expect(tick("Safe Haven QOL").checked).toBe(true);
+    expect(tick("Summoner Expansion").checked).toBe(false);
+  });
+
+  it("lists a library mod no world has installed, so it can be added to a set", () => {
+    // Summoner Expansion is in the library but not in mods.managed: a list built
+    // from the mods folder could not offer it at all.
+    setupSet();
+    expect(screen.getByText("Summoner Expansion")).toBeTruthy();
+  });
+
+  it("switches every tick when the header moves to another world", () => {
+    const view = setupSet();
+    expect(tick("Safe Haven QOL").checked).toBe(true);
+    expect(tick("Summoner Expansion").checked).toBe(false);
+
+    view.rerender({
+      world: "Jeff and Eli",
+      worldMods: worldMods({ world: "Jeff and Eli", modIds: ["gagadoliano.summonerexpansion"] }),
+    });
+
+    expect(tick("Safe Haven QOL").checked).toBe(false);
+    expect(tick("Summoner Expansion").checked).toBe(true);
+    expect(screen.getByText("Jeff and Eli")).toBeTruthy();
+  });
+
+  it("drops a half-ticked edit when the world changes, rather than carrying it over", async () => {
+    const view = setupSet();
+    await userEvent.click(tick("Summoner Expansion"));
+    expect(tick("Summoner Expansion").checked).toBe(true);
+
+    view.rerender({
+      world: "Jeff and Eli",
+      worldMods: worldMods({ world: "Jeff and Eli", modIds: [] }),
+    });
+
+    expect(tick("Summoner Expansion").checked).toBe(false);
+  });
+
+  it("says nothing about a set until a world name is confirmed", () => {
+    setup({ onSaveSet: vi.fn() });
+    expect(screen.getByText(/type a world name in the header/i)).toBeTruthy();
+    expect(tick("Safe Haven QOL")).toBeDisabled();
+  });
+});
+
+/*
+ * A world nobody has chosen a set for is not a world that loads nothing. The
+ * daemon reports the difference (`configured`), because an unconfigured world
+ * starts by adopting whatever is in the mods folder - so the UI has to report
+ * it too, and say what a start would actually load.
+ */
+describe("ModsPanel unconfigured versus empty", () => {
+  it("says an unconfigured world will start with what is in the mods folder", () => {
+    setupSet({ worldMods: worldMods({ configured: false, modIds: ["safehaven.qol"] }) });
+    expect(screen.getByText(/no mod set has been chosen for tulsa yet/i)).toBeTruthy();
+    expect(screen.getByText(/1 mod in the mods folder right now/i)).toBeTruthy();
+    expect(screen.queryByText(/loads no mods at all/i)).toBeNull();
+    // ...and it is ticked, because that is what would be saved as the set.
+    expect(tick("Safe Haven QOL").checked).toBe(true);
+  });
+
+  it("says an empty set loads nothing, in different words entirely", () => {
+    setupSet({ worldMods: worldMods({ configured: true, modIds: [] }) });
+    expect(screen.getByText(/loads no mods at all/i)).toBeTruthy();
+    expect(screen.queryByText(/no mod set has been chosen/i)).toBeNull();
+    expect(tick("Safe Haven QOL").checked).toBe(false);
+  });
+
+  it("gives a set's missing mod a row of its own so it can be unticked", () => {
+    // Without a row there is no way out of an unstartable world: the mod is in
+    // the set, the library has no jar for it, and the daemon refuses to start.
+    setupSet({
+      worldMods: worldMods({ modIds: ["safehaven.qol", "gone.mod"], missing: ["gone.mod"] }),
+    });
+    expect(screen.getByText(/library has no jar for gone\.mod/i)).toBeTruthy();
+    expect(tick("gone.mod").checked).toBe(true);
+    expect(screen.getByText(/^missing$/i)).toBeTruthy();
+  });
+});
+
+describe("ModsPanel changing a set", () => {
+  it("saves the ticked ids and reports what the world will load next start", async () => {
+    const props = setupSet({
+      onSaveSet: vi.fn(async () =>
+        worldMods({ modIds: ["safehaven.qol", "gagadoliano.summonerexpansion"] }),
+      ),
+    });
+    await userEvent.click(tick("Summoner Expansion"));
+    await userEvent.click(screen.getByRole("button", { name: /save tulsa's mod set/i }));
+
+    expect(props.onSaveSet).toHaveBeenCalledWith([
+      "safehaven.qol",
+      "gagadoliano.summonerexpansion",
+    ]);
+    expect(await screen.findByText(/loads 2 mods at its next start/i)).toBeTruthy();
+  });
+
+  it("has nothing to save until something is ticked", () => {
+    setupSet();
+    expect(screen.getByRole("button", { name: /save tulsa's mod set/i })).toBeDisabled();
+  });
+
+  it("puts a ticked change back with Revert", async () => {
+    const props = setupSet();
+    await userEvent.click(tick("Summoner Expansion"));
+    await userEvent.click(screen.getByRole("button", { name: /^revert$/i }));
+    expect(tick("Summoner Expansion").checked).toBe(false);
+    expect(props.onSaveSet).not.toHaveBeenCalled();
+  });
+
+  it("shows the daemon's own refusal, not a reworded one", async () => {
+    const message =
+      "The library has no jar for gone.mod. A set may only name mods the library holds.";
+    setupSet({ onSaveSet: vi.fn(async () => Promise.reject(new Error(message))) });
+    await userEvent.click(tick("Summoner Expansion"));
+    await userEvent.click(screen.getByRole("button", { name: /save tulsa's mod set/i }));
+    expect(await screen.findByText(message)).toBeTruthy();
+  });
+});
+
+/*
+ * Removing a mod from a world whose save already has its content in it is a
+ * genuine way to lose that save. The decision is the operator's - this must not
+ * block - but it must not be soft about what it is either.
+ */
+describe("ModsPanel removal warning", () => {
+  it("warns, in full, the moment a mod is unticked out of a saved set", async () => {
+    setupSet();
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    await userEvent.click(tick("Safe Haven QOL"));
+
+    const warning = screen.getByRole("alert");
+    expect(warning.textContent).toMatch(/can corrupt that save/i);
+    expect(warning.textContent).toMatch(/Safe Haven QOL/);
+    expect(warning.textContent).toMatch(/fail to load/i);
+  });
+
+  it("allows the removal anyway", async () => {
+    const props = setupSet();
+    await userEvent.click(tick("Safe Haven QOL"));
+    const save = screen.getByRole("button", { name: /save tulsa's mod set/i });
+    expect(save).toBeEnabled();
+    await userEvent.click(save);
+    expect(props.onSaveSet).toHaveBeenCalledWith([]);
+  });
+
+  it("does not warn when a mod is only being added", async () => {
+    setupSet();
+    await userEvent.click(tick("Summoner Expansion"));
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
+/*
+ * The set is a mod mutation like any other: the game reads its mods once, at
+ * startup, so changing what a running world loads produces an edit that did
+ * nothing. Gated on the same two conditions as every other mutation here, with
+ * the same sentence the panel already shows for them.
+ */
+describe("ModsPanel set gating", () => {
+  it("refuses a set change while the server is running, with the reason visible", async () => {
+    const props = setupSet({ running: true });
+    expect(screen.getByText(/stop the server to change mods/i)).toBeTruthy();
+    const box = tick("Safe Haven QOL");
+    expect(box).toBeDisabled();
+    expect(box.getAttribute("title")).toMatch(/stop the server to change mods/i);
+    expect(screen.getByRole("button", { name: /save tulsa's mod set/i })).toBeDisabled();
+
+    await userEvent.click(box);
+    expect(box.checked).toBe(true);
+    expect(props.onSaveSet).not.toHaveBeenCalled();
+  });
+
+  it("refuses a set change while a task is in flight, with the reason visible", () => {
+    setupSet({ busy: true });
+    expect(screen.getByText(/already running/i)).toBeTruthy();
+    expect(tick("Safe Haven QOL")).toBeDisabled();
+    expect(tick("Safe Haven QOL").getAttribute("title")).toMatch(/already running/i);
+    expect(screen.getByRole("button", { name: /save tulsa's mod set/i })).toBeDisabled();
+  });
+});
+
+describe("ModsPanel uploading a jar", () => {
+  const jar = () => new File(["not really a jar"], "SummonerExpansion-1.2.0-7.7.jar");
+
+  const uploadResponse = {
+    ok: true as const,
+    mod: { ...summoner, version: "7.8" },
+    replaced: false,
+  };
+
+  it("sends the picked file and says what landed in the library", async () => {
+    const onUpload = vi.fn(async () => uploadResponse);
+    setupSet({ onUpload });
+
+    await userEvent.upload(screen.getByLabelText(/mod jar/i), jar());
+    await userEvent.click(screen.getByRole("button", { name: /^upload$/i }));
+
+    expect(onUpload).toHaveBeenCalledTimes(1);
+    expect((onUpload.mock.calls[0] as unknown as File[])[0].name).toBe(
+      "SummonerExpansion-1.2.0-7.7.jar",
+    );
+    expect(await screen.findByText(/Summoner Expansion 7\.8 is in the library/)).toBeTruthy();
+  });
+
+  it("shows the daemon's rejection verbatim, because it says exactly what is wrong", async () => {
+    // The daemon's own words for a file that is not a Necesse mod.
+    const message =
+      "NotAMod.jar contains no mod.info at its root, so it is not a Necesse mod jar. Entries seen: 2.";
+    setupSet({ onUpload: vi.fn(async () => Promise.reject(new Error(message))) });
+
+    await userEvent.upload(screen.getByLabelText(/mod jar/i), jar());
+    await userEvent.click(screen.getByRole("button", { name: /^upload$/i }));
+
+    expect(await screen.findByText(message)).toBeTruthy();
+  });
+
+  it("holds the picker and the button while the bytes are on the wire", async () => {
+    // A 100MB jar is not instant, and a second click would send it twice.
+    let release: (r: typeof uploadResponse) => void = () => {};
+    const onUpload = vi.fn(() => new Promise<typeof uploadResponse>((r) => (release = r)));
+    setupSet({ onUpload });
+
+    const picker = screen.getByLabelText(/mod jar/i);
+    await userEvent.upload(picker, jar());
+    await userEvent.click(screen.getByRole("button", { name: /^upload$/i }));
+
+    expect(picker).toBeDisabled();
+    expect(screen.getByRole("button", { name: /uploading/i })).toBeDisabled();
+    expect(screen.getByRole("progressbar", { name: /uploading/i })).toBeTruthy();
+
+    release(uploadResponse);
+    expect(await screen.findByText(/is in the library/)).toBeTruthy();
+    expect(screen.queryByRole("progressbar")).toBeNull();
+  });
+
+  it("has nothing to upload until a file is picked", () => {
+    setupSet({ onUpload: vi.fn() });
+    expect(screen.getByRole("button", { name: /^upload$/i })).toBeDisabled();
+  });
+
+  it("stays available while the server is running, since it only fills the library", () => {
+    setupSet({ onUpload: vi.fn(), running: true });
+    expect(screen.getByLabelText(/mod jar/i)).toBeEnabled();
+  });
+
+  it("waits for a task in flight, which does touch the library", () => {
+    setupSet({ onUpload: vi.fn(), busy: true });
+    expect(screen.getByLabelText(/mod jar/i)).toBeDisabled();
   });
 });
 

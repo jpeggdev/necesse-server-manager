@@ -60,6 +60,7 @@ beforeEach(() => {
       if (url.endsWith("/api/status")) return jsonResponse(statusPayload());
       if (url.includes("/api/worlds")) return jsonResponse({ worlds: [], lastWorld: null, candidate: null });
       if (url.endsWith("/api/mods")) return jsonResponse({ managed: [], untracked: [] });
+      if (url.endsWith("/api/mods/library")) return jsonResponse({ ok: true, mods: [] });
       return jsonResponse({});
     }),
   );
@@ -326,6 +327,7 @@ describe("useDaemon workshop update badges", () => {
           return jsonResponse({ worlds: [], lastWorld: null, candidate: null });
         }
         if (url.endsWith("/api/mods")) return jsonResponse({ managed, untracked: [] });
+        if (url.endsWith("/api/mods/library")) return jsonResponse({ ok: true, mods: [] });
         return jsonResponse({});
       }),
     );
@@ -383,6 +385,7 @@ describe("useDaemon workshop update badges", () => {
           return jsonResponse({ worlds: [], lastWorld: null, candidate: null });
         }
         if (url.endsWith("/api/mods")) return jsonResponse({ managed: [], untracked: [] });
+        if (url.endsWith("/api/mods/library")) return jsonResponse({ ok: true, mods: [] });
         return jsonResponse({});
       }),
     );

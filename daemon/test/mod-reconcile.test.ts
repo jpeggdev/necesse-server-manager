@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { ModLibrary } from "../src/mod-library.js";
 import { ReconcileError, installedModIds, reconcileMods } from "../src/mod-reconcile.js";
 import { MOD_INFO_SUMMONER_EXPANSION, makeModJar, makeNonModJar } from "./fixtures/mod-jar.js";
@@ -380,6 +380,40 @@ describe("bringing the folder to the set", () => {
       await readFile(library.jarPath(entry)),
     );
     expect(await readFile(join(modsDir, "Mod.jar"))).not.toEqual(swapped);
+  });
+
+  /*
+   * `verify`'s own refusal, reached directly rather than inferred from the gate
+   * in front of it.
+   *
+   * The test above pins the keep gate: with it deciding on bytes, a swapped jar
+   * is pruned and re-copied and verify never has anything to complain about -
+   * which means that test proves the gate and nothing about the net beneath it.
+   * If the gate later regresses, verify is what stands between a wrong build and
+   * a launch, and an untested last line of defence is one nobody knows is gone.
+   *
+   * So this reaches the branch by the one route the gate cannot close: the
+   * library's manifest and the library's own file disagree. `resolve` reports
+   * the manifest's hash, the copy puts the file's bytes in the folder, and only
+   * re-reading and re-hashing the folder can tell. A tampered-with or truncated
+   * library jar is exactly that state.
+   */
+  it("refuses when the jar it installed is not the bytes the manifest claims for it", async () => {
+    await stock("Mod.jar", { id: "x.a", version: "1" });
+    const entry = (await library.get("x.a"))!;
+    const stored = library.jarPath(entry);
+    await makeModJar(dirname(stored), basename(stored), { id: "x.a", version: "1" }, {
+      filler: "not the bytes the manifest was written for",
+    });
+
+    const failure = await run(["x.a"]).catch((e: unknown) => e);
+
+    expect(failure).toBeInstanceOf(ReconcileError);
+    expect((failure as ReconcileError).kind).toBe("verify-failed");
+    expect((failure as Error).message).toMatch(/x\.a/);
+    expect((failure as Error).message).toMatch(/not the bytes the library holds/);
+    // The whole point of the refusal: nothing launches against this folder.
+    expect((failure as Error).message).toMatch(/must not be launched/);
   });
 
   it("creates the mods folder when it is not there at all", async () => {

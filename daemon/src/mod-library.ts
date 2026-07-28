@@ -6,6 +6,14 @@ import { checkJarFilename, readModInfo, readModInfoFromBytes, safeModId } from "
 import type { ModInfo, ModLibraryEntry, ModLibraryJar, ModSource } from "./types.js";
 
 /**
+ * A library jar whose storage name is known. `ModLibraryJar.file` is optional
+ * because a manifest written before storage names were split out of `jar` has
+ * none; `jarsOf` resolves that fallback once so nothing downstream joins a path
+ * out of a possibly-absent field.
+ */
+export type StoredJar = ModLibraryJar & { file: string };
+
+/**
  * The library: every jar this daemon has ever seen, kept where nothing else will
  * touch it, with one of them per mod id marked as the current one.
  *
@@ -83,8 +91,12 @@ export class ModLibrary {
     return join(this.dir, safeModId(entry.id), file ?? entry.file ?? entry.jar);
   }
 
-  /** Every jar the library holds for this mod, the current one first. */
-  jarsOf(entry: ModLibraryEntry): ModLibraryJar[] {
+  /**
+   * Every jar the library holds for this mod, the current one first, each with
+   * its storage name resolved - so callers that address a file on disk never
+   * have to repeat the `?? jar` fallback an older manifest needs.
+   */
+  jarsOf(entry: ModLibraryEntry): StoredJar[] {
     return [
       {
         jar: entry.jar,

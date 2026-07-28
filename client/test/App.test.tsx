@@ -42,6 +42,48 @@ let addModResponse: { ok: boolean; status: number; body: unknown } | null = null
 let lastAddBody: string | null = null;
 /** The raw JSON body of the last PUT of a world's settings, for the same reason. */
 let lastSettingsBody: string | null = null;
+/** The raw JSON body of the last PUT of a world's mod set. */
+let lastSetBody: string | null = null;
+/** What each world's set is, keyed by world name. A world absent from it has none. */
+let worldSets: Record<string, { modIds: string[]; missing: string[]; configured: boolean }> = {};
+
+/*
+ * The mod library the daemon holds. Two origins, because the panel treats them
+ * differently: a workshop mod carries an id to update from, a hand-placed jar
+ * the library adopted never will.
+ */
+const libraryMods = [
+  {
+    id: "safehaven.qol",
+    name: "Safe Haven QOL",
+    version: "2.6",
+    gameVersion: "1.2.0",
+    author: "SafeHaven",
+    clientside: false,
+    jar: "SafeHavenQOL-1.2.0-2.6.jar",
+    file: "SafeHavenQOL-1.2.0-2.6.jar",
+    source: { kind: "workshop", workshopId: "3731244177" },
+    addedAt: "2026-07-26T00:00:00.000Z",
+    sizeBytes: 2048,
+    sha256: "a".repeat(64),
+    superseded: [],
+  },
+  {
+    id: "gagadoliano.summonerexpansion",
+    name: "Summoner Expansion",
+    version: "7.7",
+    gameVersion: "1.2.0",
+    author: "Gagadoliano",
+    clientside: false,
+    jar: "SummonerExpansion-1.2.0-7.7.jar",
+    file: "SummonerExpansion-1.2.0-7.7.jar",
+    source: { kind: "local", how: "adopted" },
+    addedAt: "2026-07-26T00:00:00.000Z",
+    sizeBytes: 4096,
+    sha256: "b".repeat(64),
+    superseded: [],
+  },
+];
 
 const SETTINGS_BACKUP = "C:/worlds/Tulsa.zip.2026-07-27T05-01-02-003Z.bak";
 
@@ -86,6 +128,11 @@ beforeEach(() => {
   addModResponse = null;
   lastAddBody = null;
   lastSettingsBody = null;
+  lastSetBody = null;
+  worldSets = {
+    Tulsa: { modIds: ["safehaven.qol"], missing: [], configured: true },
+    "Jeff and Eli": { modIds: ["gagadoliano.summonerexpansion"], missing: [], configured: true },
+  };
   FakeWebSocket.instances = [];
   vi.stubGlobal("WebSocket", FakeWebSocket as unknown as typeof WebSocket);
   vi.stubGlobal(
@@ -127,6 +174,20 @@ beforeEach(() => {
           entry: "Tulsa/worldSettings.cfg",
           fields: settingsFields("false"),
         });
+      }
+      if (url.endsWith("/api/mods/library")) return jsonResponse({ ok: true, mods: libraryMods });
+      // Matched before the world list below, which would otherwise swallow it:
+      // /api/worlds/Tulsa/mods and /api/worlds are the same prefix.
+      const setUrl = /\/api\/worlds\/([^/]+)\/mods$/.exec(url);
+      if (setUrl) {
+        const name = decodeURIComponent(setUrl[1]);
+        if (init?.method === "PUT") {
+          lastSetBody = init.body ?? null;
+          const modIds = (JSON.parse(init.body ?? "{}") as { modIds: string[] }).modIds;
+          worldSets[name] = { modIds, missing: [], configured: true };
+        }
+        const set = worldSets[name] ?? { modIds: [], missing: [], configured: false };
+        return jsonResponse({ ok: true, world: name, ...set });
       }
       if (url.includes("/api/worlds")) {
         // The candidate is echoed back for whatever name was asked about, so
@@ -330,6 +391,52 @@ describe("App world settings editor", () => {
     expect(trigger.getAttribute("title")).toMatch(/stopped/i);
     fireEvent.click(trigger);
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+});
+
+/*
+ * The set checkboxes across the whole seam: the header's world field, the
+ * daemon's answer about that name, the world's set, and the ticks. Nothing
+ * shorter than the App can show it, because the world lives in the header and
+ * the ticks live in the panel, and the thing that has to hold is that they
+ * describe the same world at the same moment.
+ */
+describe("App per-world mod sets", () => {
+  const tick = (name: string) => screen.getByRole("checkbox", { name });
+
+  it("ticks the header world's set, and re-ticks the whole list when the world changes", async () => {
+    await mountConnected();
+
+    await waitFor(() => expect(tick("Safe Haven QOL")).toBeChecked());
+    expect(tick("Summoner Expansion")).not.toBeChecked();
+
+    fireEvent.change(screen.getByLabelText("World"), { target: { value: "Jeff and Eli" } });
+
+    await waitFor(() => expect(tick("Summoner Expansion")).toBeChecked());
+    expect(tick("Safe Haven QOL")).not.toBeChecked();
+  });
+
+  it("PUTs exactly the ids the panel has ticked", async () => {
+    await mountConnected();
+    await waitFor(() => expect(tick("Safe Haven QOL")).toBeChecked());
+
+    fireEvent.click(tick("Summoner Expansion"));
+    fireEvent.click(screen.getByRole("button", { name: /save tulsa's mod set/i }));
+    await settle();
+
+    expect(JSON.parse(lastSetBody!)).toEqual({
+      modIds: ["safehaven.qol", "gagadoliano.summonerexpansion"],
+    });
+  });
+
+  it("distinguishes a world with no set from a world with an empty one", async () => {
+    // A world nobody has chosen a set for: the daemon answers configured:false,
+    // and the panel has to say what a start would load rather than "no mods".
+    await mountConnected();
+    fireEvent.change(screen.getByLabelText("World"), { target: { value: "Ranch" } });
+
+    expect(await screen.findByText(/no mod set has been chosen for ranch yet/i)).toBeTruthy();
+    expect(screen.queryByText(/loads no mods at all/i)).toBeNull();
   });
 });
 
