@@ -2,7 +2,14 @@ import { describe, it, expect } from "vitest";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, saveConfig, DEFAULT_CONFIG } from "../src/config.js";
+import {
+  loadConfig,
+  saveConfig,
+  DEFAULT_CONFIG,
+  dataDirConflict,
+  modsDirFor,
+  worldsDirFor,
+} from "../src/config.js";
 
 async function tmp(): Promise<string> {
   return mkdtemp(join(tmpdir(), "necesse-cfg-"));
@@ -68,5 +75,88 @@ describe("config", () => {
   it("propagates a non-ENOENT read error instead of overwriting with defaults", async () => {
     const dir = await tmp();
     await expect(loadConfig(dir)).rejects.toThrow(dir);
+  });
+
+  it("gives an existing config that predates dataDir the live default, matching its own folders", async () => {
+    // The config.json on the server right now names modsDir and worldsDir
+    // literally and knows nothing about dataDir. The default has to be the
+    // directory those two are already under, or the daemon would refuse to boot
+    // on the very config it has been running on.
+    const file = join(await tmp(), "config.json");
+    await writeFile(
+      file,
+      JSON.stringify({
+        modsDir: "C:\\Users\\jeffp\\AppData\\Roaming\\Necesse\\mods",
+        worldsDir: "C:\\Users\\jeffp\\AppData\\Roaming\\Necesse\\saves\\worlds",
+      }),
+    );
+    const cfg = await loadConfig(file);
+    expect(cfg.dataDir).toBe("C:\\Users\\jeffp\\AppData\\Roaming\\Necesse");
+    expect(dataDirConflict(cfg)).toBeNull();
+  });
+});
+
+/*
+ * dataDir is what the game is told; modsDir and worldsDir are what the daemon
+ * reads and writes. Drift between them is the one misconfiguration that
+ * produces no error anywhere: the daemon reconciles a mods folder the game
+ * never loads, and the server starts happily with the wrong mod set. These
+ * tests are the only thing standing between an edited config.json and that.
+ */
+describe("dataDirConflict", () => {
+  it("passes the shipped defaults", () => {
+    expect(dataDirConflict(DEFAULT_CONFIG)).toBeNull();
+  });
+
+  it("accepts folders derived from any dataDir", () => {
+    const dataDir = "D:\\Games\\NecesseData";
+    expect(
+      dataDirConflict({
+        ...DEFAULT_CONFIG,
+        dataDir,
+        modsDir: modsDirFor(dataDir),
+        worldsDir: worldsDirFor(dataDir),
+      }),
+    ).toBeNull();
+  });
+
+  it("refuses a modsDir under a different data directory, naming both paths", () => {
+    const msg = dataDirConflict({
+      ...DEFAULT_CONFIG,
+      modsDir: "C:\\Users\\someoneelse\\AppData\\Roaming\\Necesse\\mods",
+    });
+    expect(msg).toContain("C:\\Users\\someoneelse\\AppData\\Roaming\\Necesse\\mods");
+    expect(msg).toContain(modsDirFor(DEFAULT_CONFIG.dataDir));
+    expect(msg).toMatch(/modsDir/);
+  });
+
+  it("refuses a worldsDir under a different data directory", () => {
+    const msg = dataDirConflict({
+      ...DEFAULT_CONFIG,
+      worldsDir: "E:\\backup\\worlds",
+    });
+    expect(msg).toContain("E:\\backup\\worlds");
+    expect(msg).toMatch(/worldsDir/);
+  });
+
+  it("reports both folders at once rather than one at a time", () => {
+    const msg = dataDirConflict({
+      ...DEFAULT_CONFIG,
+      dataDir: "D:\\Elsewhere",
+    });
+    expect(msg).toMatch(/modsDir/);
+    expect(msg).toMatch(/worldsDir/);
+  });
+
+  it("does not call a Windows path a conflict over case, slash direction, or a trailing separator", () => {
+    // config.json is hand-edited on the server; none of these are drift.
+    expect(
+      dataDirConflict({
+        ...DEFAULT_CONFIG,
+        dataDir: "C:\\Users\\jeffp\\AppData\\Roaming\\Necesse\\",
+        modsDir: "c:/users/jeffp/appdata/roaming/necesse/mods",
+        worldsDir: "C:\\Users\\jeffp\\AppData\\Roaming\\Necesse\\saves\\worlds\\",
+      }),
+    ).toBeNull();
   });
 });

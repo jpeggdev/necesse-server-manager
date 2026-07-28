@@ -99,9 +99,29 @@ export class ProcessManager extends EventEmitter {
     return [...this.lines];
   }
 
+  /**
+   * `-datadir` comes first among the game's own arguments, immediately after
+   * `-nogui` and ahead of `-world`. Everything after it is interpreted relative
+   * to it - the world named by `-world` is a save inside that directory, and the
+   * mods the server loads come from its `mods` subfolder - so a reader (and any
+   * left-to-right argument handling in the game) sees the directory established
+   * before the things that live in it are named. It is also the argument that
+   * makes this launch independent of which Windows account the daemon runs as,
+   * which is worth having in the first position an operator reads in the log.
+   */
   buildArgs(world: string): string[] {
     const owners = this.cfg.owners.flatMap((o) => ["-owner", o]);
-    return [...this.cfg.jvmArgs, "-jar", this.cfg.serverJar, "-nogui", "-world", world, ...owners];
+    return [
+      ...this.cfg.jvmArgs,
+      "-jar",
+      this.cfg.serverJar,
+      "-nogui",
+      "-datadir",
+      this.cfg.dataDir,
+      "-world",
+      world,
+      ...owners,
+    ];
   }
 
   /** A Necesse server is running that this daemon did not spawn, so there is no stdin pipe to it. */

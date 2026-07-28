@@ -4,6 +4,7 @@
   "javaExe": "C:\\necesseserver\\jre\\bin\\java.exe",
   "serverJar": "C:\\necesseserver\\Server.jar",
   "steamcmdExe": "C:\\Users\\jeffp\\steam\\steamcmd.exe",
+  "dataDir": "C:\\Users\\jeffp\\AppData\\Roaming\\Necesse",
   "modsDir": "C:\\Users\\jeffp\\AppData\\Roaming\\Necesse\\mods",
   "worldsDir": "C:\\Users\\jeffp\\AppData\\Roaming\\Necesse\\saves\\worlds",
   "jvmArgs": [

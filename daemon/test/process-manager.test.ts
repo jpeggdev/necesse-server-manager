@@ -38,6 +38,8 @@ describe("buildArgs", () => {
       "-jar",
       cfg.serverJar,
       "-nogui",
+      "-datadir",
+      cfg.dataDir,
       "-world",
       "Infected Toenail",
       "-owner",
@@ -45,6 +47,31 @@ describe("buildArgs", () => {
       "-owner",
       "Eli",
     ]);
+  });
+
+  /*
+   * Without -datadir the server derives its saves and mods from the running
+   * account's APPDATA, which is what tied the daemon to an interactive jeffp
+   * logon: as SYSTEM it would silently resolve
+   * C:\Windows\system32\config\systemprofile\AppData\Roaming\Necesse and start
+   * with no worlds and no mods, reporting success the whole way. This asserts
+   * the flag is passed and carries the configured directory verbatim - a value
+   * dropped or defaulted here is invisible until a real launch.
+   */
+  it("hands the game its data directory explicitly, before the world that lives in it", () => {
+    const args = pm.buildArgs("Tulsa");
+    const at = args.indexOf("-datadir");
+    expect(at).toBeGreaterThan(-1);
+    expect(args[at + 1]).toBe(cfg.dataDir);
+    expect(at).toBeLessThan(args.indexOf("-world"));
+    // Still a JVM/-jar boundary: the game's own flags all follow the jar.
+    expect(at).toBeGreaterThan(args.indexOf("-jar"));
+  });
+
+  it("passes a data directory containing spaces as one unsplit argument", () => {
+    const spaced = "D:\\Game Data\\Necesse Server";
+    const pm2 = new ProcessManager({ ...cfg, dataDir: spaced }, spawn.spawn);
+    expect(pm2.buildArgs("Tulsa")).toContain(spaced);
   });
 });
 

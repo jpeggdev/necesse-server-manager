@@ -45,6 +45,42 @@ with the daemon stopped. **Write it without a BOM** — PowerShell 5.1's
 `[System.IO.File]::WriteAllText($p, $s, (New-Object System.Text.UTF8Encoding($false)))`.
 `loadConfig` tolerates a BOM now, but nothing else does.
 
+## Who the daemon runs as, and why the data directory is explicit
+
+The task is registered **AtStartup as SYSTEM** (`03-register-task.ps1`), with a
+30-second trigger delay so the daemon is not binding `0.0.0.0:8710` before the
+network stack is up. It used to be **AtLogOn as `jeffp`**, which meant an
+unattended reboot brought the box up with no daemon and no server. Autologon is
+not the fix: `jeffp` is a Microsoft account (`PrincipalSource=MicrosoftAccount`),
+so Windows pushes it to Hello/PIN, and a stored password is exactly what this
+arrangement avoids.
+
+SYSTEM was previously impossible because **the game derives its saves and mods
+from the running account's `APPDATA`**. As SYSTEM that is
+`C:\Windows\system32\config\systemprofile\AppData\Roaming\Necesse`, so the
+server would have started with zero worlds and zero mods and reported a
+completely successful launch. `Server.jar`'s own help documents `-datadir
+<path>`, so `buildArgs` now passes it from `config.json`'s **`dataDir`**
+(`C:\Users\jeffp\AppData\Roaming\Necesse`) and the game's data directory no
+longer depends on who launched it. `-datadir` sits ahead of `-world`: the world
+is a save inside that directory.
+
+**`dataDir` and the daemon's own `modsDir`/`worldsDir` must agree** —
+`modsDir` = `<dataDir>\mods`, `worldsDir` = `<dataDir>\saves\worlds`. All three
+are literal strings in `config.json`, and drift between them is the one
+misconfiguration nothing reports: the daemon would reconcile one mods folder
+while the game loaded another, and the server would start with the wrong mod
+set. `dataDirConflict` in `config.ts` is checked in `index.ts` before anything
+reads a folder or spawns anything, and **refuses to boot** rather than pick a
+winner. Change one of the three and you change all three.
+
+Everything SYSTEM touches was verified to be reachable by it before the switch —
+the worlds folder, the mods folder (read *and* write), and the daemon
+directory. **steamcmd under SYSTEM is the one thing still unproven**: mod
+installs and `Update All` write into
+`C:\Users\jeffp\steam`, and whether steamcmd's own bootstrap is happy with
+SYSTEM's profile has not been exercised. Try a mod install before trusting it.
+
 ## Constraints that bite
 
 - **Daemon sources must stay ES2020-library-compatible.** `client/test/api.integration.test.ts`

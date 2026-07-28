@@ -42,7 +42,32 @@ export interface DaemonConfig {
   javaExe: string;
   serverJar: string;
   steamcmdExe: string;
+  /**
+   * The game's own data directory, passed to the server as `-datadir`.
+   *
+   * Without it the server derives this folder from the *running account's*
+   * `APPDATA`, which makes the whole install a property of whoever launched it.
+   * That is what pinned the daemon to an interactive `jeffp` logon: run as
+   * SYSTEM it would resolve
+   * `C:\Windows\system32\config\systemprofile\AppData\Roaming\Necesse` and come
+   * up with zero worlds and zero mods, having failed at nothing it could report.
+   * Naming it explicitly makes the identity of the process irrelevant, which is
+   * what lets the scheduled task run AtStartup as SYSTEM.
+   *
+   * `modsDir` and `worldsDir` are the daemon's own view of the same tree and
+   * must be `<dataDir>\mods` and `<dataDir>\saves\worlds`; see
+   * `dataDirConflict`, which refuses to boot if they disagree.
+   */
+  dataDir: string;
+  /**
+   * Where the daemon reads and writes mod jars. Absolute, and the same folder
+   * the game will load from - it must equal `<dataDir>\mods`.
+   */
   modsDir: string;
+  /**
+   * Where the daemon reads world zips. Absolute, and the same folder the game
+   * will save to - it must equal `<dataDir>\saves\worlds`.
+   */
   worldsDir: string;
   /**
    * Where the mod library keeps its jars, one subfolder per mod id, and where

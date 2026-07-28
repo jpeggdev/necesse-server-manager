@@ -1,7 +1,7 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadConfig } from "./config.js";
+import { dataDirConflict, loadConfig } from "./config.js";
 import { buildServer } from "./http.js";
 import { ModInstaller } from "./mod-installer.js";
 import { ModLibrary } from "./mod-library.js";
@@ -14,9 +14,11 @@ import { SteamWorkshop } from "./steam-workshop.js";
 import { findOrphanServer, listJavaProcesses } from "./orphan.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const dataDir = join(here, "..");
-const configFile = join(dataDir, "config.json");
-const modsFile = join(dataDir, "mods.json");
+// The daemon's own directory, holding config.json and mods.json. Not to be
+// confused with cfg.dataDir, which is the *game's* data directory.
+const daemonDir = join(here, "..");
+const configFile = join(daemonDir, "config.json");
+const modsFile = join(daemonDir, "mods.json");
 
 const spawnFn: SpawnFn = (cmd, args, opts) =>
   // `as const` fixes stdio as the literal 3-tuple ("pipe","pipe","pipe") rather
@@ -30,6 +32,13 @@ const spawnFn: SpawnFn = (cmd, args, opts) =>
   });
 
 const cfg = await loadConfig(configFile);
+
+// Before anything reads a folder or spawns anything. A daemon that reconciles
+// one mods folder while the game loads another is worse than a daemon that did
+// not start: the wrong-mod-set launch it produces looks entirely successful.
+const conflict = dataDirConflict(cfg);
+if (conflict !== null) throw new Error(`${conflict} (config: ${configFile})`);
+
 const pm = new ProcessManager(cfg, spawnFn);
 const steam = new SteamCmd(cfg, spawnFn);
 const registry = new ModRegistry(modsFile);
