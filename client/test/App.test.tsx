@@ -46,6 +46,11 @@ let lastSettingsBody: string | null = null;
 let lastSetBody: string | null = null;
 /** What each world's set is, keyed by world name. A world absent from it has none. */
 let worldSets: Record<string, { modIds: string[]; missing: string[]; configured: boolean }> = {};
+/** The world whose set GET is held open, so the swap window is observable. */
+let holdWorldMods: string | null = null;
+let releaseWorldMods: (() => void) | null = null;
+/** False for a daemon too old to have GET /api/mods/library. */
+let libraryEndpointExists = true;
 
 /*
  * The mod library the daemon holds. Two origins, because the panel treats them
@@ -129,6 +134,9 @@ beforeEach(() => {
   lastAddBody = null;
   lastSettingsBody = null;
   lastSetBody = null;
+  holdWorldMods = null;
+  releaseWorldMods = null;
+  libraryEndpointExists = true;
   worldSets = {
     Tulsa: { modIds: ["safehaven.qol"], missing: [], configured: true },
     "Jeff and Eli": { modIds: ["gagadoliano.summonerexpansion"], missing: [], configured: true },
@@ -175,7 +183,16 @@ beforeEach(() => {
           fields: settingsFields("false"),
         });
       }
-      if (url.endsWith("/api/mods/library")) return jsonResponse({ ok: true, mods: libraryMods });
+      if (url.endsWith("/api/mods/library")) {
+        return libraryEndpointExists
+          ? jsonResponse({ ok: true, mods: libraryMods })
+          : {
+              ok: false,
+              status: 404,
+              statusText: "Not Found",
+              json: async () => ({ message: "Route GET:/api/mods/library not found" }),
+            };
+      }
       // Matched before the world list below, which would otherwise swallow it:
       // /api/worlds/Tulsa/mods and /api/worlds are the same prefix.
       const setUrl = /\/api\/worlds\/([^/]+)\/mods$/.exec(url);
@@ -187,7 +204,15 @@ beforeEach(() => {
           worldSets[name] = { modIds, missing: [], configured: true };
         }
         const set = worldSets[name] ?? { modIds: [], missing: [], configured: false };
-        return jsonResponse({ ok: true, world: name, ...set });
+        const body = { ok: true, world: name, ...set };
+        // Held open so a test can stand inside the window between the header
+        // moving to another world and that world's set arriving.
+        if (holdWorldMods === name && init?.method !== "PUT") {
+          return new Promise((resolve) => {
+            releaseWorldMods = () => resolve(jsonResponse(body));
+          });
+        }
+        return jsonResponse(body);
       }
       if (url.includes("/api/worlds")) {
         // The candidate is echoed back for whatever name was asked about, so
@@ -429,6 +454,37 @@ describe("App per-world mod sets", () => {
     });
   });
 
+  /*
+   * The failure this test exists for was reproduced, not imagined: with the
+   * previous world's payload still in hand, the panel rendered "Mods for Jeff
+   * and Eli" with TULSA's mod ticked, and Save wrote Tulsa's set to Jeff and
+   * Eli. The window is a whole GET - which for an unconfigured world unzips
+   * every jar in the mods folder - so it is not narrow, and a test that lets the
+   * read land before looking (waitFor, or an atomic rerender) steps clean over
+   * it. This one stands inside it.
+   */
+  it("shows no set, and offers no save, while the new world's read is still out", async () => {
+    await mountConnected();
+    await waitFor(() => expect(tick("Safe Haven QOL")).toBeChecked());
+
+    holdWorldMods = "Jeff and Eli";
+    fireEvent.change(screen.getByLabelText("World"), { target: { value: "Jeff and Eli" } });
+
+    // The header confirms the new name long before the set for it arrives.
+    expect(await screen.findByText(/reading jeff and eli's mod set/i)).toBeTruthy();
+    expect(tick("Safe Haven QOL")).not.toBeChecked();
+    expect(tick("Safe Haven QOL")).toBeDisabled();
+    expect(screen.queryByRole("button", { name: /save jeff and eli's mod set/i })).toBeNull();
+    expect(lastSetBody).toBeNull();
+
+    await act(async () => {
+      releaseWorldMods?.();
+    });
+
+    await waitFor(() => expect(tick("Summoner Expansion")).toBeChecked());
+    expect(tick("Safe Haven QOL")).not.toBeChecked();
+  });
+
   it("distinguishes a world with no set from a world with an empty one", async () => {
     // A world nobody has chosen a set for: the daemon answers configured:false,
     // and the panel has to say what a start would load rather than "no mods".
@@ -437,6 +493,39 @@ describe("App per-world mod sets", () => {
 
     expect(await screen.findByText(/no mod set has been chosen for ranch yet/i)).toBeTruthy();
     expect(screen.queryByText(/loads no mods at all/i)).toBeNull();
+  });
+});
+
+/*
+ * GET /api/mods/library is the newest route in the API, so it is the one a
+ * daemon that has not been updated yet does not have. Folded into refresh()'s
+ * Promise.all it took the status, the world list and the mod list down with it,
+ * and the app sat on "Connecting to the daemon" - no console, no Stop button -
+ * while people were on the server. It must cost the set features and nothing
+ * else.
+ */
+describe("App against a daemon with no mod library", () => {
+  it("keeps the whole app working and says what is unavailable", async () => {
+    libraryEndpointExists = false;
+    await mountConnected();
+
+    expect(screen.queryByText(/connecting to the daemon/i)).toBeNull();
+    expect(screen.getByRole("button", { name: /update server/i })).toBeEnabled();
+    expect(await screen.findByText(/mod library could not be read/i)).toBeTruthy();
+    // No ticks to offer, and nothing that could write a set through a library
+    // this daemon does not have.
+    expect(screen.queryByRole("checkbox")).toBeNull();
+    expect(screen.queryByRole("button", { name: /save .* mod set/i })).toBeNull();
+  });
+
+  it("does not raise the daemon-connectivity banner over it", async () => {
+    // The banner means "the daemon is unreachable". It is not: everything else
+    // just answered.
+    libraryEndpointExists = false;
+    await mountConnected();
+    await settle();
+    expect(screen.queryByText(/^404/)).toBeNull();
+    expect(screen.getByRole("button", { name: /^stop$|^start$/i })).toBeTruthy();
   });
 });
 

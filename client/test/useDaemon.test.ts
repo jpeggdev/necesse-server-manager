@@ -397,6 +397,47 @@ describe("useDaemon workshop update badges", () => {
   });
 });
 
+/*
+ * GET /api/mods/library is read on refresh()'s schedule but NOT inside its
+ * Promise.all, for the same reason /api/mods/updates is a call of its own: it is
+ * the newest route in the API, so it is the one a daemon that has not been
+ * updated yet answers 404 for - and folded in, that 404 rejected the status, the
+ * world list and the mod list with it, leaving the app on "Connecting to the
+ * daemon" with no console and no Stop button.
+ */
+describe("useDaemon mod library", () => {
+  it("keeps every other read alive when the library cannot be read", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.endsWith("/api/mods/library")) {
+          return { ok: false, status: 404, statusText: "Not Found", json: async () => ({}) };
+        }
+        if (url.endsWith("/api/status")) return jsonResponse(statusPayload());
+        if (url.includes("/api/worlds")) {
+          return jsonResponse({ worlds: [], lastWorld: null, candidate: null });
+        }
+        if (url.endsWith("/api/mods")) return jsonResponse({ managed: [], untracked: [] });
+        return jsonResponse({});
+      }),
+    );
+    const { result, unmount } = await openConnection();
+
+    await waitFor(() =>
+      expect(result.current.libraryError).toMatch(/mod library could not be read/i),
+    );
+    expect(result.current.library).toBeNull();
+    expect(result.current.status).not.toBeNull();
+    expect(result.current.worlds).not.toBeNull();
+    expect(result.current.mods).not.toBeNull();
+    // The connectivity banner is for an unreachable daemon. This one answered.
+    expect(result.current.error).toBeNull();
+    expect(result.current.connected).toBe(true);
+
+    unmount();
+  });
+});
+
 describe("useDaemon reconnect", () => {
   it("re-syncs to a still-running task after a reconnect instead of clearing busy", async () => {
     const { result, ws, unmount } = await openConnection();

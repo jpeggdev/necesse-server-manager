@@ -22,6 +22,7 @@ export default function App() {
     worlds,
     mods,
     library,
+    libraryError,
     modUpdates,
     updatesError,
     console: lines,
@@ -158,7 +159,10 @@ export default function App() {
   // that list.
   useEffect(() => {
     const seq = ++worldModsSeq.current;
-    if (modSetWorld === null) {
+    // Not asked for at all when the library could not be read: a daemon that
+    // has no /api/mods/library has no /api/worlds/:name/mods either, and a
+    // second 404 says nothing the first one has not already said.
+    if (modSetWorld === null || libraryError !== null) {
       setWorldMods(null);
       setWorldModsError(null);
       return;
@@ -178,7 +182,7 @@ export default function App() {
         setWorldMods(null);
         setWorldModsError(e.message);
       });
-  }, [api, modSetWorld, library]);
+  }, [api, modSetWorld, library, libraryError]);
 
   /**
    * Writes the set the panel has ticked.
@@ -219,7 +223,11 @@ export default function App() {
     [api, refresh],
   );
 
-  if (!connected || !status || !worlds || !mods || !library) {
+  // The library is deliberately NOT part of this gate. It is the one read that
+  // a daemon running an older build cannot answer, and holding the whole app -
+  // status, console, Stop - behind it would make an ordinary version skew look
+  // like an unreachable daemon while somebody is playing.
+  if (!connected || !status || !worlds || !mods) {
     return (
       <main className="app">
         <ErrorBanner error={error} onDismiss={() => setError(null)} />
@@ -259,7 +267,8 @@ export default function App() {
         <div className="mods-pane" style={{ width: modsWidth }}>
           <ModsPanel
             mods={mods}
-            library={library}
+            library={library ?? []}
+            libraryError={libraryError}
             updates={modUpdates}
             updatesError={updatesError}
             busy={busy}
@@ -267,8 +276,11 @@ export default function App() {
             world={modSetWorld}
             worldMods={worldMods}
             worldModsError={worldModsError}
-            onSaveSet={saveWorldModSet}
-            onUpload={uploadMod}
+            // Not offered at all when the library is unreadable: both write
+            // through it, so a Save or an Upload could only fail, and the panel
+            // already says why they are gone.
+            onSaveSet={libraryError === null ? saveWorldModSet : undefined}
+            onUpload={libraryError === null ? uploadMod : undefined}
             onSearch={searchWorkshop}
             onAdd={(id, name) => guard(() => api.addMod(id, name))()}
             onRemove={(id) => guard(() => api.removeMod(id))()}

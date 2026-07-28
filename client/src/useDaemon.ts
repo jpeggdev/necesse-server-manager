@@ -35,14 +35,21 @@ export interface DaemonState {
   lastWorld: string | null;
   mods: ModListResponse | null;
   /**
-   * Every mod the daemon holds a jar for, or null before the first read.
+   * Every mod the daemon holds a jar for, or null before the first read and
+   * after a failed one.
    *
-   * Read alongside the mod list rather than on its own schedule: an install, an
-   * `Update All` and an upload all write it, and each of those already ends in a
-   * refresh(), so folding it in is what keeps the set checkboxes describing the
-   * library that exists rather than the one that did a minute ago.
+   * Read on refresh()'s schedule - an install, an `Update All` and an upload all
+   * write it - but NOT inside its Promise.all, and that is the whole point. This
+   * is the newest endpoint in the API, so it is the one a daemon that has not
+   * been updated yet does not have; folded in, its 404 rejects the status, the
+   * world list and the mod list along with it, and the app sits on "Connecting
+   * to the daemon" with no console and no Stop button while people are playing.
+   * Same rule as GET /api/mods/updates: a second read, its own error, and a
+   * failure that costs only the features that need it.
    */
   library: ModLibraryEntry[] | null;
+  /** Why the library could not be read. Never routed into `error`, for the reason above. */
+  libraryError: string | null;
   /**
    * Per-mod workshop update status, or null when it is unknown - which is the
    * state before the first check lands AND the state after a failed one. Null
@@ -85,31 +92,55 @@ export function useDaemon(): DaemonState {
   const [worlds, setWorlds] = useState<WorldsResponse | null>(null);
   const [mods, setMods] = useState<ModListResponse | null>(null);
   const [library, setLibrary] = useState<ModLibraryEntry[] | null>(null);
+  const [libraryError, setLibraryError] = useState<string | null>(null);
   const [modUpdates, setModUpdates] = useState<ModUpdateInfo[] | null>(null);
   const [updatesError, setUpdatesError] = useState<string | null>(null);
   const [lines, setLines] = useState<ConsoleEntry[]>([]);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
+  /**
+   * The mod library, read on its own so that it can fail on its own.
+   *
+   * Deliberately outside refresh()'s Promise.all - see `library` on DaemonState.
+   * The message names what stopped working and what did not, because the bare
+   * status line a 404 produces ("404 Not Found") tells the operator neither
+   * which route answered it nor that the rest of the app is fine.
+   */
+  const readLibrary = useCallback(async () => {
     try {
-      const [s, w, m, l] = await Promise.all([
-        api.status(),
-        api.worlds(),
-        api.mods(),
-        api.modLibrary(),
-      ]);
+      const r = await api.modLibrary();
+      setLibrary(r.mods);
+      setLibraryError(null);
+    } catch (e) {
+      // Dropped rather than kept: a stale library would offer ticks for mods
+      // whose jars this daemon may no longer have.
+      setLibrary(null);
+      setLibraryError(
+        `The mod library could not be read (${(e as Error).message}). Per-world mod sets, ` +
+          `the library list and jar upload are unavailable until it can be; everything else ` +
+          `here still works. A daemon older than this feature has no /api/mods/library and ` +
+          `answers 404.`,
+      );
+    }
+  }, [api]);
+
+  const refresh = useCallback(async () => {
+    // Fired alongside, never awaited into the group below: its rejection is
+    // handled inside itself, so it cannot take the other three reads down.
+    void readLibrary();
+    try {
+      const [s, w, m] = await Promise.all([api.status(), api.worlds(), api.mods()]);
       setStatus(s);
       setWorlds(w);
       setMods(m);
-      setLibrary(l.mods);
       setError(null);
     } catch (e) {
       // Surface the daemon's/fetch's own message verbatim rather than
       // swallowing it - the operator needs to see why the UI went stale.
       setError((e as Error).message);
     }
-  }, [api]);
+  }, [api, readLibrary]);
 
   /**
    * Identity of the managed set as far as update-checking is concerned: which
@@ -275,6 +306,7 @@ export function useDaemon(): DaemonState {
     lastWorld: worlds?.lastWorld ?? null,
     mods,
     library,
+    libraryError,
     modUpdates,
     updatesError,
     console: lines,

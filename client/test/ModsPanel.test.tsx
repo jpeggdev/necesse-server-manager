@@ -337,6 +337,38 @@ describe("ModsPanel set checkboxes", () => {
     expect(tick("Summoner Expansion").checked).toBe(false);
   });
 
+  /*
+   * The window between the header moving to another world and that world's set
+   * arriving. The caller is still holding the PREVIOUS world's payload for the
+   * length of a GET - which for an unconfigured world unzips every jar in the
+   * mods folder - and rendering it under the new world's name is not a cosmetic
+   * lag: the ticks would be the old world's, the removal diff would be computed
+   * against the old world's baseline, and Save would write them to the NEW
+   * world. The payload names the world it describes; that name decides.
+   */
+  it("shows no set at all while the payload in hand belongs to the previous world", () => {
+    const view = setupSet();
+    expect(tick("Safe Haven QOL").checked).toBe(true);
+
+    // The world changed; the answer for it has not arrived.
+    view.rerender({ world: "Jeff and Eli" });
+
+    expect(screen.getByText(/reading jeff and eli's mod set/i)).toBeTruthy();
+    expect(tick("Safe Haven QOL").checked).toBe(false);
+    expect(tick("Safe Haven QOL")).toBeDisabled();
+    // Nothing to save with, so nothing can be saved to the wrong world.
+    expect(screen.queryByRole("button", { name: /save/i })).toBeNull();
+  });
+
+  it("matches the world case-insensitively, exactly as the daemon looks a set up", () => {
+    // Asking about "tulsa" legitimately answers "Tulsa": the daemon echoes the
+    // name as it was last written. An exact match would read as "still reading"
+    // forever and take the checkboxes with it.
+    setupSet({ world: "tulsa", worldMods: worldMods({ world: "Tulsa" }) });
+    expect(tick("Safe Haven QOL").checked).toBe(true);
+    expect(screen.getByRole("button", { name: /save tulsa's mod set/i })).toBeTruthy();
+  });
+
   it("says nothing about a set until a world name is confirmed", () => {
     setup({ onSaveSet: vi.fn() });
     expect(screen.getByText(/type a world name in the header/i)).toBeTruthy();
@@ -374,8 +406,31 @@ describe("ModsPanel unconfigured versus empty", () => {
       worldMods: worldMods({ modIds: ["safehaven.qol", "gone.mod"], missing: ["gone.mod"] }),
     });
     expect(screen.getByText(/library has no jar for gone\.mod/i)).toBeTruthy();
+    expect(screen.getByText(/will not start/i)).toBeTruthy();
     expect(tick("gone.mod").checked).toBe(true);
     expect(screen.getByText(/^missing$/i)).toBeTruthy();
+  });
+
+  /*
+   * The same field means something different for a world with no set. There the
+   * daemon derives the ids from the mods folder and diffs them against the
+   * library, so a hand-placed jar is "missing" having never been in the library -
+   * while reconcile adopts every folder jar into the library at step 2, before it
+   * resolves the set at step 3. That world starts fine, and saying it will not is
+   * a false alarm about the one thing this panel has to be trusted on.
+   */
+  it("does not claim an unconfigured world will fail to start over a jar it will adopt", () => {
+    setupSet({
+      worldMods: worldMods({
+        configured: false,
+        modIds: ["safehaven.qol", "hand.dropped"],
+        missing: ["hand.dropped"],
+      }),
+    });
+    expect(screen.queryByText(/will not start/i)).toBeNull();
+    expect(screen.getByText(/starting tulsa takes it in/i)).toBeTruthy();
+    // Still listed, and still untickable before it becomes the set.
+    expect(tick("hand.dropped").checked).toBe(true);
   });
 });
 
@@ -416,6 +471,66 @@ describe("ModsPanel changing a set", () => {
     await userEvent.click(tick("Summoner Expansion"));
     await userEvent.click(screen.getByRole("button", { name: /save tulsa's mod set/i }));
     expect(await screen.findByText(message)).toBeTruthy();
+  });
+
+  it("drops that refusal the moment the ticks change, since it described the old ones", async () => {
+    const message = "The library has no jar for gone.mod.";
+    setupSet({ onSaveSet: vi.fn(async () => Promise.reject(new Error(message))) });
+    await userEvent.click(tick("Summoner Expansion"));
+    await userEvent.click(screen.getByRole("button", { name: /save tulsa's mod set/i }));
+    expect(await screen.findByText(message)).toBeTruthy();
+
+    await userEvent.click(tick("Summoner Expansion"));
+
+    expect(screen.queryByText(message)).toBeNull();
+  });
+});
+
+/*
+ * A mod mods.json still manages that the library has no jar for - an install
+ * recorded before the library existed, or one whose entry went. It gets no set
+ * row, so without a row of its own it would have no Remove button either and
+ * there would be no way to clear it from the UI at all.
+ */
+describe("ModsPanel a managed mod the library lost", () => {
+  const ghost = {
+    id: "999",
+    name: "Ghost Mod",
+    jar: "Ghost.jar",
+    lastUpdated: "2026-07-26T00:00:00.000Z",
+  };
+
+  it("still lists it, and still lets it be removed", async () => {
+    const props = setup({ mods: { managed: [...mods.managed, ghost], untracked: [] } });
+    expect(screen.getByText("Ghost Mod")).toBeTruthy();
+    expect(screen.getByText(/not in library/i)).toBeTruthy();
+
+    await userEvent.click(screen.getByRole("button", { name: /remove ghost mod/i }));
+
+    expect(props.onRemove).toHaveBeenCalledWith("999");
+  });
+
+  it("gives it no checkbox, because no set can name it", () => {
+    setup({ mods: { managed: [...mods.managed, ghost], untracked: [] } });
+    expect(screen.queryByRole("checkbox", { name: "Ghost Mod" })).toBeNull();
+  });
+});
+
+describe("ModsPanel with an unreadable library", () => {
+  const LIBRARY_ERROR =
+    "The mod library could not be read (404 Not Found). Per-world mod sets, the library list " +
+    "and jar upload are unavailable until it can be; everything else here still works.";
+
+  it("says what is wrong instead of showing an empty library", () => {
+    setup({ library: [], libraryError: LIBRARY_ERROR, world: "Tulsa" });
+    expect(screen.getByText(new RegExp("mod library could not be read"))).toBeTruthy();
+    expect(screen.queryByText(/type a world name in the header/i)).toBeNull();
+  });
+
+  it("keeps the mod list and its Remove buttons, which do not need the library", () => {
+    setup({ library: [], libraryError: LIBRARY_ERROR });
+    expect(screen.getByText("Safe Haven QOL")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /remove safe haven qol/i })).toBeEnabled();
   });
 });
 
