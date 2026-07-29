@@ -114,6 +114,76 @@ describe("GET /api/status", () => {
   });
 });
 
+// `Deps.configWarnings` reaching `statusPayload` is only real if some test
+// fails when it doesn't - a literal `[]` in statusPayload would leave every
+// other test in this suite green, since every other app in this file is built
+// with configWarnings: []. These build an app with a real warning and check
+// both channels a client can learn about it from: the poll and the socket
+// backlog it gets on connect.
+describe("configWarnings in the status payload", () => {
+  const warning = "steamcmd is missing";
+
+  it("carries a non-fatal configuration problem through GET /api/status", async () => {
+    const warnedApp = buildServer({
+      cfg,
+      configFile,
+      configWarnings: [warning],
+      pm,
+      installer,
+      library,
+      sets,
+      steam,
+      workshop,
+    });
+
+    const res = await warnedApp.inject({ method: "GET", url: "/api/status" });
+
+    expect(res.json().configWarnings).toEqual([warning]);
+  });
+
+  it("carries the same warning in the websocket backlog frame a connecting client actually receives", async () => {
+    const warnedApp = buildServer({
+      cfg,
+      configFile,
+      configWarnings: [warning],
+      pm,
+      installer,
+      library,
+      sets,
+      steam,
+      workshop,
+    });
+    await warnedApp.ready();
+
+    // The backlog frame is sent the instant the connection handler runs,
+    // which can be before `injectWS`'s own promise resolves - a `message`
+    // listener attached after `await` is a race that drops it. `onInit` runs
+    // at socket creation, ahead of the handshake, so it cannot lose that race.
+    let resolveBacklog!: (msg: WsMessage) => void;
+    const backlogReceived = new Promise<WsMessage>((resolve) => {
+      resolveBacklog = resolve;
+    });
+    const ws = await warnedApp.injectWS("/ws", undefined, {
+      // `ws` ships no type declarations of its own (it's a transitive
+      // dependency here, per the note at the top of ws-auth.test.ts), so
+      // `socket` resolves to `any` and this callback gets none of its own -
+      // annotated explicitly rather than left as an implicit any.
+      onInit: (socket) => {
+        socket.once("message", (data: unknown) =>
+          resolveBacklog(JSON.parse(String(data)) as WsMessage),
+        );
+      },
+    });
+    try {
+      const backlog = await backlogReceived;
+      if (backlog.type !== "backlog") throw new Error(`Expected a backlog frame, got ${backlog.type}`);
+      expect(backlog.status.configWarnings).toEqual([warning]);
+    } finally {
+      ws.terminate();
+    }
+  });
+});
+
 // The daemon is the authority on what is in flight: it is the only party that
 // sees both a task's acceptance and its completion. These pin the lifecycle of
 // that set on every exit path, plus the server-side interlock that stops a

@@ -229,10 +229,10 @@ export async function resolveBootConfig(dir: string): Promise<BootConfig> {
   const stored = await readStoredConfig(configFile);
   const cfg = await loadConfig(configFile);
 
-  // Before anything reads a folder or spawns anything. A daemon that
-  // reconciles one mods folder while the game loads another is worse than a
-  // daemon that did not start: the wrong-mod-set launch it produces looks
-  // entirely successful.
+  // The caller must not read a folder or spawn anything before this resolves
+  // and is checked. A daemon that reconciles one mods folder while the game
+  // loads another is worse than a daemon that did not start: the
+  // wrong-mod-set launch it produces looks entirely successful.
   const problems = await configProblems(cfg, stored);
   const fatal = fatalProblems(problems);
   if (fatal.length > 0) {

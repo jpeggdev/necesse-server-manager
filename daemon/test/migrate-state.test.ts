@@ -6,6 +6,7 @@ import {
   findLegacyState,
   legacyStateRefusal,
   migrateState,
+  resolveLegacyState,
   stateDirPopulated,
   verifyTree,
 } from "../src/migrate-state.js";
@@ -134,6 +135,36 @@ describe("migrateState", () => {
     expect((await stat(join(install, "mods.json"))).isFile()).toBe(true);
     expect(await readFile(join(state, "config.json"), "utf8")).toBe('{"first":1}');
     expect(await readFile(join(state, "mods.json"), "utf8")).toBe("EXISTING_MODS");
+  });
+});
+
+/**
+ * `resolveLegacyState` is the only place `findLegacyState`, `stateDirPopulated`
+ * and `legacyStateRefusal` are composed - `index.ts` cannot be imported to
+ * test that composition directly. The dangerous failure here is asymmetric:
+ * dropping the "and not already populated" condition means a real legacy
+ * install boots silently against an empty state directory rather than
+ * refusing, so both directions are pinned, and the refusal message is checked
+ * for which directory plays which role rather than merely containing both
+ * strings.
+ */
+describe("resolveLegacyState", () => {
+  it("refuses when legacy state is present and the state directory is empty", async () => {
+    await writeFile(join(install, "config.json"), "{}", "utf8");
+
+    const message = await resolveLegacyState(install, state);
+
+    expect(message).not.toBeNull();
+    expect(message).toContain(`keeps its state in ${state}`);
+    expect(message).toContain(`but ${install} still holds`);
+  });
+
+  it("returns null when legacy state is present but the state directory is already populated", async () => {
+    await writeFile(join(install, "config.json"), "{}", "utf8");
+    await mkdir(state, { recursive: true });
+    await writeFile(join(state, "config.json"), "{}", "utf8");
+
+    expect(await resolveLegacyState(install, state)).toBeNull();
   });
 });
 

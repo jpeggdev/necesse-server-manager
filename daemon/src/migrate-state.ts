@@ -31,6 +31,25 @@ export async function stateDirPopulated(dir: string): Promise<boolean> {
   }
 }
 
+/**
+ * Composes the three legacy-state checks the way the daemon does at every
+ * boot: null when it is safe to proceed - no legacy state exists, or the
+ * state directory already holds a migrated copy of it - or the refusal
+ * message naming both directories when a real legacy install would otherwise
+ * boot silently against an empty state directory.
+ *
+ * Extracted out of `index.ts` so the composition itself is testable: getting
+ * the "and the state directory is not already populated" condition backwards,
+ * or swapping which directory plays which role in the message, would each
+ * pass every other test in the suite untouched.
+ */
+export async function resolveLegacyState(installDir: string, dir: string): Promise<string | null> {
+  const found = await findLegacyState(installDir);
+  if (found.length === 0) return null;
+  if (await stateDirPopulated(dir)) return null;
+  return legacyStateRefusal(installDir, found, dir);
+}
+
 export function legacyStateRefusal(installDir: string, found: string[], dir: string): string {
   return (
     `This daemon keeps its state in ${dir}, but ${installDir} still holds an older ` +

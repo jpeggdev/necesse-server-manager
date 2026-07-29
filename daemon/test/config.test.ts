@@ -143,13 +143,8 @@ describe("configProblems", () => {
   });
 });
 
-/**
- * `resolveBootConfig` is the only place in the daemon where `configProblems`
- * is ever called with a real, disk-backed `stored` argument - everywhere else
- * (above) hands it a hand-built object. These drive it from an actual
- * config.json on disk, the way index.ts does at every boot, so the drift
- * refusal is pinned end to end rather than only as a pure function.
- */
+// See resolveBootConfig's own doc comment in config.ts for why this drives it
+// from a real file on disk rather than a hand-built `stored` object.
 describe("resolveBootConfig", () => {
   it("refuses to resolve when config.json on disk still carries a stale modsDir", async () => {
     const cfg = makeTestConfig(root);

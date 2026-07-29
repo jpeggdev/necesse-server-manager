@@ -8,7 +8,7 @@ import { ModLibrary } from "./mod-library.js";
 import { ModRegistry } from "./mod-registry.js";
 import { ModSets } from "./mod-sets.js";
 import { migrateModSets } from "./mod-migration.js";
-import { findLegacyState, legacyStateRefusal, stateDirPopulated } from "./migrate-state.js";
+import { resolveLegacyState } from "./migrate-state.js";
 import { ProcessManager, type SpawnFn } from "./process-manager.js";
 import { stateDir } from "./state-dir.js";
 import { SteamCmd } from "./steamcmd.js";
@@ -23,9 +23,9 @@ const dir = stateDir();
 // Before the config is even read: an install whose state is still beside dist/
 // would otherwise boot against an empty state directory, silently presenting
 // itself as a fresh install and leaving the real mod library behind.
-const legacy = await findLegacyState(installDir);
-if (legacy.length > 0 && !(await stateDirPopulated(dir))) {
-  console.error(legacyStateRefusal(installDir, legacy, dir));
+const legacyRefusal = await resolveLegacyState(installDir, dir);
+if (legacyRefusal !== null) {
+  console.error(legacyRefusal);
   process.exit(1);
 }
 
