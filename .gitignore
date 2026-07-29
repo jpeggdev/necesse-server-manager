@@ -11,3 +11,6 @@ target/
 daemon/mod-library/
 daemon/mod-library.json
 daemon/mod-sets.json
+
+scripts/deploy.local.ps1
+CLAUDE.local.md

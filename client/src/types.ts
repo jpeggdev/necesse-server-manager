@@ -55,7 +55,7 @@ export interface DaemonConfig {
    *
    * Without it the server derives this folder from the *running account's*
    * `APPDATA`, which makes the whole install a property of whoever launched it.
-   * That is what pinned the daemon to an interactive `jeffp` logon: run as
+   * That is what pinned the daemon to an interactive user logon: run as
    * SYSTEM it would resolve
    * `C:\Windows\system32\config\systemprofile\AppData\Roaming\Necesse` and come
    * up with zero worlds and zero mods, having failed at nothing it could report.

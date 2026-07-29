@@ -3,6 +3,9 @@
 Necesse dedicated-server manager: a Node/TypeScript **daemon** that runs on the
 game-server box, and a **Tauri 2 + React client** that drives it over the LAN.
 
+Machine-specific values (SSH target, verified-live notes, local paths) live in
+the gitignored `CLAUDE.local.md`, not here.
+
 ## Layout and commands
 
 | | |
@@ -20,77 +23,72 @@ Run the two packages separately; there is no workspace root.
 kill a live game session. Before `02-deploy.ps1` or `04-restart-daemon.ps1`,
 confirm nobody is playing — `GET /api/status` reporting `stopped` is the check.
 
-`02-deploy.ps1` seeds `config.json` and `mods.json` only when absent. That is
-deliberate: `mods.json` is the only record of which jar belongs to which
-workshop id, and clobbering it strands every installed mod as untracked.
+`02-deploy.ps1` seeds `mods.json` only when absent. That is deliberate:
+`mods.json` is the only record of which jar belongs to which workshop id, and
+clobbering it strands every installed mod as untracked. It no longer seeds
+`config.json` — writing that file is the setup wizard's job (see below).
 
-**The daemon's own directory holds state, not just code.** Alongside those two,
-`mod-library/`, `mod-library.json` and `mod-sets.json` live there (see
-`docs/mod-sets-design.md`); the library is the only copy of every uploaded and
-hand-placed jar, and the sets are what each world loads. Deploy copies `dist/`
-and the two manifests in and never removes anything, which is what makes that
-safe — a deploy step that mirrored or cleaned the directory would destroy jars
-that exist nowhere else. Not `C:\necesseserver`, ever: steamcmd's
-`app_update ... validate` prunes unknown files out of that tree.
+**Daemon state lives in `%PROGRAMDATA%\NecesseServerManager`, not beside
+`dist/`** (overridable with the `NECESSE_MANAGER_DATA` environment variable).
+That includes `config.json`, `mods.json`, `mod-library/`, `mod-library.json`
+and `mod-sets.json` (see `docs/mod-sets-design.md`); the library is the only
+copy of every uploaded and hand-placed jar, and the sets are what each world
+loads. Because none of that lives in the install directory, the install
+directory holds nothing irreplaceable — **"delete the folder and unzip the new
+release" is the correct upgrade, not a dangerous one.** An install whose state
+is still sitting beside `dist/` (from before this split existed) refuses to
+boot and names `migrate.cmd`, which copies the old files across rather than
+moving them, so the originals stay in place until you delete them.
 
-SSH: `ssh -i "$env:USERPROFILE\.ssh\necesse_server" jeffp@192.168.1.106`.
+`config.json` is written by the setup wizard (`npm run setup` in `daemon/`,
+or `node dist/setup-cli.js` against a built install) and lives in that state
+directory. Hand-edit it with the daemon stopped. **Write it without a BOM** —
+PowerShell 5.1's `Set-Content -Encoding UTF8` adds one; use
+`[System.IO.File]::WriteAllText($p, $s, (New-Object System.Text.UTF8Encoding($false)))`.
+`loadConfig` tolerates a BOM now, but nothing else does.
+
 **The remote default shell is cmd.exe.** Do not fight nested quoting — `scp` a
 `.ps1` over and run it with `powershell -NoProfile -ExecutionPolicy Bypass -File`.
 Inline `powershell -Command "..."` through ssh gets pipe-split by the remote
 cmd.exe before powershell ever sees it.
 
-`config.json` lives only on SERVER and holds the Steam API key. Hand-edit it
-with the daemon stopped. **Write it without a BOM** — PowerShell 5.1's
-`Set-Content -Encoding UTF8` adds one; use
-`[System.IO.File]::WriteAllText($p, $s, (New-Object System.Text.UTF8Encoding($false)))`.
-`loadConfig` tolerates a BOM now, but nothing else does.
+## Access token
+
+Every HTTP route and the WebSocket upgrade require an access token, sent as an
+`Authorization: Bearer` header (HTTP) or `?token=` (WebSocket, which cannot set
+headers on the handshake). The token lives in `config.json`'s `authToken`.
+**An empty `authToken` disables the check** — this is the documented
+trusted-LAN opt-out, and it is also the upgrade path for a `config.json`
+written before this feature existed: it keeps answering requests instead of
+locking itself out.
 
 ## Who the daemon runs as, and why the data directory is explicit
 
 The task is registered **AtStartup as SYSTEM** (`03-register-task.ps1`), with a
-30-second trigger delay so the daemon is not binding `0.0.0.0:8710` before the
-network stack is up. It used to be **AtLogOn as `jeffp`**, which meant an
-unattended reboot brought the box up with no daemon and no server. Autologon is
-not the fix: `jeffp` is a Microsoft account (`PrincipalSource=MicrosoftAccount`),
-so Windows pushes it to Hello/PIN, and a stored password is exactly what this
-arrangement avoids.
+30-second trigger delay so the daemon is not binding its port before the
+network stack is up. It used to be **AtLogOn** as whichever account was
+logged in, which meant an unattended reboot brought the box up with no daemon
+and no server. Autologon is not a general fix: a Microsoft account
+(`PrincipalSource=MicrosoftAccount`) gets pushed by Windows to Hello/PIN, and a
+stored password is exactly what this arrangement avoids.
 
 SYSTEM was previously impossible because **the game derives its saves and mods
 from the running account's `APPDATA`**. As SYSTEM that is
 `C:\Windows\system32\config\systemprofile\AppData\Roaming\Necesse`, so the
 server would have started with zero worlds and zero mods and reported a
 completely successful launch. `Server.jar`'s own help documents `-datadir
-<path>`, so `buildArgs` now passes it from `config.json`'s **`dataDir`**
-(`C:\Users\jeffp\AppData\Roaming\Necesse`) and the game's data directory no
-longer depends on who launched it. `-datadir` sits ahead of `-world`: the world
-is a save inside that directory.
+<path>`, so `buildArgs` now passes it from `config.json`'s **`dataDir`** and
+the game's data directory no longer depends on who launched it. `-datadir`
+sits ahead of `-world`: the world is a save inside that directory.
 
-**`dataDir` and the daemon's own `modsDir`/`worldsDir` must agree** —
-`modsDir` = `<dataDir>\mods`, `worldsDir` = `<dataDir>\saves\worlds`. All three
-are literal strings in `config.json`, and drift between them is the one
-misconfiguration nothing reports: the daemon would reconcile one mods folder
-while the game loaded another, and the server would start with the wrong mod
-set. `dataDirConflict` in `config.ts` is checked in `index.ts` before anything
-reads a folder or spawns anything, and **refuses to boot** rather than pick a
-winner. Change one of the three and you change all three.
-
-Verified live on 2026-07-28 with the daemon running as `NT AUTHORITY\SYSTEM`:
-all 5 worlds listed, 8 managed / 0 untracked mods, and a real Tulsa start that
-loaded all 8 jars from `ModsFolderModProvider`, named `Tulsa.zip` on the ready
-line, and saved the world on a graceful stop.
-`C:\Windows\system32\config\systemprofile\AppData\Roaming\Necesse` was never
-created, which is the negative control — its absence is the proof `-datadir`
-took.
-
-**steamcmd under SYSTEM is still unproven.** Both invocations mutate
-(`workshop_download_item` downloads a mod, `app_update ... validate` rewrites
-`C:\necesseserver`), so there is no read-only way to exercise it and it was
-deliberately left untested rather than run unattended. What *is* confirmed is
-the filesystem prerequisite: SYSTEM holds inherited FullControl on
-`C:\Users\jeffp\steam`, `steamcmd.exe`, the workshop content folder and
-`C:\necesseserver`, and steamcmd keeps its `config/` and `userdata/` inside its
-own tree rather than in a user profile. The unknown is the anonymous-login
-handshake under SYSTEM's token. Watch the first mod install.
+**`dataDir` is the single source of truth.** `modsDir` (`<dataDir>\mods`) and
+`worldsDir` (`<dataDir>\saves\worlds`) are derived from it, not stored — a
+`config.json` written by an older version that still carries them is not
+silently corrected. `configProblems` in `config.ts` compares the stored keys
+against what `dataDir` derives and, via `fatalProblems`, **refuses to boot**
+rather than pick a winner if they disagree. `resolveBootConfig` runs this
+check in `index.ts` before anything reads a folder or spawns anything. Change
+`dataDir` and `modsDir`/`worldsDir` follow automatically.
 
 ## Constraints that bite
 

@@ -1,9 +1,15 @@
 $ErrorActionPreference = "Stop"
-$key    = "$env:USERPROFILE\.ssh\necesse_server"
-$repo   = Split-Path -Parent $PSScriptRoot
-$remote = "jeffp@192.168.1.106"
-$dest   = "C:\Users\jeffp\necesse-daemon"
-$destFwd = "C:/Users/jeffp/necesse-daemon"
+$repo = Split-Path -Parent $PSScriptRoot
+
+$local = Join-Path $PSScriptRoot "deploy.local.ps1"
+if (-not (Test-Path $local)) {
+  throw "No $local. Copy deploy.local.ps1.example to deploy.local.ps1 and fill in your own values."
+}
+. $local
+$remote  = "$RemoteUser@$RemoteHost"
+$key     = $SshKey
+$dest    = $InstallDir
+$destFwd = $InstallDir -replace '\\', '/'
 
 # The remote default shell is cmd.exe, not PowerShell -- so every remote
 # action here is written to a temp .ps1, scp'd over, and run with
@@ -15,9 +21,9 @@ function Invoke-RemoteScript {
   $tmp = [System.IO.Path]::GetTempFileName() + ".ps1"
   Set-Content -Path $tmp -Value $Content -Encoding UTF8
   try {
-    scp -i $key $tmp "${remote}:C:/Users/jeffp/_deploy_step.ps1"
+    scp -i $key $tmp "${remote}:C:/Users/$RemoteUser/_deploy_step.ps1"
     if ($LASTEXITCODE -ne 0) { throw "scp of deploy step failed" }
-    $out = ssh -i $key $remote "powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\jeffp\_deploy_step.ps1"
+    $out = ssh -i $key $remote "powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\$RemoteUser\_deploy_step.ps1"
     if ($LASTEXITCODE -ne 0) { throw "remote step failed (exit $LASTEXITCODE):`n$out" }
     return $out
   } finally {
@@ -43,20 +49,9 @@ scp -i $key -r "$repo\daemon\dist"              "${remote}:$destFwd/"
 scp -i $key    "$repo\daemon\package.json"      "${remote}:$destFwd/"
 scp -i $key    "$repo\daemon\package-lock.json" "${remote}:$destFwd/"
 
-# Seed config.json/mods.json only if absent -- never clobber live state.
-# Clobbering mods.json would destroy the record of which jar belongs to
-# which workshop id.
-$state = Invoke-RemoteScript @"
-if (Test-Path '$dest\config.json') { Write-Output 'CONFIG_EXISTS' } else { Write-Output 'CONFIG_MISSING' }
-if (Test-Path '$dest\mods.json')   { Write-Output 'MODS_EXISTS' }   else { Write-Output 'MODS_MISSING' }
-"@
-
-if ($state -match "CONFIG_MISSING") {
-  scp -i $key "$repo\scripts\seed\config.json" "${remote}:$destFwd/config.json"
-  Write-Host "Seeded config.json (none existed on SERVER)."
-} else {
-  Write-Host "config.json already exists on SERVER -- left untouched."
-}
+# Seed mods.json only if absent -- never clobber live state. Clobbering it
+# would destroy the record of which jar belongs to which workshop id.
+$state = Invoke-RemoteScript "if (Test-Path '$dest\mods.json') { Write-Output 'MODS_EXISTS' } else { Write-Output 'MODS_MISSING' }"
 
 if ($state -match "MODS_MISSING") {
   scp -i $key "$repo\scripts\seed\mods.json" "${remote}:$destFwd/mods.json"
