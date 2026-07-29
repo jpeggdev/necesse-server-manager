@@ -1846,3 +1846,71 @@ describe("world settings", () => {
     });
   });
 });
+
+describe("access token", () => {
+  beforeEach(() => {
+    cfg.authToken = "s3cret";
+    app = buildServer({ cfg, configFile, pm, installer, library, sets, steam, workshop });
+  });
+
+  it("rejects a request with no token", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/status" });
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error).toMatch(/token/i);
+  });
+
+  it("rejects a wrong token", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/status",
+      headers: { authorization: "Bearer nope" },
+    });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("accepts the right token", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/status",
+      headers: { authorization: "Bearer s3cret" },
+    });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("lets a CORS preflight through, since it cannot carry the header", async () => {
+    const res = await app.inject({
+      method: "OPTIONS",
+      url: "/api/status",
+      headers: {
+        origin: "http://tauri.localhost",
+        "access-control-request-method": "GET",
+      },
+    });
+    expect(res.statusCode).toBeLessThan(400);
+  });
+
+  it("never returns the token from GET /api/config", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/config",
+      headers: { authorization: "Bearer s3cret" },
+    });
+    expect(JSON.stringify(res.json())).not.toContain("s3cret");
+    expect(res.json().authRequired).toBe(true);
+  });
+
+  // The defect this pins: authRequired and the hook itself must agree on what
+  // "configured" means. Without trimming both, a whitespace-only token would
+  // report authRequired: false (nothing to send) while still 401ing every
+  // request, or the reverse - either way the operator has no usable fix.
+  it("treats a whitespace-only token as unset, in both the hook and the reported flag", async () => {
+    cfg.authToken = "   ";
+    const whitespaceApp = buildServer({ cfg, configFile, pm, installer, library, sets, steam, workshop });
+
+    const status = await whitespaceApp.inject({ method: "GET", url: "/api/status" });
+    expect(status.statusCode).toBe(200);
+
+    const config = await whitespaceApp.inject({ method: "GET", url: "/api/config" });
+    expect(config.json().authRequired).toBe(false);
+  });
+});
