@@ -124,6 +124,14 @@ describe("configProblems", () => {
     expect(drift?.message).toContain("C:\\Users\\someoneelse\\mods");
   });
 
+  it("is fatal when a legacy stored worldsDir disagrees with dataDir", async () => {
+    const cfg = makeTestConfig(root);
+    const problems = await configProblems(cfg, { worldsDir: "C:\\Users\\someoneelse\\worlds" });
+    const drift = problems.find((p) => p.key === "worldsDir");
+    expect(drift?.fatal).toBe(true);
+    expect(drift?.message).toContain("C:\\Users\\someoneelse\\worlds");
+  });
+
   it("accepts a legacy stored modsDir that agrees, allowing for case and separators", async () => {
     const cfg = makeTestConfig(root);
     const problems = await configProblems(cfg, {

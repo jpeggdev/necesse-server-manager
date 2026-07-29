@@ -6,7 +6,7 @@
 // with the real makeApi() over real HTTP. Never point this at the live
 // daemon on the LAN - temp dirs + a fake spawn only.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildServer } from "../../daemon/src/http.js";
@@ -29,17 +29,18 @@ const UPLOAD_LIMIT = 4096;
 let app: ReturnType<typeof buildServer>;
 let baseUrl: string;
 let root: string;
+/** cfg.modsDir/cfg.worldsDir, derived from dataDir - captured so tests can reach into them by their real location rather than the pre-Task-2 literal "root/mods". */
+let modsDir: string;
+let worldsDir: string;
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "necesse-client-http-"));
-  const modsDir = join(root, "mods");
-  const worldsDir = join(root, "worlds");
-  await mkdir(modsDir, { recursive: true });
-  await mkdir(worldsDir, { recursive: true });
+  // modsDir/worldsDir are derived from dataDir and makeTestConfig already
+  // creates both on disk - a config where they disagree with dataDir now
+  // refuses to boot, so overriding them here would drive this seam test
+  // through a topology loadConfig can no longer produce.
   const cfg = {
     ...makeTestConfig(root),
-    modsDir,
-    worldsDir,
     stopTimeoutMs: 50,
     // Temp dirs only, per the rule at the top of this file: makeTestConfig
     // points the library and the sets at its own temp root, not the repo.
@@ -48,6 +49,8 @@ beforeEach(async () => {
     modSetsFile: join(root, "mod-sets.json"),
     modUploadMaxBytes: UPLOAD_LIMIT,
   };
+  modsDir = cfg.modsDir;
+  worldsDir = cfg.worldsDir;
   const configFile = join(root, "config.json");
   const spawn = makeFakeSpawn();
   const pm = new ProcessManager(cfg, spawn.spawn);
@@ -167,7 +170,7 @@ describe("mod library and reconcile over a real daemon instance", () => {
     const res = await api.reconcileMods("Tulsa");
 
     expect(res.reconcile.copied).toEqual(["Wanted-1.0.jar"]);
-    expect((await readdir(join(root, "mods"))).sort()).toEqual(["Wanted-1.0.jar"]);
+    expect((await readdir(modsDir)).sort()).toEqual(["Wanted-1.0.jar"]);
   });
 
   it("hands the daemon's refusal back as its own text for an id the library lacks", async () => {
@@ -184,7 +187,7 @@ describe("mod library and reconcile over a real daemon instance", () => {
    */
   it("tells a world with no set apart from a world whose set is empty", async () => {
     const api = makeApi(baseUrl);
-    await writeFile(join(root, "mods", "Wanted-1.0.jar"), await jar("a.wanted"));
+    await writeFile(join(modsDir, "Wanted-1.0.jar"), await jar("a.wanted"));
 
     expect(await api.worldMods("Fresh")).toMatchObject({
       configured: false,
@@ -210,7 +213,7 @@ describe("mod library and reconcile over a real daemon instance", () => {
     await api.uploadMod(await jar("a.mod", "1.0"), "Mod-1.0.jar");
     await api.saveWorldMods("Tulsa", ["a.mod"]);
     await api.reconcileMods("Tulsa");
-    expect(await readdir(join(root, "mods"))).toEqual(["Mod-1.0.jar"]);
+    expect(await readdir(modsDir)).toEqual(["Mod-1.0.jar"]);
 
     const second = await api.uploadMod(await jar("a.mod", "2.0"), "Mod-2.0.jar");
 
@@ -219,7 +222,7 @@ describe("mod library and reconcile over a real daemon instance", () => {
     const applied = await api.reconcileMods("Tulsa");
     expect(applied.reconcile.copied).toEqual(["Mod-2.0.jar"]);
     expect(applied.reconcile.removed).toEqual(["Mod-1.0.jar"]);
-    expect(await readdir(join(root, "mods"))).toEqual(["Mod-2.0.jar"]);
+    expect(await readdir(modsDir)).toEqual(["Mod-2.0.jar"]);
   });
 });
 
@@ -233,7 +236,7 @@ describe("mod library and reconcile over a real daemon instance", () => {
  */
 describe("world settings over a real daemon instance", () => {
   it("reads the file's own keys, types and option sets", async () => {
-    await makeWorldZip(join(root, "worlds"), "Tulsa");
+    await makeWorldZip(worldsDir, "Tulsa");
     const res = await makeApi(baseUrl).worldSettings("Tulsa");
 
     const difficulty = res.fields.find((f) => f.key === "difficulty");
@@ -246,7 +249,7 @@ describe("world settings over a real daemon instance", () => {
   });
 
   it("applies a partial change and reports where the backup went", async () => {
-    await makeWorldZip(join(root, "worlds"), "Tulsa");
+    await makeWorldZip(worldsDir, "Tulsa");
     const api = makeApi(baseUrl);
     const res = await api.saveWorldSettings("Tulsa", { allowCheats: true, difficulty: "BRUTAL" });
 
@@ -260,14 +263,14 @@ describe("world settings over a real daemon instance", () => {
   });
 
   it("writes nothing, and takes no backup, when the values already match", async () => {
-    await makeWorldZip(join(root, "worlds"), "Tulsa");
+    await makeWorldZip(worldsDir, "Tulsa");
     const res = await makeApi(baseUrl).saveWorldSettings("Tulsa", { allowCheats: false });
     expect(res.changed).toEqual([]);
     expect(res.backup).toBeNull();
   });
 
   it("hands the daemon's refusal back to the client as its own text", async () => {
-    await makeWorldZip(join(root, "worlds"), "Tulsa");
+    await makeWorldZip(worldsDir, "Tulsa");
     await expect(
       makeApi(baseUrl).saveWorldSettings("Tulsa", { gameVersion: "9.9.9" }),
     ).rejects.toThrow(/never be changed/i);
