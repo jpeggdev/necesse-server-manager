@@ -64,7 +64,7 @@ beforeEach(async () => {
   const workshop = new SteamWorkshop(cfg, () =>
     Promise.reject(new Error("no network in tests")),
   );
-  app = buildServer({ cfg, configFile, pm, installer, library, sets, steam, workshop });
+  app = buildServer({ cfg, configFile, configWarnings: [], pm, installer, library, sets, steam, workshop });
   baseUrl = await app.listen({ port: 0, host: "127.0.0.1" });
 });
 

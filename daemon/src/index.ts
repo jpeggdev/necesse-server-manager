@@ -1,24 +1,43 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { configProblems, fatalProblems, loadConfig, readStoredConfig } from "./config.js";
+import { resolveBootConfig } from "./config.js";
 import { buildServer } from "./http.js";
 import { ModInstaller } from "./mod-installer.js";
 import { ModLibrary } from "./mod-library.js";
 import { ModRegistry } from "./mod-registry.js";
 import { ModSets } from "./mod-sets.js";
 import { migrateModSets } from "./mod-migration.js";
+import { findLegacyState, legacyStateRefusal, stateDirPopulated } from "./migrate-state.js";
 import { ProcessManager, type SpawnFn } from "./process-manager.js";
+import { stateDir } from "./state-dir.js";
 import { SteamCmd } from "./steamcmd.js";
 import { SteamWorkshop } from "./steam-workshop.js";
 import { findOrphanServer, listJavaProcesses } from "./orphan.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-// The daemon's own directory, holding config.json and mods.json. Not to be
-// confused with cfg.dataDir, which is the *game's* data directory.
-const daemonDir = join(here, "..");
-const configFile = join(daemonDir, "config.json");
-const modsFile = join(daemonDir, "mods.json");
+// Where the code lives. Not where state lives - see state-dir.ts.
+const installDir = join(here, "..");
+const dir = stateDir();
+
+// Before the config is even read: an install whose state is still beside dist/
+// would otherwise boot against an empty state directory, silently presenting
+// itself as a fresh install and leaving the real mod library behind.
+const legacy = await findLegacyState(installDir);
+if (legacy.length > 0 && !(await stateDirPopulated(dir))) {
+  console.error(legacyStateRefusal(installDir, legacy, dir));
+  process.exit(1);
+}
+
+const boot = await resolveBootConfig(dir);
+if (!boot.ok) {
+  console.error(boot.message);
+  process.exit(1);
+}
+const { cfg, configFile, configWarnings } = boot;
+for (const w of configWarnings) console.warn(`Configuration warning: ${w}`);
+
+const modsFile = join(dir, "mods.json");
 
 const spawnFn: SpawnFn = (cmd, args, opts) =>
   // `as const` fixes stdio as the literal 3-tuple ("pipe","pipe","pipe") rather
@@ -30,18 +49,6 @@ const spawnFn: SpawnFn = (cmd, args, opts) =>
     windowsHide: true,
     stdio: ["pipe", "pipe", "pipe"] as const,
   });
-
-const cfg = await loadConfig(configFile);
-
-// Before anything reads a folder or spawns anything. A daemon that reconciles
-// one mods folder while the game loads another is worse than a daemon that did
-// not start: the wrong-mod-set launch it produces looks entirely successful.
-// Stub pending Task 5, which wires configWarnings (the non-fatal problems)
-// into the HTTP layer instead of discarding them here.
-const fatal = fatalProblems(await configProblems(cfg, await readStoredConfig(configFile)));
-if (fatal.length > 0) {
-  throw new Error(`${fatal.map((p) => p.message).join(" ")} (config: ${configFile})`);
-}
 
 const pm = new ProcessManager(cfg, spawnFn);
 const steam = new SteamCmd(cfg, spawnFn);
@@ -85,6 +92,19 @@ try {
   console.error(`Mod library migration failed: ${(e as Error).message}`);
 }
 
-const app = buildServer({ cfg, configFile, pm, installer, library, sets, steam, workshop });
+const app = buildServer({
+  cfg,
+  configFile,
+  configWarnings,
+  pm,
+  installer,
+  library,
+  sets,
+  steam,
+  workshop,
+});
 await app.listen({ host: "0.0.0.0", port: cfg.port });
-console.log(`necesse-daemon listening on 0.0.0.0:${cfg.port}`);
+console.log(
+  `necesse-daemon listening on 0.0.0.0:${cfg.port} ` +
+    `(${cfg.authToken.length > 0 ? "token required" : "NO ACCESS TOKEN - anyone on this network can control the server"})`,
+);

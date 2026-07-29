@@ -8,6 +8,7 @@ import {
   fatalProblems,
   loadConfig,
   modsDirFor,
+  resolveBootConfig,
   saveConfig,
   worldsDirFor,
 } from "../src/config.js";
@@ -139,5 +140,51 @@ describe("configProblems", () => {
       worldsDir: cfg.worldsDir,
     });
     expect(problems.some((p) => p.key === "modsDir" || p.key === "worldsDir")).toBe(false);
+  });
+});
+
+/**
+ * `resolveBootConfig` is the only place in the daemon where `configProblems`
+ * is ever called with a real, disk-backed `stored` argument - everywhere else
+ * (above) hands it a hand-built object. These drive it from an actual
+ * config.json on disk, the way index.ts does at every boot, so the drift
+ * refusal is pinned end to end rather than only as a pure function.
+ */
+describe("resolveBootConfig", () => {
+  it("refuses to resolve when config.json on disk still carries a stale modsDir", async () => {
+    const cfg = makeTestConfig(root);
+    const file = join(root, "config.json");
+    // Written by hand, not via saveConfig: saveConfig deliberately omits
+    // modsDir/worldsDir, which is exactly why a legacy file that still has
+    // one is the case worth pinning here.
+    await writeFile(
+      file,
+      JSON.stringify({ ...cfg, modsDir: "C:\\Users\\someoneelse\\mods" }),
+      "utf8",
+    );
+
+    const result = await resolveBootConfig(root);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.message).toContain("modsDir");
+      expect(result.message).toContain("C:\\Users\\someoneelse\\mods");
+    }
+  });
+
+  it("resolves cleanly when the stored config's dirs agree with dataDir", async () => {
+    const cfg = makeTestConfig(root);
+    const file = join(root, "config.json");
+    await saveConfig(file, cfg);
+
+    const result = await resolveBootConfig(root);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.configFile).toBe(file);
+      expect(result.cfg.modsDir).toBe(cfg.modsDir);
+      expect(result.cfg.worldsDir).toBe(cfg.worldsDir);
+      expect(result.configWarnings).toEqual([]);
+    }
   });
 });

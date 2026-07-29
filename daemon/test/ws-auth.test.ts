@@ -45,7 +45,7 @@ beforeEach(async () => {
   const installer = new ModInstaller(cfg, registry, steam, library);
   const net = makeFakeFetch();
   const workshop = new SteamWorkshop(cfg, net.fetch);
-  app = buildServer({ cfg, configFile, pm, installer, library, sets, steam, workshop });
+  app = buildServer({ cfg, configFile, configWarnings: [], pm, installer, library, sets, steam, workshop });
   // app.inject() cannot perform a real HTTP Upgrade, so this suite is the one
   // place that stands the daemon up on a real socket - see the module doc
   // comment below for why that is load-bearing rather than a nicety.

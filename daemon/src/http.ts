@@ -44,6 +44,8 @@ export interface Deps {
   sets: ModSets;
   steam: SteamCmd;
   workshop: SteamWorkshop;
+  /** Non-fatal configuration problems, published so a client can surface them. */
+  configWarnings: string[];
 }
 
 const WORKSHOP_ID = /^\d+$/;
@@ -116,7 +118,7 @@ const errorText = (e: unknown): string =>
   e instanceof Error ? e.message : `Non-error thrown: ${String(e)}`;
 
 export function buildServer(deps: Deps): FastifyInstance {
-  const { cfg, configFile, pm, installer, library, sets, steam, workshop } = deps;
+  const { cfg, configFile, pm, installer, library, sets, steam, workshop, configWarnings } = deps;
   const app = Fastify({ logger: false });
   type Socket = { send(data: string): void };
   const sockets = new Set<Socket>();
@@ -145,16 +147,11 @@ export function buildServer(deps: Deps): FastifyInstance {
     for (const s of dead) sockets.delete(s);
   };
 
-  /**
-   * The one place a StatusPayload is built, so every channel reports the same thing.
-   * configWarnings is a stub until Task 5 wires the daemon's own boot-time
-   * configProblems() result into Deps - this compiles StatusPayload's new
-   * required field without yet reporting anything real.
-   */
+  /** The one place a StatusPayload is built, so every channel reports the same thing. */
   const statusPayload = (): StatusPayload => ({
     ...pm.status,
     activeTasks: [...activeTasks],
-    configWarnings: [],
+    configWarnings,
   });
 
   const broadcastStatus = (): void => broadcast({ type: "status", status: statusPayload() });

@@ -76,7 +76,7 @@ beforeEach(async () => {
   installer = new ModInstaller(cfg, registry, steam, library);
   net = makeFakeFetch();
   workshop = new SteamWorkshop(cfg, net.fetch);
-  app = buildServer({ cfg, configFile, pm, installer, library, sets, steam, workshop });
+  app = buildServer({ cfg, configFile, configWarnings: [], pm, installer, library, sets, steam, workshop });
 });
 
 describe("GET /api/status", () => {
@@ -97,6 +97,7 @@ describe("GET /api/status", () => {
     const selfHealApp = buildServer({
       cfg,
       configFile,
+      configWarnings: [],
       pm: deadPm,
       installer,
       library,
@@ -148,6 +149,7 @@ describe("activeTasks in the status payload", () => {
     const rejectApp = buildServer({
       cfg,
       configFile,
+      configWarnings: [],
       pm,
       installer,
       library,
@@ -1850,7 +1852,7 @@ describe("world settings", () => {
 describe("access token", () => {
   beforeEach(() => {
     cfg.authToken = "s3cret";
-    app = buildServer({ cfg, configFile, pm, installer, library, sets, steam, workshop });
+    app = buildServer({ cfg, configFile, configWarnings: [], pm, installer, library, sets, steam, workshop });
   });
 
   it("rejects a request with no token", async () => {
@@ -1905,7 +1907,7 @@ describe("access token", () => {
   // request, or the reverse - either way the operator has no usable fix.
   it("treats a whitespace-only token as unset, in both the hook and the reported flag", async () => {
     cfg.authToken = "   ";
-    const whitespaceApp = buildServer({ cfg, configFile, pm, installer, library, sets, steam, workshop });
+    const whitespaceApp = buildServer({ cfg, configFile, configWarnings: [], pm, installer, library, sets, steam, workshop });
 
     const status = await whitespaceApp.inject({ method: "GET", url: "/api/status" });
     expect(status.statusCode).toBe(200);
