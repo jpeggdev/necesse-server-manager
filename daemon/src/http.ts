@@ -79,8 +79,12 @@ const ALLOWED_CONFIG_KEYS = new Set<keyof DaemonConfig>(["owners", "lastWorld", 
  * on the LAN, and a boolean is all a client can do anything with anyway.
  */
 const publicConfig = (c: DaemonConfig): PublicDaemonConfig => {
-  const { steamApiKey, ...rest } = c;
-  return { ...rest, steamApiKeyConfigured: steamApiKey.trim().length > 0 };
+  const { steamApiKey, authToken, ...rest } = c;
+  return {
+    ...rest,
+    steamApiKeyConfigured: steamApiKey.trim().length > 0,
+    authRequired: authToken.length > 0,
+  };
 };
 
 /**
@@ -134,8 +138,17 @@ export function buildServer(deps: Deps): FastifyInstance {
     for (const s of dead) sockets.delete(s);
   };
 
-  /** The one place a StatusPayload is built, so every channel reports the same thing. */
-  const statusPayload = (): StatusPayload => ({ ...pm.status, activeTasks: [...activeTasks] });
+  /**
+   * The one place a StatusPayload is built, so every channel reports the same thing.
+   * configWarnings is a stub until Task 5 wires the daemon's own boot-time
+   * configProblems() result into Deps - this compiles StatusPayload's new
+   * required field without yet reporting anything real.
+   */
+  const statusPayload = (): StatusPayload => ({
+    ...pm.status,
+    activeTasks: [...activeTasks],
+    configWarnings: [],
+  });
 
   const broadcastStatus = (): void => broadcast({ type: "status", status: statusPayload() });
 

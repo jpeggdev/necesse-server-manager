@@ -7,6 +7,7 @@ import type { StatusPayload } from "../src/types";
 const stopped: StatusPayload = {
   state: "stopped", world: null, pid: null, startedAt: null,
   port: null, slots: null, gameVersion: null, lastError: null, activeTasks: [],
+  configWarnings: [],
 };
 const running: StatusPayload = { ...stopped, state: "running", world: "Tulsa", pid: 42, port: 14159 };
 

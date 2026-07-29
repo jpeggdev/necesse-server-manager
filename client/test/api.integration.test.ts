@@ -17,7 +17,7 @@ import { ModLibrary } from "../../daemon/src/mod-library.js";
 import { ModSets } from "../../daemon/src/mod-sets.js";
 import { SteamCmd } from "../../daemon/src/steamcmd.js";
 import { SteamWorkshop } from "../../daemon/src/steam-workshop.js";
-import { DEFAULT_CONFIG } from "../../daemon/src/config.js";
+import { makeTestConfig } from "../../daemon/test/fixtures/test-config.js";
 import { makeFakeSpawn } from "../../daemon/test/fixtures/fake-spawn.js";
 import { makeWorldZip } from "../../daemon/test/fixtures/world-zip.js";
 import { modJarBytes } from "../../daemon/test/fixtures/mod-jar.js";
@@ -37,12 +37,12 @@ beforeEach(async () => {
   await mkdir(modsDir, { recursive: true });
   await mkdir(worldsDir, { recursive: true });
   const cfg = {
-    ...DEFAULT_CONFIG,
+    ...makeTestConfig(root),
     modsDir,
     worldsDir,
     stopTimeoutMs: 50,
-    // Temp dirs only, per the rule at the top of this file: DEFAULT_CONFIG
-    // points the library and the sets at the daemon's own directory in the repo.
+    // Temp dirs only, per the rule at the top of this file: makeTestConfig
+    // points the library and the sets at its own temp root, not the repo.
     modLibraryDir: join(root, "mod-library"),
     modLibraryFile: join(root, "mod-library.json"),
     modSetsFile: join(root, "mod-sets.json"),

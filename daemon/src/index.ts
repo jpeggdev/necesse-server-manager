@@ -1,7 +1,7 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { dataDirConflict, loadConfig } from "./config.js";
+import { configProblems, fatalProblems, loadConfig, readStoredConfig } from "./config.js";
 import { buildServer } from "./http.js";
 import { ModInstaller } from "./mod-installer.js";
 import { ModLibrary } from "./mod-library.js";
@@ -36,8 +36,12 @@ const cfg = await loadConfig(configFile);
 // Before anything reads a folder or spawns anything. A daemon that reconciles
 // one mods folder while the game loads another is worse than a daemon that did
 // not start: the wrong-mod-set launch it produces looks entirely successful.
-const conflict = dataDirConflict(cfg);
-if (conflict !== null) throw new Error(`${conflict} (config: ${configFile})`);
+// Stub pending Task 5, which wires configWarnings (the non-fatal problems)
+// into the HTTP layer instead of discarding them here.
+const fatal = fatalProblems(await configProblems(cfg, await readStoredConfig(configFile)));
+if (fatal.length > 0) {
+  throw new Error(`${fatal.map((p) => p.message).join(" ")} (config: ${configFile})`);
+}
 
 const pm = new ProcessManager(cfg, spawnFn);
 const steam = new SteamCmd(cfg, spawnFn);
