@@ -49,6 +49,15 @@ describe("presentedToken", () => {
     expect(presentedToken({ headers: { authorization: "Basic abc" }, query: {} })).toBeUndefined();
     expect(presentedToken({ headers: { authorization: "Bearer" }, query: {} })).toBeUndefined();
   });
+
+  // The header value is already trimmed (`rest.join(" ").trim()` above); the
+  // query value must accept the same pasted-with-a-trailing-space token, or a
+  // WebSocket client - which has no header to fall back to - is stricter than
+  // an HTTP client for the exact same configured secret.
+  it("trims the query token the same way the header value is trimmed", () => {
+    expect(presentedToken({ headers: {}, query: { token: " abc " } })).toBe("abc");
+    expect(presentedToken({ headers: { authorization: "Bearer  abc " }, query: {} })).toBe("abc");
+  });
 });
 
 describe("AUTH_FAILURE_MESSAGE", () => {

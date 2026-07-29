@@ -46,7 +46,11 @@ export function presentedToken(req: {
   const q = req.query;
   if (typeof q === "object" && q !== null) {
     const token = (q as { token?: unknown }).token;
-    if (typeof token === "string" && token.length > 0) return token;
+    // Trimmed the same way the header value is, so one token has one accepted
+    // spelling regardless of which channel carried it - a WebSocket cannot
+    // send a header, so this is the only place a pasted trailing space would
+    // otherwise be caught, and it is the hardest of the two to diagnose from.
+    if (typeof token === "string" && token.trim().length > 0) return token.trim();
   }
   return undefined;
 }

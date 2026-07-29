@@ -379,10 +379,14 @@ export function buildServer(deps: Deps): FastifyInstance {
    * upgrade request, which is what lets the socket be guarded by this one
    * implementation instead of a second copy.
    *
-   * OPTIONS is exempt: a CORS preflight never carries Authorization (the
-   * browser strips it), so rejecting preflights would make every
-   * cross-origin request fail with a message about a token that was, in fact,
-   * about to be sent.
+   * OPTIONS is exempt, though it is belt-and-braces rather than the thing that
+   * makes preflight work: @fastify/cors registers its own onRequest hook
+   * before this one and already answers (and short-circuits) every OPTIONS
+   * request, so in practice this branch never runs. It stays as a second line
+   * of defence against that ordering changing - a CORS preflight never
+   * carries Authorization (the browser strips it), so if this hook ever did
+   * see one, rejecting it would fail every cross-origin request with a
+   * message about a token that was, in fact, about to be sent.
    */
   app.addHook("onRequest", async (req, reply) => {
     if (req.method === "OPTIONS") return;
