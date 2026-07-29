@@ -23,12 +23,15 @@ import { makeFakeSpawn } from "../../daemon/test/fixtures/fake-spawn.js";
 import { makeWorldZip } from "../../daemon/test/fixtures/world-zip.js";
 import { modJarBytes } from "../../daemon/test/fixtures/mod-jar.js";
 import { makeApi } from "../src/api";
+import { wsUrl, type Connection } from "../src/settings";
 
 /** Small enough that the oversize case is a few KB rather than 64MB of payload. */
 const UPLOAD_LIMIT = 4096;
 
 /** Every call in this file authenticates with this token; the rejection cases override it. */
 const TOKEN = "integration-test-token";
+
+const UPGRADE_TIMEOUT_MS = 2000;
 
 /**
  * The HTTP status the daemon answers a WebSocket upgrade with.
@@ -38,9 +41,9 @@ const TOKEN = "integration-test-token";
  * connect" identically for a 401 and a refused connection, and telling those
  * apart is the whole point of this test.
  */
-const upgradeStatus = (wsUrl: string): Promise<number> =>
+const upgradeStatus = (url: string): Promise<number> =>
   new Promise((resolve, reject) => {
-    const u = new URL(wsUrl);
+    const u = new URL(url);
     const req = httpRequest({
       host: u.hostname,
       port: u.port,
@@ -52,17 +55,42 @@ const upgradeStatus = (wsUrl: string): Promise<number> =>
         "sec-websocket-version": "13",
       },
     });
+    const timer = setTimeout(() => {
+      req.destroy();
+      reject(new Error(`No upgrade response from ${url} within ${UPGRADE_TIMEOUT_MS}ms`));
+    }, UPGRADE_TIMEOUT_MS);
     req.on("upgrade", (res, socket) => {
+      clearTimeout(timer);
       socket.destroy();
-      resolve(res.statusCode ?? 101);
+      // res.statusCode is only optional in the type, not in practice for a real
+      // upgrade response - reading it straight through, with no fallback, means
+      // a daemon that somehow omitted it fails this assertion instead of the
+      // test quietly reporting 101 regardless of what actually happened.
+      const status = res.statusCode;
+      if (status === undefined) {
+        reject(new Error("upgrade response carried no status code"));
+        return;
+      }
+      resolve(status);
     });
     req.on("response", (res) => {
+      clearTimeout(timer);
       res.resume();
+      res.socket?.destroy();
       resolve(res.statusCode ?? 0);
     });
-    req.on("error", reject);
+    req.on("error", (e) => {
+      clearTimeout(timer);
+      reject(e);
+    });
     req.end();
   });
+
+/** The Connection wsUrl() needs, built from the ephemeral port app.listen() chose this run. */
+const wsConnection = (token: string): Connection => {
+  const u = new URL(baseUrl);
+  return { host: u.hostname, port: Number(u.port), token };
+};
 
 let app: ReturnType<typeof buildServer>;
 let baseUrl: string;
@@ -357,14 +385,14 @@ describe("access token over the real transport", () => {
   });
 
   it("rejects the websocket upgrade without a token", async () => {
-    const url = `${baseUrl.replace(/^http/, "ws")}/ws`;
-    const status = await upgradeStatus(url);
+    // Built by the app's own wsUrl(), not a hand-rolled string: a regression that
+    // stopped the client attaching ?token= would otherwise go unnoticed here.
+    const status = await upgradeStatus(wsUrl(wsConnection("")));
     expect(status).toBe(401);
   });
 
   it("accepts the websocket upgrade with the token on the query string", async () => {
-    const url = `${baseUrl.replace(/^http/, "ws")}/ws?token=${encodeURIComponent(TOKEN)}`;
-    const status = await upgradeStatus(url);
+    const status = await upgradeStatus(wsUrl(wsConnection(TOKEN)));
     expect(status).toBe(101);
   });
 });
