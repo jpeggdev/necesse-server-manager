@@ -99,4 +99,39 @@ describe("migrateState", () => {
     expect(r.copied).toEqual(["mods.json"]);
     expect(await readFile(join(state, "mods.json"), "utf8")).toBe("[]");
   });
+
+  it("recursively verifies deep nested directories", async () => {
+    await mkdir(join(install, "mod-library", "abc", "nested"), { recursive: true });
+    await writeFile(join(install, "mod-library", "abc", "nested", "deep.jar"), "DEEP_JAR", "utf8");
+
+    const r = await migrateState(install, state);
+
+    expect(r.copied).toContain("mod-library");
+    expect(await readFile(join(state, "mod-library", "abc", "nested", "deep.jar"), "utf8")).toBe("DEEP_JAR");
+  });
+
+  it("refuses to merge when destination mod-library exists with deep nested files", async () => {
+    await mkdir(join(install, "mod-library", "abc", "nested"), { recursive: true });
+    await writeFile(join(install, "mod-library", "abc", "nested", "deep.jar"), "SOURCE", "utf8");
+
+    await mkdir(join(state, "mod-library", "abc", "nested"), { recursive: true });
+    await writeFile(join(state, "mod-library", "abc", "nested", "deep.jar"), "EXISTING", "utf8");
+
+    await expect(migrateState(install, state)).rejects.toThrow(/mod-library/);
+    expect(await readFile(join(state, "mod-library", "abc", "nested", "deep.jar"), "utf8")).toBe("EXISTING");
+  });
+
+  it("on partial failure, leaves all originals in place and retains successfully-copied files", async () => {
+    await mkdir(state, { recursive: true });
+    await writeFile(join(install, "config.json"), '{"first":1}', "utf8");
+    await writeFile(join(install, "mods.json"), "[]", "utf8");
+    await writeFile(join(state, "mods.json"), "EXISTING_MODS", "utf8");
+
+    await expect(migrateState(install, state)).rejects.toThrow(/mods\.json/);
+
+    expect((await stat(join(install, "config.json"))).isFile()).toBe(true);
+    expect((await stat(join(install, "mods.json"))).isFile()).toBe(true);
+    expect(await readFile(join(state, "config.json"), "utf8")).toBe('{"first":1}');
+    expect(await readFile(join(state, "mods.json"), "utf8")).toBe("EXISTING_MODS");
+  });
 });
