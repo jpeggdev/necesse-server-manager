@@ -79,6 +79,16 @@ describe("probeConfig", () => {
     expect(r.javaExe).toBe(onPath);
   });
 
+  it("reports no java when neither the bundled jre nor the PATH candidate is actually there", async () => {
+    const root = "C:\\necesseserver";
+    const r = await probeConfig({
+      pathDirs: ["C:\\Java\\bin"],
+      extraServerRoots: [root],
+      exists: fsWith([join(root, "Server.jar")]),
+    });
+    expect(r.javaExe).toBeNull();
+  });
+
   it("finds steamcmd on PATH", async () => {
     const r = await probeConfig({
       pathDirs: ["C:\\steamcmd"],
