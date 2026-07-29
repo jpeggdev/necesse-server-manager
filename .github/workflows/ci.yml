@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    # Windows, not Ubuntu. This codebase is full of Windows path handling,
+    # case-insensitive comparisons and backslash separators; a green Linux run
+    # would prove nothing about it.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install daemon deps
+        run: npm ci
+        working-directory: daemon
+      - name: Install client deps
+        run: npm ci
+        working-directory: client
+      - name: Typecheck daemon
+        run: npx tsc --noEmit
+        working-directory: daemon
+      - name: Typecheck client
+        run: npx tsc --noEmit
+        working-directory: client
+      - name: Test daemon
+        run: npx vitest run
+        working-directory: daemon
+      - name: Test client
+        run: npx vitest run
+        working-directory: client
+      - name: Shared types are byte-identical
+        shell: pwsh
+        run: |
+          $a = (Get-FileHash daemon/src/types.ts -Algorithm SHA256).Hash
+          $b = (Get-FileHash client/src/types.ts -Algorithm SHA256).Hash
+          if ($a -ne $b) { throw "daemon/src/types.ts and client/src/types.ts have diverged" }

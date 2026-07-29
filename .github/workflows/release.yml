@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build daemon
+        working-directory: daemon
+        run: |
+          npm ci
+          npm run build
+
+      - name: Stage the daemon zip
+        shell: pwsh
+        run: |
+          $stage = "staging/necesse-daemon"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item -Recurse daemon/dist "$stage/dist"
+          Copy-Item daemon/package.json,daemon/package-lock.json $stage
+          Copy-Item daemon/setup.cmd,daemon/start-daemon.cmd,daemon/migrate.cmd $stage
+          Copy-Item scripts/03-register-task.ps1 "$stage/register-task.ps1"
+          Copy-Item config.example.json $stage
+          Push-Location $stage
+          npm ci --omit=dev
+          Pop-Location
+          Compress-Archive -Path "$stage/*" -DestinationPath "necesse-daemon-${{ github.ref_name }}.zip"
+
+      - name: Build client
+        working-directory: client
+        run: |
+          npm ci
+          npm run tauri build
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          # productName in client/src-tauri/tauri.conf.json is "Necesse Server
+          # GUI" (with spaces), so the NSIS/WiX bundlers name the installers
+          # "Necesse Server GUI_<version>_x64-setup.exe" and
+          # "Necesse Server GUI_<version>_x64_en-US.msi". That does not break
+          # these patterns: each is a directory glob ending in a bare `*`
+          # wildcard, which matches the whole filename including the spaces
+          # in it - nothing here is a literal filename that would need
+          # escaping. softprops/action-gh-release resolves these with
+          # node-glob (not a shell), so the space-bearing path is never
+          # word-split, and it uploads the asset under a name with the
+          # spaces replaced by dots.
+          files: |
+            necesse-daemon-${{ github.ref_name }}.zip
+            client/src-tauri/target/release/bundle/nsis/*.exe
+            client/src-tauri/target/release/bundle/msi/*.msi
+          body: |
+            The installer is unsigned, so Windows SmartScreen will warn on first run.
+            Choose "More info" then "Run anyway".
+
+            Upgrading from an install that kept its state beside dist/: run migrate.cmd once.
