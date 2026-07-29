@@ -12,6 +12,21 @@ export interface ConnectionSettingsProps {
 const DEFAULT_PORT = "8710";
 
 /**
+ * Host and port validity, shared by Connect and Test so the two can never
+ * disagree about what counts as a usable address - Test used to run the raw,
+ * untrimmed, unchecked fields, so a host with stray spaces or an empty port
+ * could test a different (and nonsensical) URL than Connect would ever save.
+ */
+function validateConnection(host: string, portText: string): string | null {
+  if (host.trim().length === 0) return "Host is required.";
+  const p = Number(portText);
+  if (!Number.isInteger(p) || p < 1 || p > 65535) {
+    return "Port must be a whole number between 1 and 65535.";
+  }
+  return null;
+}
+
+/**
  * Where the app is told which daemon to talk to, replacing every compiled-in
  * address. Shown full-screen in place of the app (first run, or no saved
  * connection) or over it (re-editing after a rejected token).
@@ -32,18 +47,13 @@ export function ConnectionSettings({ initial, onSave, onCancel }: ConnectionSett
 
   const onSubmit = (e: FormEvent) => {
     e.preventDefault();
-    const h = host.trim();
-    if (h.length === 0) {
-      setFormError("Host is required.");
-      return;
-    }
-    const p = Number(port);
-    if (!Number.isInteger(p) || p < 1 || p > 65535) {
-      setFormError("Port must be a whole number between 1 and 65535.");
+    const err = validateConnection(host, port);
+    if (err !== null) {
+      setFormError(err);
       return;
     }
     setFormError(null);
-    onSave({ host: h, port: p, token });
+    onSave({ host: host.trim(), port: Number(port), token });
   };
 
   /**
@@ -53,12 +63,22 @@ export function ConnectionSettings({ initial, onSave, onCancel }: ConnectionSett
    * real API call still fails. DaemonError vs. everything else is what tells a
    * reached-but-rejected daemon apart from one that could not be reached at
    * all; those need completely different fixes from the operator.
+   *
+   * Validated with the same rule Connect uses, and BEFORE attempting anything:
+   * an empty port coerces to 0, which would silently test `http://h:0` and
+   * report "could not reach" for a problem that is actually "you left the
+   * port blank" - a different fix entirely.
    */
   const onTest = async () => {
+    const err = validateConnection(host, port);
+    if (err !== null) {
+      setTestResult(err);
+      return;
+    }
     setTesting(true);
     setTestResult(null);
     try {
-      const api = makeApi(baseUrl({ host, port: Number(port), token }), token);
+      const api = makeApi(baseUrl({ host: host.trim(), port: Number(port), token }), token);
       await api.status();
       setTestResult("Connected.");
     } catch (e) {
@@ -72,12 +92,18 @@ export function ConnectionSettings({ initial, onSave, onCancel }: ConnectionSett
     }
   };
 
+  // Reported through the same status line Test uses, rather than left silent,
+  // so a browser/window with no clipboard access says so instead of leaving
+  // the operator wondering whether Copy did anything at all.
   const onCopy = () => {
-    if (navigator.clipboard) {
-      void navigator.clipboard.writeText(
-        encodeConnection({ host, port: Number(port) || 0, token }),
-      );
+    if (!navigator.clipboard) {
+      setTestResult("Clipboard access is not available in this window.");
+      return;
     }
+    navigator.clipboard
+      .writeText(encodeConnection({ host: host.trim(), port: Number(port) || 0, token }))
+      .then(() => setTestResult("Copied to clipboard."))
+      .catch((e: Error) => setTestResult(`Could not copy to clipboard: ${e.message}`));
   };
 
   const onApplyPasted = () => {
@@ -123,10 +149,8 @@ export function ConnectionSettings({ initial, onSave, onCancel }: ConnectionSett
 
         <div className="conn-actions">
           <button type="submit">{initial === null ? "Connect" : "Save"}</button>
-          {/* Never "Test connection" - that name contains "connect" and would
-              also match the Connect/Save query above, making both ambiguous. */}
           <button type="button" onClick={() => void onTest()} disabled={testing}>
-            {testing ? "Testing…" : "Test"}
+            {testing ? "Testing…" : "Test connection"}
           </button>
           {initial !== null && (
             <button type="button" onClick={onCancel}>

@@ -51,6 +51,8 @@ let holdWorldMods: string | null = null;
 let releaseWorldMods: (() => void) | null = null;
 /** False for a daemon too old to have GET /api/mods/library. */
 let libraryEndpointExists = true;
+/** Non-fatal daemon configuration problems, e.g. a missing steamcmd. */
+let configWarnings: string[] = [];
 
 /*
  * The mod library the daemon holds. Two origins, because the panel treats them
@@ -118,7 +120,7 @@ function statusPayload() {
     gameVersion: null,
     lastError: null,
     activeTasks: [...activeTasks],
-    configWarnings: [],
+    configWarnings: [...configWarnings],
   };
 }
 
@@ -142,6 +144,7 @@ beforeEach(() => {
   holdWorldMods = null;
   releaseWorldMods = null;
   libraryEndpointExists = true;
+  configWarnings = [];
   worldSets = {
     Tulsa: { modIds: ["safehaven.qol"], missing: [], configured: true },
     "Jeff and Eli": { modIds: ["gagadoliano.summonerexpansion"], missing: [], configured: true },
@@ -531,6 +534,25 @@ describe("App against a daemon with no mod library", () => {
     await settle();
     expect(screen.queryByText(/^404/)).toBeNull();
     expect(screen.getByRole("button", { name: /^stop$|^start$/i })).toBeTruthy();
+  });
+});
+
+/*
+ * Non-fatal daemon-side configuration problems (currently only a missing
+ * steamcmd) travel on every status payload so the operator sees them before
+ * they discover one by trying to install a mod.
+ */
+describe("App config warnings", () => {
+  it("surfaces a warning the daemon reports", async () => {
+    configWarnings = ["steamcmd.exe was not found; mod installs and updates will fail."];
+    await mountConnected();
+    expect(await screen.findByText(/steamcmd\.exe was not found/i)).toBeTruthy();
+  });
+
+  it("shows two warnings that happen to say the same thing", async () => {
+    configWarnings = ["duplicate warning", "duplicate warning"];
+    await mountConnected();
+    expect(await screen.findAllByText("duplicate warning")).toHaveLength(2);
   });
 });
 

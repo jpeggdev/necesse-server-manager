@@ -299,8 +299,11 @@ function ConnectedApp({
   return (
     <main className="app">
       <ErrorBanner error={error} onDismiss={() => setError(null)} />
-      {status.configWarnings.map((w) => (
-        <p key={w} className="hint hint-warn config-warning">
+      {status.configWarnings.map((w, i) => (
+        // Index, not the text: two warnings can legitimately say the same
+        // thing (e.g. steamcmd missing, reported the same way after every
+        // reconnect), and a duplicate string as the key would collide.
+        <p key={i} className="hint hint-warn config-warning">
           {w}
         </p>
       ))}
