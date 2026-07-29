@@ -140,18 +140,23 @@ daemon stopped if you need to change something afterward.
 | `stopTimeoutMs` | How long a graceful stop is given before the daemon reports it as timed out (it does not kill the process on timeout). Default `90000`. |
 | `jvmArgs` | JVM flags passed to `Server.jar`. Sensible defaults are shipped; only change these if you know why. |
 
-Two keys are deliberately left out of that list because they should never
-be set by hand: `modsDir` and `worldsDir` are derived from `dataDir`
-(`<dataDir>\mods` and `<dataDir>\saves\worlds`), and the daemon computes
-them itself every time it starts. If a config file still carries either
-key and it disagrees with what `dataDir` implies, the daemon refuses to
-boot rather than guess. The daemon reads and writes one mods folder while
-the game is launched against whatever `-datadir` points to, and a silent
-mismatch would mean the game loads a different mod set than the one the
-daemon prepared, with nothing reporting that as a failure. A handful of
-other keys (`modLibraryDir`, `modLibraryFile`, `modSetsFile`,
-`modUploadMaxBytes`, `serverAppId`, `workshopAppId`) exist with working
-defaults and normally don't need to be touched at all.
+Five keys are deliberately left out of that list because they are derived,
+not configured, and the daemon recomputes all five every time it starts:
+
+- `modsDir` and `worldsDir` come from `dataDir` (`<dataDir>\mods` and
+  `<dataDir>\saves\worlds`). If a config file still carries either key and
+  it disagrees with what `dataDir` implies, the daemon refuses to boot
+  rather than guess. The daemon reads and writes one mods folder while the
+  game is launched against whatever `-datadir` points to, and a silent
+  mismatch would mean the game loads a different mod set than the one the
+  daemon prepared, with nothing reporting that as a failure.
+- `modLibraryDir`, `modLibraryFile` and `modSetsFile` live in the state
+  directory alongside `config.json`. An older config file may still carry
+  them pointing into an install directory; those values are ignored and
+  dropped the next time the daemon writes the file.
+
+A few other keys (`modUploadMaxBytes`, `serverAppId`, `workshopAppId`)
+exist with working defaults and normally don't need to be touched at all.
 
 ## Building from source
 

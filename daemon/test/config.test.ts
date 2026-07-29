@@ -15,12 +15,20 @@ import {
 import { makeTestConfig } from "./fixtures/test-config.js";
 
 let root: string;
+let state: string;
+const savedStateEnv = process.env.NECESSE_MANAGER_DATA;
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "necesse-config-"));
+  // Pins where stateDir() resolves to for this file, so the state-derived paths
+  // are a known value rather than this machine's %PROGRAMDATA%.
+  state = join(root, "state");
+  process.env.NECESSE_MANAGER_DATA = state;
 });
 
 afterEach(async () => {
+  if (savedStateEnv === undefined) delete process.env.NECESSE_MANAGER_DATA;
+  else process.env.NECESSE_MANAGER_DATA = savedStateEnv;
   await rm(root, { recursive: true, force: true });
 });
 
@@ -48,6 +56,39 @@ describe("loadConfig", () => {
     expect(cfg.worldsDir).toBe(worldsDirFor("C:\\Data\\Necesse"));
   });
 
+  /**
+   * The exact shape every install predating the state directory has on disk:
+   * `saveConfig` used to write these three, and they used to default to the
+   * install directory. If a stored value wins, the daemon reads its mod library
+   * out of a directory the upgrade instructions tell the operator to delete -
+   * and `ModLibrary.load()` reports the resulting missing manifest as an empty
+   * library rather than as a failure, so nothing anywhere says the jars are
+   * gone.
+   */
+  it("ignores install-directory values for the state-derived paths", async () => {
+    const file = join(root, "config.json");
+    const installDir = "C:\\Users\\someone\\necesse-daemon";
+    await writeFile(
+      file,
+      JSON.stringify({
+        dataDir: "C:\\Data\\Necesse",
+        modLibraryDir: join(installDir, "mod-library"),
+        modLibraryFile: join(installDir, "mod-library.json"),
+        modSetsFile: join(installDir, "mod-sets.json"),
+      }),
+      "utf8",
+    );
+
+    const cfg = await loadConfig(file);
+
+    for (const value of [cfg.modLibraryDir, cfg.modLibraryFile, cfg.modSetsFile]) {
+      expect(value).not.toContain(installDir);
+    }
+    expect(cfg.modLibraryDir).toBe(join(state, "mod-library"));
+    expect(cfg.modLibraryFile).toBe(join(state, "mod-library.json"));
+    expect(cfg.modSetsFile).toBe(join(state, "mod-sets.json"));
+  });
+
   it("tolerates a BOM", async () => {
     const file = join(root, "config.json");
     await writeFile(file, "\uFEFF" + JSON.stringify({ port: 9999 }), "utf8");
@@ -66,15 +107,31 @@ describe("saveConfig", () => {
     const file = join(root, "config.json");
     await saveConfig(file, makeTestConfig(root));
     const written = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>;
-    expect(written).not.toHaveProperty("modsDir");
-    expect(written).not.toHaveProperty("worldsDir");
+    for (const key of [
+      "modsDir",
+      "worldsDir",
+      "modLibraryDir",
+      "modLibraryFile",
+      "modSetsFile",
+    ]) {
+      expect(written).not.toHaveProperty(key);
+    }
     expect(written.dataDir).toBe(join(root, "data"));
   });
 });
 
 describe("DEFAULT_CONFIG", () => {
   it("carries no machine-specific paths", async () => {
-    for (const key of ["dataDir", "serverRoot", "javaExe", "serverJar", "steamcmdExe"] as const) {
+    for (const key of [
+      "dataDir",
+      "serverRoot",
+      "javaExe",
+      "serverJar",
+      "steamcmdExe",
+      "modLibraryDir",
+      "modLibraryFile",
+      "modSetsFile",
+    ] as const) {
       expect(DEFAULT_CONFIG[key]).toBe("");
     }
   });
@@ -180,6 +237,27 @@ describe("resolveBootConfig", () => {
       expect(result.cfg.modsDir).toBe(cfg.modsDir);
       expect(result.cfg.worldsDir).toBe(cfg.worldsDir);
       expect(result.configWarnings).toEqual([]);
+    }
+  });
+
+  /**
+   * The non-fatal half of `configProblems` has exactly one carrier: the
+   * `problems.filter(...).map(...)` that becomes `configWarnings`. Replacing
+   * that expression with `[]` left the whole daemon suite green, because every
+   * other test of it calls `configProblems` directly and never looks at what
+   * `resolveBootConfig` does with the result. "steamcmd was not found" reaching
+   * the operator depends on that one line, so it is asserted here.
+   */
+  it("resolves ok but carries the steamcmd warning through to the caller", async () => {
+    const cfg = { ...makeTestConfig(root), steamcmdExe: join(root, "nope", "steamcmd.exe") };
+    await saveConfig(join(root, "config.json"), cfg);
+
+    const result = await resolveBootConfig(root);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.configWarnings.some((w) => w.includes("steamcmdExe"))).toBe(true);
+      expect(result.configWarnings.some((w) => w.includes(cfg.steamcmdExe))).toBe(true);
     }
   });
 });
