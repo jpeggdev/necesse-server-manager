@@ -7,6 +7,7 @@ import {
   legacyStateRefusal,
   migrateState,
   stateDirPopulated,
+  verifyTree,
 } from "../src/migrate-state.js";
 
 let root: string;
@@ -100,7 +101,7 @@ describe("migrateState", () => {
     expect(await readFile(join(state, "mods.json"), "utf8")).toBe("[]");
   });
 
-  it("recursively verifies deep nested directories", async () => {
+  it("copies deep nested directories", async () => {
     await mkdir(join(install, "mod-library", "abc", "nested"), { recursive: true });
     await writeFile(join(install, "mod-library", "abc", "nested", "deep.jar"), "DEEP_JAR", "utf8");
 
@@ -133,5 +134,43 @@ describe("migrateState", () => {
     expect((await stat(join(install, "mods.json"))).isFile()).toBe(true);
     expect(await readFile(join(state, "config.json"), "utf8")).toBe('{"first":1}');
     expect(await readFile(join(state, "mods.json"), "utf8")).toBe("EXISTING_MODS");
+  });
+});
+
+describe("verifyTree", () => {
+  it("resolves when identical nested trees exist at multiple levels", async () => {
+    await mkdir(join(state, "abc", "nested", "deep"), { recursive: true });
+    await writeFile(join(state, "abc", "nested", "file1.txt"), "CONTENT_1", "utf8");
+    await writeFile(join(state, "abc", "nested", "deep", "file2.txt"), "CONTENT_2", "utf8");
+
+    const from = join(root, "from");
+    await mkdir(join(from, "abc", "nested", "deep"), { recursive: true });
+    await writeFile(join(from, "abc", "nested", "file1.txt"), "CONTENT_1", "utf8");
+    await writeFile(join(from, "abc", "nested", "deep", "file2.txt"), "CONTENT_2", "utf8");
+
+    await expect(verifyTree(from, state)).resolves.toBeUndefined();
+  });
+
+  it("throws naming the deep file when bytes mismatch two levels down", async () => {
+    await mkdir(join(state, "abc", "nested"), { recursive: true });
+    await writeFile(join(state, "abc", "nested", "file.jar"), "WRONG", "utf8");
+
+    const from = join(root, "from");
+    await mkdir(join(from, "abc", "nested"), { recursive: true });
+    await writeFile(join(from, "abc", "nested", "file.jar"), "CORRECT", "utf8");
+
+    await expect(verifyTree(from, state)).rejects.toThrow(/file\.jar/);
+  });
+
+  it("throws when a file exists in source but is missing from destination", async () => {
+    await mkdir(join(state, "abc", "nested"), { recursive: true });
+    await writeFile(join(state, "abc", "nested", "existing.txt"), "EXISTS", "utf8");
+
+    const from = join(root, "from");
+    await mkdir(join(from, "abc", "nested"), { recursive: true });
+    await writeFile(join(from, "abc", "nested", "existing.txt"), "EXISTS", "utf8");
+    await writeFile(join(from, "abc", "nested", "missing.txt"), "NOT_COPIED", "utf8");
+
+    await expect(verifyTree(from, state)).rejects.toThrow(/missing\.txt/);
   });
 });

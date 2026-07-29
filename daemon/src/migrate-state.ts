@@ -95,8 +95,12 @@ export async function migrateState(
   return { copied };
 }
 
-/** Every file under `from` exists under `to` with identical bytes. */
-async function verifyTree(from: string, to: string): Promise<void> {
+/**
+ * Verifies that every file under `from` exists under `to` with identical bytes.
+ * Exported because it is load-bearing: a verification that cannot be tested
+ * independently of the copy it follows is not pinned by any test.
+ */
+export async function verifyTree(from: string, to: string): Promise<void> {
   for (const entry of await readdir(from, { withFileTypes: true })) {
     const a = join(from, entry.name);
     const b = join(to, entry.name);
