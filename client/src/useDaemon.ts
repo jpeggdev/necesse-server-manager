@@ -1,7 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { baseUrl, wsUrl, type Connection } from "./settings";
-import { UNAUTHORIZED_STATUS, makeApi, type Api, type WorldsResponse } from "./api";
-import { DaemonError } from "./api";
+import { DaemonError, UNAUTHORIZED_STATUS, makeApi, type Api, type WorldsResponse } from "./api";
 import type {
   ModLibraryEntry,
   ModListResponse,
@@ -93,11 +92,20 @@ export interface DaemonState {
 export function useDaemon(conn: Connection): DaemonState {
   const base = baseUrl(conn);
   const socketUrl = wsUrl(conn);
-  // Lazy useState initializer (not useRef(makeApi(...)).current) so makeApi
-  // runs exactly once - a ref initializer argument is still evaluated (and
-  // discarded) on every render.
-  const [api] = useState<Api>(() => makeApi(base, conn.token));
+  // useMemo, not a lazy useState initializer: base and token have to move
+  // together with socketUrl when the connection changes, or HTTP calls would
+  // keep hitting the old daemon with the old token while the socket reopens
+  // at the new address. Keyed on the two primitives that actually determine
+  // the request target, not on `conn` itself - `conn` is a fresh object every
+  // render (App.tsx re-derives it), and memoizing on its identity would
+  // rebuild `api` on every render for no reason.
+  const api = useMemo<Api>(() => makeApi(base, conn.token), [base, conn.token]);
   const [unauthorized, setUnauthorized] = useState(false);
+  // A token edited from the settings screen deserves a fresh attempt, not a
+  // lockout that outlives the correction until the app restarts.
+  useEffect(() => {
+    setUnauthorized(false);
+  }, [base, conn.token]);
   const [status, setStatus] = useState<StatusPayload | null>(null);
   const [worlds, setWorlds] = useState<WorldsResponse | null>(null);
   const [mods, setMods] = useState<ModListResponse | null>(null);

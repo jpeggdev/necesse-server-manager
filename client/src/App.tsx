@@ -17,8 +17,11 @@ const MODS_WIDTH_MIN = 300;
 const MODS_WIDTH_MAX = 900;
 
 // Task 9 replaces this with the connection screen; until then, whatever was
-// last saved (or this same default) is what every session talks to.
-const DEFAULT_CONNECTION = { host: "192.168.1.106", port: 8710, token: "" };
+// last saved (or this same default) is what every session talks to. Localhost,
+// not a LAN address: this repo ships to strangers, and a real IP baked in here
+// would silently point a fresh install at somebody else's machine and then
+// blame it for the connection failure.
+const DEFAULT_CONNECTION = { host: "127.0.0.1", port: 8710, token: "" };
 
 export default function App() {
   const {

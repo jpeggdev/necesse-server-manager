@@ -283,6 +283,41 @@ describe("useDaemon websocket connection failures", () => {
     }
   });
 
+  it("stops retrying and reports unauthorized once the HTTP probe comes back 401", async () => {
+    // The socket itself never carries a status code for a rejected upgrade -
+    // the only channel that can distinguish "wrong token" from "daemon down"
+    // is diagnoseConnectFailure's own HTTP probe, so that is what has to 401
+    // here for the loop to have anything to react to.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: false,
+        status: 401,
+        json: async () => ({ ok: false, error: "bad token" }),
+      })),
+    );
+    vi.useFakeTimers();
+    try {
+      const { result, unmount } = renderHook(() => useDaemon({ host: "h", port: 1, token: "bad" }));
+      for (let i = 0; i < WS_FAILURE_THRESHOLD; i++) await failConnection();
+
+      expect(result.current.unauthorized).toBe(true);
+      const socketsAtLockout = FakeWebSocket.instances.length;
+
+      // The actual claim under test: not just that the flag is set, but that
+      // the retry loop that was scheduled before the 401 landed does not fire,
+      // and nothing schedules another one after it either.
+      act(() => {
+        vi.advanceTimersByTime(10_000); // several multiples of the hook's 2s retry
+      });
+      expect(FakeWebSocket.instances.length).toBe(socketsAtLockout);
+
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not raise a connection error for a socket that keeps opening and dropping", async () => {
     // A daemon being restarted drops the socket repeatedly, but each attempt
     // succeeds - that is a working setup, not a broken one, and the counter
