@@ -49,16 +49,13 @@ scp -i $key -r "$repo\daemon\dist"              "${remote}:$destFwd/"
 scp -i $key    "$repo\daemon\package.json"      "${remote}:$destFwd/"
 scp -i $key    "$repo\daemon\package-lock.json" "${remote}:$destFwd/"
 
-# Seed mods.json only if absent -- never clobber live state. Clobbering it
-# would destroy the record of which jar belongs to which workshop id.
-$state = Invoke-RemoteScript "if (Test-Path '$dest\mods.json') { Write-Output 'MODS_EXISTS' } else { Write-Output 'MODS_MISSING' }"
-
-if ($state -match "MODS_MISSING") {
-  scp -i $key "$repo\scripts\seed\mods.json" "${remote}:$destFwd/mods.json"
-  Write-Host "Seeded mods.json (none existed on SERVER)."
-} else {
-  Write-Host "mods.json already exists on SERVER -- left untouched."
-}
+# Nothing is seeded into $dest. State (config.json, mods.json, the mod
+# library, mod-sets.json) lives in the daemon's state directory, not beside
+# dist/ -- see CLAUDE.md. mods.json is also one of LEGACY_STATE_FILES: writing
+# it here would make a fresh install look like a pre-migration one and refuse
+# to boot demanding migrate.cmd, even though nothing was ever migrated. The
+# daemon creates it on first mod install; ModRegistry.load() treats a missing
+# file as zero mods, not an error.
 
 Invoke-RemoteScript @"
 Set-Location '$dest'

@@ -4,7 +4,7 @@ import { makeFakeSpawn } from "./fixtures/fake-spawn.js";
 import { DEFAULT_CONFIG } from "../src/config.js";
 import { join } from "node:path";
 
-const cfg = { ...DEFAULT_CONFIG, steamcmdExe: "C:\\Users\\jeffp\\steam\\steamcmd.exe" };
+const cfg = { ...DEFAULT_CONFIG, steamcmdExe: "C:\\Users\\testuser\\steam\\steamcmd.exe" };
 
 let spawn: ReturnType<typeof makeFakeSpawn>;
 let steam: SteamCmd;
@@ -43,7 +43,7 @@ describe("argument construction", () => {
 
   it("resolves the workshop content dir next to the steamcmd executable", () => {
     expect(steam.workshopItemDir("3731244177")).toBe(
-      join("C:\\Users\\jeffp\\steam", "steamapps", "workshop", "content", "1169040", "3731244177"),
+      join("C:\\Users\\testuser\\steam", "steamapps", "workshop", "content", "1169040", "3731244177"),
     );
   });
 });

@@ -23,22 +23,24 @@ Run the two packages separately; there is no workspace root.
 kill a live game session. Before `02-deploy.ps1` or `04-restart-daemon.ps1`,
 confirm nobody is playing — `GET /api/status` reporting `stopped` is the check.
 
-`02-deploy.ps1` seeds `mods.json` only when absent. That is deliberate:
-`mods.json` is the only record of which jar belongs to which workshop id, and
-clobbering it strands every installed mod as untracked. It no longer seeds
-`config.json` — writing that file is the setup wizard's job (see below).
-
-**Daemon state lives in `%PROGRAMDATA%\NecesseServerManager`, not beside
-`dist/`** (overridable with the `NECESSE_MANAGER_DATA` environment variable).
-That includes `config.json`, `mods.json`, `mod-library/`, `mod-library.json`
-and `mod-sets.json` (see `docs/mod-sets-design.md`); the library is the only
-copy of every uploaded and hand-placed jar, and the sets are what each world
-loads. Because none of that lives in the install directory, the install
-directory holds nothing irreplaceable — **"delete the folder and unzip the new
-release" is the correct upgrade, not a dangerous one.** An install whose state
-is still sitting beside `dist/` (from before this split existed) refuses to
-boot and names `migrate.cmd`, which copies the old files across rather than
-moving them, so the originals stay in place until you delete them.
+`02-deploy.ps1` copies `dist/`, `package.json` and `package-lock.json` and
+seeds nothing. **Daemon state lives in `%PROGRAMDATA%\NecesseServerManager`,
+not beside `dist/`** (overridable with the `NECESSE_MANAGER_DATA` environment
+variable). That includes `config.json`, `mods.json`, `mod-library/`,
+`mod-library.json` and `mod-sets.json` (see `docs/mod-sets-design.md`); the
+library is the only copy of every uploaded and hand-placed jar, and the sets
+are what each world loads. Because none of that lives in the install
+directory, the install directory holds nothing irreplaceable — **"delete the
+folder and unzip the new release" is the correct upgrade, not a dangerous
+one.** Deploy must never write into it: `mods.json` in particular is one of
+`LEGACY_STATE_FILES`, so a copy sitting beside `dist/` makes a fresh install
+look like a pre-migration one and refuse to boot demanding `migrate.cmd`, on a
+box that was never migrated from anything. `ModRegistry.load()` treats a
+missing `mods.json` as zero mods, not an error, so there is nothing to seed —
+the file is created on first mod install. An install whose state genuinely is
+still sitting beside `dist/` (from before this split existed) refuses to boot
+and names `migrate.cmd`, which copies the old files across rather than moving
+them, so the originals stay in place until you delete them.
 
 `config.json` is written by the setup wizard (`npm run setup` in `daemon/`,
 or `node dist/setup-cli.js` against a built install) and lives in that state
@@ -46,6 +48,20 @@ directory. Hand-edit it with the daemon stopped. **Write it without a BOM** —
 PowerShell 5.1's `Set-Content -Encoding UTF8` adds one; use
 `[System.IO.File]::WriteAllText($p, $s, (New-Object System.Text.UTF8Encoding($false)))`.
 `loadConfig` tolerates a BOM now, but nothing else does.
+
+**`03-register-task.ps1` itself is not shipped by `02-deploy.ps1`** — it has to
+already be on SERVER to run there. It reads `deploy.local.ps1` from its own
+directory the same way `02-deploy.ps1` does on the workstation, but falls back
+if that file is absent: the install directory defaults to wherever the script
+itself is sitting (so an operator who places it inside the install directory,
+e.g. a release download's `register-task.ps1` at the release root, needs no
+extra setup), and `$DaemonPort`/`$TaskName` fall back to `8710`/`NecesseDaemon`.
+If you do use a `deploy.local.ps1` on SERVER, **its `$TaskName` must be the
+same string `02-deploy.ps1`'s `deploy.local.ps1` will later assume this task
+is called** (`04-restart-daemon.ps1` looks it up by that name too) — a
+mismatch means the stop-before-re-register check silently finds no existing
+task, registers a second one, and the new daemon dies on a port already held
+by the old one while the health check at the end still talks to that old one.
 
 **The remote default shell is cmd.exe.** Do not fight nested quoting — `scp` a
 `.ps1` over and run it with `powershell -NoProfile -ExecutionPolicy Bypass -File`.

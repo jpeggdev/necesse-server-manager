@@ -8,4 +8,8 @@ $SshKey      = "$env:USERPROFILE\.ssh\necesse_server"
 # %PROGRAMDATA%\NecesseServerManager and is never touched by a deploy.
 $InstallDir  = "C:\Users\youruser\necesse-daemon"
 $DaemonPort  = 8710
-$TaskName    = "necesse-daemon"
+# Must match the Scheduled Task name 03-register-task.ps1 actually registers
+# (its own fallback default when this file is absent). If these disagree,
+# 03's stop-the-old-task-first check silently no-ops against a task that does
+# not exist under the new name, and -Force registers a second, colliding one.
+$TaskName    = "NecesseDaemon"

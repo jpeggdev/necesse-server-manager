@@ -1,17 +1,31 @@
 $ErrorActionPreference = "Stop"
 
 # Runs ON SERVER, so it reads deploy.local.ps1 from its own directory there --
-# the same file 02-deploy.ps1 reads on the workstation, just a different copy.
-# $InstallDir must come from that file; there is no safe default for "where is
-# the daemon" and guessing wrong would register a task pointed at nothing.
-# $DaemonPort/$TaskName fall back to their previous defaults so a server that
-# was already deployed before deploy.local.ps1 existed keeps working.
+# the same file 02-deploy.ps1 reads on the workstation, just a different copy
+# (02-deploy.ps1 does not ship one; an operator who wants this to override the
+# defaults below copies deploy.local.ps1.example next to this script on
+# SERVER and fills it in, same as on the workstation).
+# $InstallDir falls back to $PSScriptRoot when that file is absent or does not
+# set it: on SERVER this script is meant to be run from inside the install
+# directory itself (see setup-cli.ts's pointer to "register-task.ps1 at the
+# root of a release download"), so the directory it is sitting in already is
+# the install directory. Only throw if even that cannot be resolved.
+# $DaemonPort/$TaskName fall back to their previous hardcoded defaults so a
+# server that was already deployed before deploy.local.ps1 existed keeps
+# registering the exact same task it always did.
 $local = Join-Path $PSScriptRoot "deploy.local.ps1"
 if (Test-Path $local) { . $local }
-if (-not $InstallDir) { throw "InstallDir could not be determined. Copy deploy.local.ps1.example to deploy.local.ps1 (in this script's directory) and set InstallDir." }
+if (-not $InstallDir) { $InstallDir = $PSScriptRoot }
+if (-not $InstallDir) { throw "Could not determine the install directory: `$PSScriptRoot is empty and no deploy.local.ps1 (next to this script) sets `$InstallDir." }
 if (-not $DaemonPort) { $DaemonPort = 8710 }
 if (-not $TaskName)   { $TaskName = "NecesseDaemon" }
 $dir = $InstallDir
+# The firewall rule id and the Scheduled Task name are deliberately separate
+# variables even though they default from the same value: they are different
+# namespaces (netsh vs. Task Scheduler), and an instruction to rename or
+# delete "the task" should not also silently rename or orphan the firewall
+# rule, or vice versa.
+$firewallRuleName = "$TaskName-Inbound"
 
 # Safe to re-run: -Force below replaces the existing task registration in
 # place rather than adding a second one.
@@ -33,7 +47,7 @@ $dir = $InstallDir
 # FullControl on the daemon directory, the worlds and the mods folder, verified
 # on this box by a probe task before this change was made.
 
-New-NetFirewallRule -Name $TaskName -DisplayName "Necesse Daemon ($DaemonPort)" `
+New-NetFirewallRule -Name $firewallRuleName -DisplayName "Necesse Daemon ($DaemonPort)" `
   -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort $DaemonPort `
   -ErrorAction SilentlyContinue
 

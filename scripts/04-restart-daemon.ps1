@@ -23,20 +23,20 @@ $key    = $SshKey
 # a backtick to survive interpolation untouched.
 $script = @"
 `$ErrorActionPreference = "Stop"
-Stop-ScheduledTask -TaskName $TaskName
+Stop-ScheduledTask -TaskName "$TaskName"
 `$deadline = (Get-Date).AddSeconds(20)
 while ((Get-Date) -lt `$deadline) {
-  if ((Get-ScheduledTask -TaskName $TaskName).State -ne 'Running') { break }
+  if ((Get-ScheduledTask -TaskName "$TaskName").State -ne 'Running') { break }
   Start-Sleep -Milliseconds 500
 }
-`$stopped = (Get-ScheduledTask -TaskName $TaskName).State
+`$stopped = (Get-ScheduledTask -TaskName "$TaskName").State
 if (`$stopped -eq 'Running') {
   throw "$TaskName still Running 20s after Stop-ScheduledTask. Start-ScheduledTask would be a silent no-op here and leave the old build serving the port, so this aborts rather than report a restart that did not happen."
 }
 Write-Output "STOPPED_STATE=`$stopped"
-Start-ScheduledTask -TaskName $TaskName
+Start-ScheduledTask -TaskName "$TaskName"
 Start-Sleep -Seconds 4
-`$started = (Get-ScheduledTask -TaskName $TaskName).State
+`$started = (Get-ScheduledTask -TaskName "$TaskName").State
 if (`$started -ne 'Running') {
   throw "$TaskName did not reach Running after Start-ScheduledTask (state: `$started)."
 }
