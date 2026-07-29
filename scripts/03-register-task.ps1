@@ -30,10 +30,18 @@ $configuredToken = $null
 if (Test-Path $configFile) {
   # -Raw plus an explicit BOM strip: PowerShell 5.1's Set-Content -Encoding UTF8
   # writes one and ConvertFrom-Json rejects it, and hand-editing this file is
-  # the documented way to set the Steam key.
-  $daemonConfig = ((Get-Content $configFile -Raw) -replace "^\uFEFF", "") | ConvertFrom-Json
-  if (-not $DaemonPort -and $daemonConfig.port) { $DaemonPort = [int]$daemonConfig.port }
-  $configuredToken = $daemonConfig.authToken
+  # the documented way to set the Steam key -- which also means a trailing
+  # comma or stray character here is a realistic state, not a hypothetical
+  # one. This read must never abort registration: fall through to no token
+  # rather than let a malformed config.json stop the task from ever being
+  # created.
+  try {
+    $daemonConfig = ((Get-Content $configFile -Raw) -replace "^\uFEFF", "") | ConvertFrom-Json
+    if (-not $DaemonPort -and $daemonConfig.port) { $DaemonPort = [int]$daemonConfig.port }
+    $configuredToken = $daemonConfig.authToken
+  } catch {
+    Write-Output "WARNING: could not read/parse $configFile ($($_.Exception.Message)); the health check below will be attempted unauthenticated."
+  }
 }
 if (-not $DaemonPort) { $DaemonPort = 8710 }
 # The firewall rule id and the Scheduled Task name are deliberately separate

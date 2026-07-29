@@ -83,10 +83,18 @@ Write-Output "STARTED_STATE=`$started"
 `$headers = @{}
 if (Test-Path `$configFile) {
   # -Raw plus an explicit BOM strip: Set-Content -Encoding UTF8 on 5.1 writes
-  # one, and ConvertFrom-Json rejects it.
-  `$raw = (Get-Content `$configFile -Raw) -replace "^\uFEFF", ""
-  `$token = (`$raw | ConvertFrom-Json).authToken
-  if (`$token) { `$headers["Authorization"] = "Bearer `$token" }
+  # one, and ConvertFrom-Json rejects it. Hand-editing this file is the
+  # documented way to set the Steam key, so a malformed config.json here is
+  # realistic -- and this fires AFTER a restart that already succeeded, so it
+  # must never turn that success into a reported failure. Fall through to no
+  # token rather than throw.
+  try {
+    `$raw = (Get-Content `$configFile -Raw) -replace "^\uFEFF", ""
+    `$token = (`$raw | ConvertFrom-Json).authToken
+    if (`$token) { `$headers["Authorization"] = "Bearer `$token" }
+  } catch {
+    Write-Output "WARNING: could not read/parse `$configFile (`$(`$_.Exception.Message)); the health check below will be attempted unauthenticated."
+  }
 }
 try {
   `$status = Invoke-RestMethod "http://localhost:$DaemonPort/api/status" -Headers `$headers
