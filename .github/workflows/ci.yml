@@ -28,6 +28,15 @@ jobs:
       - name: Typecheck client
         run: npx tsc --noEmit
         working-directory: client
+      # tsconfig.json is the typecheck config (src + test, noEmit); the one that
+      # emits is tsconfig.build.json, and nothing above exercises it. A break
+      # that lives only in the build config - a bad "include", an "exclude" that
+      # swallows a new source file - would otherwise surface for the first time
+      # in the release workflow, at tag time, with no green run to bisect from.
+      - name: Build daemon
+        run: npm run build
+        working-directory: daemon
+
       - name: Test daemon
         run: npx vitest run
         working-directory: daemon

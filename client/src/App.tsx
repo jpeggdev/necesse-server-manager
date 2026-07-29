@@ -17,21 +17,47 @@ const MODS_WIDTH_DEFAULT = 432;
 const MODS_WIDTH_MIN = 300;
 const MODS_WIDTH_MAX = 900;
 
+/**
+ * Shown on the connection screen when the app sent itself there. The daemon's
+ * own 401 body is not used: it is written for whoever is holding the wrong
+ * token, not for someone who has just been dropped out of a working app, and
+ * this has to explain the navigation as well as the failure.
+ */
+export const TOKEN_REJECTED_NOTICE =
+  "The daemon rejected this access token, so the app cannot stay connected. Check the token " +
+  "against the one setup.cmd printed (it is in config.json on the server, under authToken), " +
+  "then Connect again.";
+
 export default function App() {
   const [conn, setConn] = useState<Connection | null>(() => loadConnection());
   const [editing, setEditing] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const editConnection = useCallback(() => {
+    setNotice(null);
+    setEditing(true);
+  }, []);
+  const tokenRejected = useCallback(() => {
+    setNotice(TOKEN_REJECTED_NOTICE);
+    setEditing(true);
+  }, []);
 
   if (conn === null || editing) {
     return (
       <main className="app">
         <ConnectionSettings
           initial={conn}
+          notice={notice}
           onSave={(c) => {
             saveConnection(c);
             setConn(c);
             setEditing(false);
+            setNotice(null);
           }}
-          onCancel={() => setEditing(false)}
+          onCancel={() => {
+            setEditing(false);
+            setNotice(null);
+          }}
         />
       </main>
     );
@@ -48,7 +74,8 @@ export default function App() {
       // populate state under the new one.
       key={`${conn.host}:${conn.port}:${conn.token}`}
       conn={conn}
-      onEditConnection={() => setEditing(true)}
+      onEditConnection={editConnection}
+      onTokenRejected={tokenRejected}
     />
   );
 }
@@ -56,9 +83,17 @@ export default function App() {
 function ConnectedApp({
   conn,
   onEditConnection,
+  onTokenRejected,
 }: {
   conn: Connection;
   onEditConnection: () => void;
+  /**
+   * Separate from onEditConnection because the two arrive at the same screen
+   * for opposite reasons, and only one of them owes the user an explanation.
+   * Not one callback taking a reason: ServerHeader wires its button straight to
+   * onEditConnection, so a click would pass its MouseEvent as the reason.
+   */
+  onTokenRejected: () => void;
 }) {
   const {
     api,
@@ -78,8 +113,8 @@ function ConnectedApp({
   } = useDaemon(conn);
   // A rejected token is the one connection failure the user can only fix here.
   useEffect(() => {
-    if (unauthorized) onEditConnection();
-  }, [unauthorized, onEditConnection]);
+    if (unauthorized) onTokenRejected();
+  }, [unauthorized, onTokenRejected]);
   const [error, setError] = useState<string | null>(null);
   const [candidate, setCandidate] = useState<{ name: string; valid: boolean; exists: boolean } | null>(null);
   // Covers the click-to-response span only: from the moment a mutation is

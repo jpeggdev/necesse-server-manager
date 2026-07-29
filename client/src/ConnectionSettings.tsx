@@ -5,6 +5,13 @@ import { DaemonError, UNAUTHORIZED_STATUS, makeApi } from "./api";
 export interface ConnectionSettingsProps {
   /** null on first run, when there is nothing saved yet to edit or cancel back to. */
   initial: Connection | null;
+  /**
+   * Why the app sent the user here, when it was not the user's own doing.
+   * Without it, a rejected token drops the connected app and lands on this
+   * screen looking exactly like a voluntary visit - and the only way to learn
+   * what happened is to guess that "Test connection" would say.
+   */
+  notice?: string | null;
   onSave: (c: Connection) => void;
   onCancel: () => void;
 }
@@ -31,7 +38,12 @@ function validateConnection(host: string, portText: string): string | null {
  * address. Shown full-screen in place of the app (first run, or no saved
  * connection) or over it (re-editing after a rejected token).
  */
-export function ConnectionSettings({ initial, onSave, onCancel }: ConnectionSettingsProps) {
+export function ConnectionSettings({
+  initial,
+  notice = null,
+  onSave,
+  onCancel,
+}: ConnectionSettingsProps) {
   const [host, setHost] = useState(initial?.host ?? "");
   const [port, setPort] = useState(initial ? String(initial.port) : DEFAULT_PORT);
   // An empty token is a valid, supported configuration - it means the daemon
@@ -121,6 +133,11 @@ export function ConnectionSettings({ initial, onSave, onCancel }: ConnectionSett
   return (
     <div className="connection-settings">
       <h1>Connect to a daemon</h1>
+      {notice !== null && (
+        <p role="alert" className="hint hint-bad">
+          {notice}
+        </p>
+      )}
       <form onSubmit={onSubmit}>
         <label htmlFor="conn-host">Host</label>
         <input id="conn-host" type="text" value={host} onChange={(e) => setHost(e.target.value)} />

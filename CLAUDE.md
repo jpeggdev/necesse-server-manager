@@ -23,8 +23,10 @@ Run the two packages separately; there is no workspace root.
 kill a live game session. Before `02-deploy.ps1` or `04-restart-daemon.ps1`,
 confirm nobody is playing — `GET /api/status` reporting `stopped` is the check.
 
-`02-deploy.ps1` copies `dist/`, `package.json` and `package-lock.json` and
-seeds nothing. **Daemon state lives in `%PROGRAMDATA%\NecesseServerManager`,
+`02-deploy.ps1` copies `dist/`, `package.json`, `package-lock.json` and the
+three launchers (`setup.cmd`, `start-daemon.cmd`, `migrate.cmd` — the boot
+refusals name them, so an install without them tells the operator to run a
+file that is not there) and seeds nothing. **Daemon state lives in `%PROGRAMDATA%\NecesseServerManager`,
 not beside `dist/`** (overridable with the `NECESSE_MANAGER_DATA` environment
 variable). That includes `config.json`, `mods.json`, `mod-library/`,
 `mod-library.json` and `mod-sets.json` (see `docs/mod-sets-design.md`); the
@@ -41,6 +43,16 @@ the file is created on first mod install. An install whose state genuinely is
 still sitting beside `dist/` (from before this split existed) refuses to boot
 and names `migrate.cmd`, which copies the old files across rather than moving
 them, so the originals stay in place until you delete them.
+
+**Every boot refusal is also written to `boot-refusal.txt` in the state
+directory** and deleted again on a successful start. The daemon runs as a
+Scheduled Task, whose stdout goes nowhere, so without that file the only
+symptom of any refusal is `04-restart-daemon.ps1` saying the task did not reach
+Running — which is why that script now also runs the daemon once in the
+foreground and echoes what it printed. `stateDirPopulated` deliberately ignores
+`boot-refusal.txt`: the legacy-state refusal writes it into a directory it has
+just called empty, and counting it would make the next boot decide the
+migration had already happened.
 
 `config.json` is written by the setup wizard (`npm run setup` in `daemon/`,
 or `node dist/setup-cli.js` against a built install) and lives in that state
@@ -105,6 +117,19 @@ against what `dataDir` derives and, via `fatalProblems`, **refuses to boot**
 rather than pick a winner if they disagree. `resolveBootConfig` runs this
 check in `index.ts` before anything reads a folder or spawns anything. Change
 `dataDir` and `modsDir`/`worldsDir` follow automatically.
+
+**`modLibraryDir`, `modLibraryFile` and `modSetsFile` derive from the state
+directory the same way**, and for a reason worth remembering: they used to be
+evaluated at module load and written by `saveConfig` (which runs on every world
+start), so every install predating the state directory has install-directory
+values for all three stored in its `config.json`. `migrateState` copies those
+files across but rewrites no config keys, so a stored value winning would mean
+a daemon reading its mod library out of the very directory the upgrade tells
+you to delete — and `ModLibrary.load()` reports the resulting missing manifest
+as an *empty library*, not an error, so nothing would say the jars were gone.
+A stored value is ignored and dropped by the next write. `DEFAULT_CONFIG`
+carries `""` for all five derived paths; resolving them at module load would
+call `stateFile()` on import, which throws wherever `PROGRAMDATA` is unset.
 
 ## Constraints that bite
 

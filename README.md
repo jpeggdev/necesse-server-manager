@@ -41,6 +41,20 @@ to the game server or its files directly, only to the daemon.
 3. Run `start-daemon.cmd` to run the daemon in that window, or see the
    next step to have it start automatically.
 
+The zip also contains `config.example.json`. It is reference only, to show
+what the file looks like: it is not read by anything, and renaming it to
+`config.json` would give you a daemon with an empty `authToken`, meaning
+anyone who can reach the port controls the server. `setup.cmd` is what
+writes the real config.
+
+## Open the port
+
+If the client runs on a different PC from the daemon, Windows Firewall on
+the server box has to allow inbound TCP on the daemon's port (`8710` by
+default). `register-task.ps1` below creates that rule for you; if you run
+the daemon with `start-daemon.cmd` instead, add it yourself, or the client
+will simply never connect and nothing on either side will say why.
+
 ## Run it at boot (optional)
 
 Run `register-task.ps1` as Administrator (as Administrator matters: it
@@ -52,6 +66,12 @@ at a user's logon means an unattended reboot still brings the daemon back;
 SYSTEM means no password has to be stored anywhere. The 30-second delay
 exists because the daemon binds its port almost immediately, and at the
 exact instant of boot the network stack usually isn't ready yet.
+
+A Scheduled Task's console output goes nowhere, so if the daemon refuses
+to start there is nothing to read. It therefore writes the reason to
+`%PROGRAMDATA%\NecesseServerManager\boot-refusal.txt` as well, and deletes
+that file again as soon as a start succeeds. If the task will not stay
+running, read that file first.
 
 Running as SYSTEM is only safe here because the daemon is told the game's
 data directory explicitly (`dataDir` in `config.json`, passed to the server
@@ -137,7 +157,7 @@ daemon stopped if you need to change something afterward.
 | `steamApiKey` | A Steam Web API key, needed only for Workshop search. Everything else, including installing a mod by its Workshop id, updating mods and updating the server, works without one. Get one at https://steamcommunity.com/dev/apikey. |
 | `owners` | List of world owner names. The client can edit this remotely. |
 | `lastWorld` | The most recently started world. The client can edit this remotely. |
-| `stopTimeoutMs` | How long a graceful stop is given before the daemon reports it as timed out (it does not kill the process on timeout). Default `90000`. |
+| `stopTimeoutMs` | How long a graceful stop is given before the daemon reports it as timed out (it does not kill the process on timeout). Default `90000`. The client can edit this remotely. |
 | `jvmArgs` | JVM flags passed to `Server.jar`. Sensible defaults are shipped; only change these if you know why. |
 
 Five keys are deliberately left out of that list because they are derived,

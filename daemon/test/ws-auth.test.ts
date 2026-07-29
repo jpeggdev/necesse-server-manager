@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, mkdir } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { request as httpRequest } from "node:http";
@@ -12,7 +12,7 @@ import { ModLibrary } from "../src/mod-library.js";
 import { ModSets } from "../src/mod-sets.js";
 import { SteamCmd } from "../src/steamcmd.js";
 import { SteamWorkshop } from "../src/steam-workshop.js";
-import { DEFAULT_CONFIG } from "../src/config.js";
+import { makeTestConfig } from "./fixtures/test-config.js";
 import { makeFakeSpawn } from "./fixtures/fake-spawn.js";
 import { makeFakeFetch } from "./fixtures/fake-fetch.js";
 import type { DaemonConfig } from "../src/types.js";
@@ -22,19 +22,11 @@ let port: number;
 
 beforeEach(async () => {
   const root = await mkdtemp(join(tmpdir(), "necesse-ws-auth-"));
-  const modsDir = join(root, "mods");
-  const worldsDir = join(root, "worlds");
-  await mkdir(modsDir, { recursive: true });
-  await mkdir(worldsDir, { recursive: true });
-  const cfg: DaemonConfig = {
-    ...DEFAULT_CONFIG,
-    modsDir,
-    worldsDir,
-    modLibraryDir: join(root, "mod-library"),
-    modLibraryFile: join(root, "mod-library.json"),
-    modSetsFile: join(root, "mod-sets.json"),
-    authToken: "s3cret",
-  };
+  // makeTestConfig, not DEFAULT_CONFIG plus a couple of overrides: the latter
+  // builds a config with a modsDir that does not follow from its dataDir,
+  // which is a topology loadConfig can no longer produce and configProblems
+  // refuses outright.
+  const cfg: DaemonConfig = { ...makeTestConfig(root), authToken: "s3cret" };
   const configFile = join(root, "config.json");
   const spawn = makeFakeSpawn();
   const pm = new ProcessManager(cfg, spawn.spawn);

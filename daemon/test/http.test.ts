@@ -56,8 +56,10 @@ beforeEach(async () => {
     worldsDir,
     stopTimeoutMs: 50,
     // Every path the library and the sets write to lives in this test's own
-    // temp dir. DEFAULT_CONFIG points them at the daemon's real directory, and
-    // a suite that started the server would otherwise write a mod-sets.json
+    // temp dir. DEFAULT_CONFIG leaves all three empty - they are derived from
+    // the state directory by loadConfig, which is not involved here - so
+    // without these a suite that started the server would resolve them
+    // relative to the process's working directory and write a mod-sets.json
     // into the repo.
     modLibraryDir: join(root, "mod-library"),
     modLibraryFile: join(root, "mod-library.json"),
@@ -1949,7 +1951,11 @@ describe("access token", () => {
     expect(res.statusCode).toBe(200);
   });
 
-  it("lets a CORS preflight through, since it cannot carry the header", async () => {
+  // Named for what it can actually observe. @fastify/cors answers a valid
+  // preflight in its own onRequest hook and short-circuits, so this passes
+  // identically with the auth hook's OPTIONS exemption deleted - it pins that
+  // a preflight is answered at all, not which hook exempted it.
+  it("answers a CORS preflight, which cannot carry an Authorization header", async () => {
     const res = await app.inject({
       method: "OPTIONS",
       url: "/api/status",

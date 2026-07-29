@@ -61,7 +61,14 @@ describe("presentedToken", () => {
 });
 
 describe("AUTH_FAILURE_MESSAGE", () => {
-  it("tells the operator what to do rather than only that it failed", () => {
-    expect(AUTH_FAILURE_MESSAGE).toMatch(/token/i);
+  // /token/i on a constant containing the word "token" could not fail whatever
+  // the message said. These are the three things a rejected client actually
+  // needs and cannot work out for itself: both ways to present the token, and
+  // where to find it. Rewording the message is fine; dropping any of them is
+  // what this is here to catch.
+  it("names both ways to present a token and where to find it", () => {
+    expect(AUTH_FAILURE_MESSAGE).toContain("Authorization: Bearer");
+    expect(AUTH_FAILURE_MESSAGE).toContain("?token=");
+    expect(AUTH_FAILURE_MESSAGE).toContain("config.json");
   });
 });
