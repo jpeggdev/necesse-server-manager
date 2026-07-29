@@ -5,9 +5,10 @@ import { ConsolePanel } from "./ConsolePanel";
 import { ErrorBanner } from "./ErrorBanner";
 import { Splitter } from "./Splitter";
 import { WorldSettingsDialog } from "./WorldSettingsDialog";
+import { ConnectionSettings } from "./ConnectionSettings";
 import { useDaemon } from "./useDaemon";
 import { DaemonError, STOP_TIMEOUT_STATUS, type WorldSettingValue } from "./api";
-import { loadConnection } from "./settings";
+import { loadConnection, saveConnection, type Connection } from "./settings";
 import type { WorldModsResponse } from "./types";
 import "./App.css";
 
@@ -16,14 +17,49 @@ const MODS_WIDTH_DEFAULT = 432;
 const MODS_WIDTH_MIN = 300;
 const MODS_WIDTH_MAX = 900;
 
-// Task 9 replaces this with the connection screen; until then, whatever was
-// last saved (or this same default) is what every session talks to. Localhost,
-// not a LAN address: this repo ships to strangers, and a real IP baked in here
-// would silently point a fresh install at somebody else's machine and then
-// blame it for the connection failure.
-const DEFAULT_CONNECTION = { host: "127.0.0.1", port: 8710, token: "" };
-
 export default function App() {
+  const [conn, setConn] = useState<Connection | null>(() => loadConnection());
+  const [editing, setEditing] = useState(false);
+
+  if (conn === null || editing) {
+    return (
+      <main className="app">
+        <ConnectionSettings
+          initial={conn}
+          onSave={(c) => {
+            saveConnection(c);
+            setConn(c);
+            setEditing(false);
+          }}
+          onCancel={() => setEditing(false)}
+        />
+      </main>
+    );
+  }
+
+  return (
+    <ConnectedApp
+      // Keyed on the whole connection, token included, so switching daemons
+      // remounts the whole tree rather than leaving one daemon's worlds and
+      // console on screen under another daemon's status. Host/port alone would
+      // miss a token-only edit - the single most likely correction a user makes
+      // on this screen - and refresh()/readLibrary() have no request-generation
+      // guard, so a stale response from the old daemon could still land and
+      // populate state under the new one.
+      key={`${conn.host}:${conn.port}:${conn.token}`}
+      conn={conn}
+      onEditConnection={() => setEditing(true)}
+    />
+  );
+}
+
+function ConnectedApp({
+  conn,
+  onEditConnection,
+}: {
+  conn: Connection;
+  onEditConnection: () => void;
+}) {
   const {
     api,
     status,
@@ -38,7 +74,12 @@ export default function App() {
     error: daemonError,
     busy: taskBusy,
     refresh,
-  } = useDaemon(loadConnection() ?? DEFAULT_CONNECTION);
+    unauthorized,
+  } = useDaemon(conn);
+  // A rejected token is the one connection failure the user can only fix here.
+  useEffect(() => {
+    if (unauthorized) onEditConnection();
+  }, [unauthorized, onEditConnection]);
   const [error, setError] = useState<string | null>(null);
   const [candidate, setCandidate] = useState<{ name: string; valid: boolean; exists: boolean } | null>(null);
   // Covers the click-to-response span only: from the moment a mutation is
@@ -245,7 +286,9 @@ export default function App() {
     return (
       <main className="app">
         <ErrorBanner error={error} onDismiss={() => setError(null)} />
-        <p className="connecting">Connecting to the daemon at 192.168.1.106:8710&hellip;</p>
+        <p className="connecting">
+          Connecting to the daemon at {conn.host}:{conn.port}&hellip;
+        </p>
       </main>
     );
   }
@@ -256,6 +299,11 @@ export default function App() {
   return (
     <main className="app">
       <ErrorBanner error={error} onDismiss={() => setError(null)} />
+      {status.configWarnings.map((w) => (
+        <p key={w} className="hint hint-warn config-warning">
+          {w}
+        </p>
+      ))}
       <ServerHeader
         status={status}
         worlds={worlds}
@@ -263,6 +311,7 @@ export default function App() {
         busy={busy}
         stopTimedOut={stopTimedOut}
         onCandidateChange={onCandidateChange}
+        onEditConnection={onEditConnection}
         onStart={(w) => guard(() => api.start(w))()}
         onStop={guard(
           () => api.stop(),

@@ -118,6 +118,7 @@ function statusPayload() {
     gameVersion: null,
     lastError: null,
     activeTasks: [...activeTasks],
+    configWarnings: [],
   };
 }
 
@@ -126,6 +127,10 @@ function jsonResponse(body: unknown) {
 }
 
 beforeEach(() => {
+  localStorage.setItem(
+    "necesse.connection",
+    JSON.stringify({ host: "127.0.0.1", port: 8710, token: "" }),
+  );
   activeTasks = [];
   serverState = "stopped";
   releaseUpdate = null;

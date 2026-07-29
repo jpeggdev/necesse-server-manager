@@ -30,6 +30,7 @@ function setup(overrides: Partial<Parameters<typeof ServerHeader>[0]> = {}) {
     onKill: vi.fn(),
     onUpdateServer: vi.fn(),
     onCandidateChange: vi.fn(),
+    onEditConnection: vi.fn(),
     ...overrides,
   };
   const { rerender } = render(<ServerHeader {...props} />);
@@ -300,6 +301,7 @@ describe("ServerHeader", () => {
         onKill={vi.fn()}
         onUpdateServer={vi.fn()}
         onCandidateChange={vi.fn()}
+        onEditConnection={vi.fn()}
       />,
     );
     const input = screen.getByLabelText(/world/i);
@@ -318,6 +320,7 @@ describe("ServerHeader", () => {
         onKill={vi.fn()}
         onUpdateServer={vi.fn()}
         onCandidateChange={vi.fn()}
+        onEditConnection={vi.fn()}
       />,
     );
 
