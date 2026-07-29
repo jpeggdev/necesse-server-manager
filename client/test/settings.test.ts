@@ -43,6 +43,36 @@ describe("loadConnection", () => {
     saveConnection({ host: "h", port: 1, token: "" });
     expect(loadConnection()).toEqual({ host: "h", port: 1, token: "" });
   });
+
+  it("rejects a stored port that is NaN", () => {
+    localStorage.setItem(CONNECTION_KEY, JSON.stringify({ host: "h", port: NaN, token: "" }));
+    expect(loadConnection()).toBeNull();
+  });
+
+  it("rejects a non-integer port like 1.5", () => {
+    localStorage.setItem(CONNECTION_KEY, JSON.stringify({ host: "h", port: 1.5, token: "" }));
+    expect(loadConnection()).toBeNull();
+  });
+
+  it("rejects a port of 0", () => {
+    localStorage.setItem(CONNECTION_KEY, JSON.stringify({ host: "h", port: 0, token: "" }));
+    expect(loadConnection()).toBeNull();
+  });
+
+  it("rejects a negative port", () => {
+    localStorage.setItem(CONNECTION_KEY, JSON.stringify({ host: "h", port: -1, token: "" }));
+    expect(loadConnection()).toBeNull();
+  });
+
+  it("rejects a port greater than 65535", () => {
+    localStorage.setItem(CONNECTION_KEY, JSON.stringify({ host: "h", port: 65536, token: "" }));
+    expect(loadConnection()).toBeNull();
+  });
+
+  it("rejects a whitespace-only host", () => {
+    localStorage.setItem(CONNECTION_KEY, JSON.stringify({ host: "   ", port: 1, token: "" }));
+    expect(loadConnection()).toBeNull();
+  });
 });
 
 describe("clearConnection", () => {
@@ -76,5 +106,18 @@ describe("encode/decode", () => {
   it("is null for text that is not a connection", () => {
     expect(decodeConnection("hello")).toBeNull();
     expect(decodeConnection(JSON.stringify({ host: "h" }))).toBeNull();
+  });
+
+  it("rejects a pasted blob with an out-of-range port", () => {
+    expect(decodeConnection(JSON.stringify({ host: "h", port: 65536, token: "" }))).toBeNull();
+    expect(decodeConnection(JSON.stringify({ host: "h", port: 0, token: "" }))).toBeNull();
+  });
+
+  it("rejects a pasted blob with a non-integer port", () => {
+    expect(decodeConnection(JSON.stringify({ host: "h", port: 1.5, token: "" }))).toBeNull();
+  });
+
+  it("rejects a pasted blob with a whitespace-only host", () => {
+    expect(decodeConnection(JSON.stringify({ host: "   ", port: 1, token: "" }))).toBeNull();
   });
 });
