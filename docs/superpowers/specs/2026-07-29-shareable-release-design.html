@@ -147,6 +147,13 @@ that adapt it.</p>
     <td>Client settings storage</td><td><code>localStorage</code>, with copy/paste in the settings UI</td>
     <td>No new IPC seam for vitest to mock. Portability comes from the UI, not the filesystem.</td>
   </tr>
+  <tr>
+    <td>Daemon state location</td>
+    <td><code>%PROGRAMDATA%\NecesseServerManager</code>, overridable by
+    <code>NECESSE_MANAGER_DATA</code></td>
+    <td>The install directory becomes disposable, so delete-and-replace is the correct upgrade
+    rather than the destructive one. Costs a one-time migration for the existing install.</td>
+  </tr>
 </table>
 </div>
 
@@ -191,8 +198,8 @@ installation:</p>
     <code>workshopAppId</code>, <code>stopTimeoutMs</code>, <code>modUploadMaxBytes</code>,
     <code>owners</code> (empty), <code>lastWorld</code> (null), <code>steamApiKey</code> (empty),
     <code>authToken</code> (empty &mdash; see below), and <code>modLibraryDir</code> /
-    <code>modLibraryFile</code> / <code>modSetsFile</code>, which are relative to
-    <code>DAEMON_DIR</code> and therefore already portable</td>
+    <code>modLibraryFile</code> / <code>modSetsFile</code>, which derive from the state directory
+    (&sect;8) and are therefore already portable</td>
     <td><code>dataDir</code>, <code>serverRoot</code>, <code>javaExe</code>,
     <code>serverJar</code>, <code>steamcmdExe</code></td>
   </tr>
@@ -203,8 +210,8 @@ installation:</p>
 produces one full of the author's paths and a daemon that boots pointed at directories that do
 not exist on the user's machine. It throws instead:</p>
 
-<pre><code>No config.json in C:\necesse-daemon.
-Run setup.cmd in that folder to create one.</code></pre>
+<pre><code>No config.json in C:\ProgramData\NecesseServerManager.
+Run setup.cmd from the daemon's install folder to create one.</code></pre>
 
 <h3>New fields</h3>
 
@@ -283,9 +290,10 @@ the found path as the default answer:</p>
 <p>The probe logic is a pure function &mdash; candidate paths in, findings out &mdash; separate
 from the prompting, so it is testable without driving a terminal.</p>
 
-<p>The wizard writes <code>config.json</code> <strong>without a BOM</strong>, refuses to overwrite
-an existing config unless told to, and finishes by printing the token and the exact next command
-(<code>start-daemon.cmd</code>, or <code>register-task.ps1</code> for the scheduled task).</p>
+<p>The wizard creates the state directory (&sect;8) if absent and writes <code>config.json</code>
+into it <strong>without a BOM</strong>, refuses to overwrite an existing config unless told to, and
+finishes by printing the token and the exact next command (<code>start-daemon.cmd</code>, or
+<code>register-task.ps1</code> for the scheduled task).</p>
 
 <h2 id="validate">5. Daemon: boot validation</h2>
 
@@ -427,12 +435,14 @@ This work changes them (<code>configWarnings</code>, <code>authRequired</code>,
 <p>Git history is <strong>not</strong> rewritten. A private RFC1918 address and a local Windows
 account name are not secrets, and rewriting history to hide them costs more than it buys.</p>
 
-<div class="warn">
-<p><strong>One thing must be verified rather than assumed before the repository is pushed
-public:</strong> that the Steam Web API key never landed in a commit.
-<code>config.ts</code> asserts it was deliberately kept out, but an assertion in a comment is not
-evidence. <code>git log -S</code> across the full history is, and it is a precondition of
-publishing, not a follow-up.</p>
+<div class="note">
+<p><strong>Steam key exposure: checked, clean.</strong> Verified 2026-07-29 across all refs rather
+than assumed from <code>config.ts</code>'s comment. No commit ever introduced a 32-hex
+<code>steamApiKey</code> value (<code>git log --all -G</code>); no <code>.env</code> was ever
+added, and it is gitignored; the only committed <code>config.json</code> is
+<code>scripts/seed/config.json</code>, whose key is the empty string. Nothing blocks publishing.</p>
+<p>The regex form of the search was used deliberately over <code>git log -S&lt;key&gt;</code>,
+which would have written the key itself into the shell history and this transcript.</p>
 </div>
 
 <h3>New files</h3>
@@ -446,6 +456,7 @@ publishing, not a follow-up.</p>
   <tr><td><code>.github/workflows/ci.yml</code></td><td>On push and PR: both test suites and <code>tsc --noEmit</code> for both packages, on <code>windows-latest</code></td></tr>
   <tr><td><code>.github/workflows/release.yml</code></td><td>On a <code>v*</code> tag: build both artifacts, attach to a GitHub Release</td></tr>
   <tr><td><code>daemon/setup.cmd</code>, <code>daemon/start-daemon.cmd</code></td><td>Entry points that work from a release zip, where no TypeScript toolchain exists</td></tr>
+  <tr><td><code>daemon/migrate.cmd</code></td><td>Copies pre-move state from the install directory into <code>%PROGRAMDATA%</code> and verifies it, for installs that predate &sect;8's state directory</td></tr>
 </table>
 </div>
 
@@ -463,8 +474,9 @@ would prove less than nothing about it.</p>
   <tr>
     <td><code>necesse-daemon-vX.Y.Z.zip</code></td>
     <td><code>dist/</code>, production-only <code>node_modules/</code>, <code>package.json</code>,
-    <code>setup.cmd</code>, <code>start-daemon.cmd</code>, <code>register-task.ps1</code>,
-    <code>config.example.json</code>, and a short <code>README-DAEMON.txt</code></td>
+    <code>setup.cmd</code>, <code>start-daemon.cmd</code>, <code>migrate.cmd</code>,
+    <code>register-task.ps1</code>, <code>config.example.json</code>, and a short
+    <code>README-DAEMON.txt</code>. Every file in it is replaceable; nothing in it is state</td>
   </tr>
   <tr>
     <td><code>NecesseServerManager_X.Y.Z_x64-setup.exe</code></td>
@@ -473,22 +485,54 @@ would prove less than nothing about it.</p>
 </table>
 </div>
 
-<h3>Where daemon state lives</h3>
+<h3 id="state">Where daemon state lives</h3>
 
-<p>State stays in the daemon's own directory next to <code>dist/</code>:
-<code>config.json</code>, <code>mods.json</code>, <code>mod-library/</code>,
-<code>mod-library.json</code>, <code>mod-sets.json</code>. Moving it to
-<code>%PROGRAMDATA%</code> was considered and rejected as churn against a layout the deploy script
-and every existing install already assume.</p>
+<p>All daemon state moves out of the install directory into a single state directory:</p>
+
+<pre><code>%PROGRAMDATA%\NecesseServerManager\
+  config.json
+  mods.json
+  mod-sets.json
+  mod-library.json
+  mod-library\</code></pre>
+
+<p><code>DAEMON_DIR</code> stops being a state location and becomes purely where the code lives.
+<code>config.json</code> moves with the rest: splitting configuration from the data it describes
+would leave two directories to reason about instead of one, and the point of the move is that
+there is exactly one directory holding anything irreplaceable.</p>
+
+<p>The location is overridable by the <code>NECESSE_MANAGER_DATA</code> environment variable. That
+is what lets tests point at a temporary directory without writing to a machine-wide path, and it
+gives anyone who wants state on another volume a supported way to do it.</p>
+
+<div class="note">
+<p><strong>This is what makes upgrading safe rather than merely documented.</strong> With state
+next to <code>dist/</code>, a user who upgraded by deleting the folder and unzipping the new
+release would destroy <code>mod-library/</code> &mdash; the only copy of every hand-placed and
+uploaded jar &mdash; and <code>mod-sets.json</code>, the only record of what each world loads. The
+README could warn about that; it could not prevent it. With state in
+<code>%PROGRAMDATA%</code> the install directory contains nothing that cannot be re-downloaded, so
+delete-and-replace becomes the correct upgrade procedure instead of the destructive one.</p>
+</div>
+
+<p>SYSTEM holds full control of <code>%PROGRAMDATA%</code> by default, so the scheduled task run
+mode needs no ACL work. The setup wizard creates the directory as the interactive user, and
+inherited permissions leave both that user and SYSTEM able to read and write it &mdash; which the
+two run modes require between them.</p>
 
 <div class="warn">
-<p><strong>This makes "upgrade by deleting the folder and unzipping the new one" destructive.</strong>
-<code>mod-library/</code> is the only copy of every hand-placed and uploaded jar, and
-<code>mod-sets.json</code> is the only record of what each world loads. The README's upgrade
-instruction is therefore explicit: <em>replace <code>dist/</code> and <code>node_modules/</code>,
-keep everything else</em>. The release zip nests its replaceable content so the distinction is
-visible rather than a thing you had to have read.</p>
+<p><strong>An existing install has state in the old location, and the daemon must not quietly
+leave it behind.</strong> If the daemon finds state files in <code>DAEMON_DIR</code> and none in
+the state directory, it refuses to boot and names <code>migrate.cmd</code>. Auto-migrating would
+mean moving the only copy of every uploaded jar as a side effect of an ordinary restart, and this
+codebase already refuses rather than picking a winner when the alternative is silent data
+movement. <code>migrate.cmd</code> <em>copies</em> and verifies; it never deletes the originals,
+so a failed migration costs disk rather than jars.</p>
 </div>
+
+<p>The three <code>daemon/</code> entries in <code>.gitignore</code> stay. They guard a location
+the daemon will no longer write to, but a developer running an older build in the same tree still
+will, and an ignore rule that protects nothing is cheaper than a committed mod library.</p>
 
 <h3>Repository name</h3>
 
@@ -543,6 +587,15 @@ transport. It gains a daemon configured <em>with</em> a token, and asserts:</p>
   problems rather than stopping at the first.</li>
   <li>The setup probe function, over fixture directory layouts: server root found and not found,
   bundled JRE present and absent, steamcmd on PATH and absent.</li>
+  <li>The state directory resolves from <code>NECESSE_MANAGER_DATA</code> when set and from
+  <code>%PROGRAMDATA%</code> otherwise. Every test that touches state sets the variable, so no
+  test can write to a machine-wide path.</li>
+  <li>Legacy state in the install directory with an empty state directory refuses to boot and the
+  message names <code>migrate.cmd</code>; legacy state alongside an already-populated state
+  directory boots normally, because that is the post-migration steady state.</li>
+  <li>The migration copies every file and the whole <code>mod-library\</code> tree, verifies it,
+  and leaves the source files present &mdash; asserted explicitly, since "copies rather than
+  moves" is the property that makes a failed migration survivable.</li>
 </ul>
 
 <h3>Client unit tests</h3>
@@ -559,22 +612,35 @@ transport. It gains a daemon configured <em>with</em> a token, and asserts:</p>
 <h2 id="migration">11. Migrating the live install</h2>
 
 <p>The existing server has a <code>config.json</code> with all three directory keys, no
-<code>authToken</code>, and a running daemon. The upgrade path must not break it.</p>
+<code>authToken</code>, its state in the daemon's install directory, and a running daemon whose
+child process is the game server. The upgrade path must not break it, and must not move
+irreplaceable files without being asked.</p>
 
 <ol>
-  <li>An absent <code>authToken</code> reads as empty, which disables authentication. The upgraded
-  daemon therefore keeps serving the existing client unchanged.</li>
-  <li>The stored <code>modsDir</code> and <code>worldsDir</code> agree with <code>dataDir</code>
-  today, so the back-compat guard passes and the derived values are identical. The first save
-  drops the legacy keys.</li>
-  <li>A token is adopted deliberately: add it to <code>config.json</code> with the daemon stopped,
-  restart, then enter it in the client's settings screen.</li>
+  <li><strong>Confirm nobody is playing.</strong> <code>GET /api/status</code> reporting
+  <code>stopped</code>, as always &mdash; restarting the daemon kills a live session.</li>
+  <li><strong>Deploy, expect a refusal.</strong> The new build finds state in the install
+  directory and none in <code>%PROGRAMDATA%</code>, so it refuses to boot and names
+  <code>migrate.cmd</code>. This is the designed outcome, not a failure: a one-time loud stop in
+  place of a silent move of the only copy of every uploaded jar.</li>
+  <li><strong>Run <code>migrate.cmd</code>.</strong> It copies <code>config.json</code>,
+  <code>mods.json</code>, <code>mod-sets.json</code>, <code>mod-library.json</code> and
+  <code>mod-library\</code> into the state directory, verifies each, and leaves the originals in
+  place. The old files become dead weight that can be deleted once the daemon is confirmed
+  healthy &mdash; deliberately a separate, human decision.</li>
+  <li><strong>Start.</strong> An absent <code>authToken</code> reads as empty, so authentication
+  is off and the existing client keeps working unchanged. The stored <code>modsDir</code> and
+  <code>worldsDir</code> agree with <code>dataDir</code> today, so the back-compat guard passes
+  and the derived values are identical; the first save drops the legacy keys.</li>
+  <li><strong>Adopt a token deliberately, afterwards.</strong> Add it to the migrated
+  <code>config.json</code> with the daemon stopped, restart, then enter it in the client's
+  settings screen. Doing this in the same step as the migration would leave two independent
+  reasons for the client to be unable to connect.</li>
 </ol>
 
-<p>The deploy scripts already copy <code>dist/</code> and never remove anything, so the mod
-library and sets are untouched by the upgrade. As always, <code>GET /api/status</code> reporting
-<code>stopped</code> is the check before deploying, because the game server is a child process of
-the daemon.</p>
+<p>The deploy scripts copy <code>dist/</code> and never remove anything, so nothing is at risk
+from the deploy itself; the risk in this upgrade is entirely in step 3, which is why it is manual,
+copies rather than moves, and verifies.</p>
 
 <h2 id="scope-out">12. Out of scope</h2>
 
