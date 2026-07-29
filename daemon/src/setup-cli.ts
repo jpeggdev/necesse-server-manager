@@ -10,7 +10,7 @@ import type { DaemonConfig } from "./types.js";
 const rl = createInterface({ input: process.stdin, output: process.stdout });
 
 const ask = async (question: string, fallback: string | null): Promise<string> => {
-  const suffix = fallback === null ? "" : ` [${fallback}]`;
+  const suffix = fallback === null || fallback === "" ? "" : ` [${fallback}]`;
   const answer = (await rl.question(`${question}${suffix}\n> `)).trim();
   if (answer.length > 0) return answer;
   if (fallback === null) return "";
@@ -121,6 +121,8 @@ console.log(
   `Enter that in the client's connection screen. It is stored in config.json under ` +
     `"authToken" if you need it again.\n\n` +
     `Next: run start-daemon.cmd to run it in this window, or register-task.ps1 (as ` +
-    `Administrator) to have it start automatically at boot.`,
+    `Administrator) to have it start automatically at boot - that's register-task.ps1 at the ` +
+    `root of a release download, or scripts\\03-register-task.ps1 if you are running from a ` +
+    `source checkout.`,
 );
 rl.close();

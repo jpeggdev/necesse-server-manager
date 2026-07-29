@@ -31,6 +31,16 @@ describe("probeConfig", () => {
     expect(r.dataDir).toBeNull();
   });
 
+  it("reports no data directory when APPDATA is set but Necesse is not underneath it", async () => {
+    const r = await probeConfig({
+      appData: APPDATA,
+      pathDirs: [],
+      extraServerRoots: [],
+      exists: fsWith([]),
+    });
+    expect(r.dataDir).toBeNull();
+  });
+
   it("finds the server root by the jar inside it, and prefers the bundled jre", async () => {
     const root = "C:\\necesseserver";
     const r = await probeConfig({
@@ -45,6 +55,17 @@ describe("probeConfig", () => {
     expect(r.serverRoot).toBe(root);
     expect(r.serverJar).toBe(join(root, "Server.jar"));
     expect(r.javaExe).toBe(join(root, "jre", "bin", "java.exe"));
+  });
+
+  it("reports no server root when the candidate jar is not actually there", async () => {
+    const root = "C:\\necesseserver";
+    const r = await probeConfig({
+      pathDirs: [],
+      extraServerRoots: [root],
+      exists: fsWith([]),
+    });
+    expect(r.serverRoot).toBeNull();
+    expect(r.serverJar).toBeNull();
   });
 
   it("falls back to java on PATH when the server ships no jre", async () => {
@@ -65,6 +86,15 @@ describe("probeConfig", () => {
       exists: fsWith(["C:\\steamcmd\\steamcmd.exe"]),
     });
     expect(r.steamcmdExe).toBe("C:\\steamcmd\\steamcmd.exe");
+  });
+
+  it("reports no steamcmd when the PATH candidate is not actually there", async () => {
+    const r = await probeConfig({
+      pathDirs: ["C:\\steamcmd"],
+      extraServerRoots: [],
+      exists: fsWith([]),
+    });
+    expect(r.steamcmdExe).toBeNull();
   });
 
   it("finds steamcmd under the user profile when it is not on PATH", async () => {
