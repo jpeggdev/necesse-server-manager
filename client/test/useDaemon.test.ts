@@ -71,7 +71,7 @@ afterEach(() => {
 });
 
 async function openConnection() {
-  const { result, unmount } = renderHook(() => useDaemon());
+  const { result, unmount } = renderHook(() => useDaemon({ host: "h", port: 1, token: "" }));
   const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
   await act(async () => {
     ws.onopen?.();
@@ -242,7 +242,7 @@ describe("useDaemon websocket connection failures", () => {
   it("says the socket is blocked while HTTP still answers, rather than spinning forever", async () => {
     vi.useFakeTimers();
     try {
-      const { result, unmount } = renderHook(() => useDaemon());
+      const { result, unmount } = renderHook(() => useDaemon({ host: "h", port: 1, token: "" }));
 
       // Below the threshold this is indistinguishable from a daemon
       // mid-restart, and must not paint an error over a transient blip.
@@ -270,7 +270,7 @@ describe("useDaemon websocket connection failures", () => {
     );
     vi.useFakeTimers();
     try {
-      const { result, unmount } = renderHook(() => useDaemon());
+      const { result, unmount } = renderHook(() => useDaemon({ host: "h", port: 1, token: "" }));
       for (let i = 0; i < WS_FAILURE_THRESHOLD; i++) await failConnection();
 
       expect(result.current.error).toMatch(/Could not reach the daemon/i);

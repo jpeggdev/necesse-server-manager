@@ -7,6 +7,7 @@ import { Splitter } from "./Splitter";
 import { WorldSettingsDialog } from "./WorldSettingsDialog";
 import { useDaemon } from "./useDaemon";
 import { DaemonError, STOP_TIMEOUT_STATUS, type WorldSettingValue } from "./api";
+import { loadConnection } from "./settings";
 import type { WorldModsResponse } from "./types";
 import "./App.css";
 
@@ -14,6 +15,10 @@ const MODS_WIDTH_KEY = "necesse.modsWidth";
 const MODS_WIDTH_DEFAULT = 432;
 const MODS_WIDTH_MIN = 300;
 const MODS_WIDTH_MAX = 900;
+
+// Task 9 replaces this with the connection screen; until then, whatever was
+// last saved (or this same default) is what every session talks to.
+const DEFAULT_CONNECTION = { host: "192.168.1.106", port: 8710, token: "" };
 
 export default function App() {
   const {
@@ -30,7 +35,7 @@ export default function App() {
     error: daemonError,
     busy: taskBusy,
     refresh,
-  } = useDaemon();
+  } = useDaemon(loadConnection() ?? DEFAULT_CONNECTION);
   const [error, setError] = useState<string | null>(null);
   const [candidate, setCandidate] = useState<{ name: string; valid: boolean; exists: boolean } | null>(null);
   // Covers the click-to-response span only: from the moment a mutation is

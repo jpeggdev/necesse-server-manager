@@ -80,21 +80,21 @@ afterEach(async () => {
 
 describe("makeApi against a real daemon instance", () => {
   it("stop() reaches the route handler instead of 400ing on an empty JSON body", async () => {
-    await expect(makeApi(baseUrl).stop()).rejects.toThrow(/not running/i);
+    await expect(makeApi(baseUrl, "").stop()).rejects.toThrow(/not running/i);
   });
 
   it("kill() reaches the route handler instead of 400ing on an empty JSON body", async () => {
-    await expect(makeApi(baseUrl).kill()).rejects.toThrow(/no managed server/i);
+    await expect(makeApi(baseUrl, "").kill()).rejects.toThrow(/no managed server/i);
   });
 
   it("updateServer() reaches the route handler instead of 400ing on an empty JSON body", async () => {
-    const res = await makeApi(baseUrl).updateServer();
+    const res = await makeApi(baseUrl, "").updateServer();
     expect(res.ok).toBe(true);
     expect(typeof res.taskId).toBe("string");
   });
 
   it("updateAllMods() reaches the route handler instead of 400ing on an empty JSON body", async () => {
-    const res = await makeApi(baseUrl).updateAllMods();
+    const res = await makeApi(baseUrl, "").updateAllMods();
     expect(res.ok).toBe(true);
     expect(typeof res.taskId).toBe("string");
   });
@@ -102,7 +102,7 @@ describe("makeApi against a real daemon instance", () => {
   it("removeMod() (bodyless DELETE) reaches the route handler instead of 400ing", async () => {
     // Same root cause, same request() codepath, different verb: confirm the
     // fix isn't accidentally POST-specific.
-    await expect(makeApi(baseUrl).removeMod("999")).rejects.toThrow(/not managed/i);
+    await expect(makeApi(baseUrl, "").removeMod("999")).rejects.toThrow(/not managed/i);
   });
 });
 
@@ -121,7 +121,7 @@ describe("mod library and reconcile over a real daemon instance", () => {
     modJarBytes({ id, name: id, version, gameVersion: "1.2.0" }, filler === undefined ? {} : { filler });
 
   it("uploads a jar as a raw body and reads it back out of the library", async () => {
-    const api = makeApi(baseUrl);
+    const api = makeApi(baseUrl, "");
     const bytes = await jar("someone.realmod", "3.1");
 
     const res = await api.uploadMod(bytes, "RealMod-3.1.jar");
@@ -142,13 +142,13 @@ describe("mod library and reconcile over a real daemon instance", () => {
   // wrong is a 415 that no daemon-side test can see.
   it("is refused with the daemon's own message when the jar is not a Necesse mod", async () => {
     const bytes = await modJarBytes({ id: "irrelevant" }, { omitInfo: true });
-    await expect(makeApi(baseUrl).uploadMod(bytes, "NotAMod.jar")).rejects.toThrow(
+    await expect(makeApi(baseUrl, "").uploadMod(bytes, "NotAMod.jar")).rejects.toThrow(
       /no mod\.info at its root/,
     );
   });
 
   it("cuts an oversize body off at the wire and answers 413, not a truncated success", async () => {
-    const api = makeApi(baseUrl);
+    const api = makeApi(baseUrl, "");
     await expect(api.uploadMod(Buffer.alloc(UPLOAD_LIMIT + 1, 7), "Huge.jar")).rejects.toMatchObject({
       status: 413,
     });
@@ -160,7 +160,7 @@ describe("mod library and reconcile over a real daemon instance", () => {
   });
 
   it("writes a world's set and applies it with a real reconcile", async () => {
-    const api = makeApi(baseUrl);
+    const api = makeApi(baseUrl, "");
     await api.uploadMod(await jar("a.wanted"), "Wanted-1.0.jar");
     await api.uploadMod(await jar("b.unwanted"), "Unwanted-1.0.jar");
 
@@ -174,7 +174,7 @@ describe("mod library and reconcile over a real daemon instance", () => {
   });
 
   it("hands the daemon's refusal back as its own text for an id the library lacks", async () => {
-    await expect(makeApi(baseUrl).saveWorldMods("Tulsa", ["not.here"])).rejects.toThrow(/not\.here/);
+    await expect(makeApi(baseUrl, "").saveWorldMods("Tulsa", ["not.here"])).rejects.toThrow(/not\.here/);
   });
 
   /*
@@ -186,7 +186,7 @@ describe("mod library and reconcile over a real daemon instance", () => {
    * load eight.
    */
   it("tells a world with no set apart from a world whose set is empty", async () => {
-    const api = makeApi(baseUrl);
+    const api = makeApi(baseUrl, "");
     await writeFile(join(modsDir, "Wanted-1.0.jar"), await jar("a.wanted"));
 
     expect(await api.worldMods("Fresh")).toMatchObject({
@@ -209,7 +209,7 @@ describe("mod library and reconcile over a real daemon instance", () => {
    * Steam.
    */
   it("carries a set onto a newer jar of the same mod, with no edit to the set", async () => {
-    const api = makeApi(baseUrl);
+    const api = makeApi(baseUrl, "");
     await api.uploadMod(await jar("a.mod", "1.0"), "Mod-1.0.jar");
     await api.saveWorldMods("Tulsa", ["a.mod"]);
     await api.reconcileMods("Tulsa");
@@ -237,7 +237,7 @@ describe("mod library and reconcile over a real daemon instance", () => {
 describe("world settings over a real daemon instance", () => {
   it("reads the file's own keys, types and option sets", async () => {
     await makeWorldZip(worldsDir, "Tulsa");
-    const res = await makeApi(baseUrl).worldSettings("Tulsa");
+    const res = await makeApi(baseUrl, "").worldSettings("Tulsa");
 
     const difficulty = res.fields.find((f) => f.key === "difficulty");
     // The option set the form renders comes from here, not from the client.
@@ -250,7 +250,7 @@ describe("world settings over a real daemon instance", () => {
 
   it("applies a partial change and reports where the backup went", async () => {
     await makeWorldZip(worldsDir, "Tulsa");
-    const api = makeApi(baseUrl);
+    const api = makeApi(baseUrl, "");
     const res = await api.saveWorldSettings("Tulsa", { allowCheats: true, difficulty: "BRUTAL" });
 
     expect(res.changed).toEqual(["allowCheats", "difficulty"]);
@@ -264,7 +264,7 @@ describe("world settings over a real daemon instance", () => {
 
   it("writes nothing, and takes no backup, when the values already match", async () => {
     await makeWorldZip(worldsDir, "Tulsa");
-    const res = await makeApi(baseUrl).saveWorldSettings("Tulsa", { allowCheats: false });
+    const res = await makeApi(baseUrl, "").saveWorldSettings("Tulsa", { allowCheats: false });
     expect(res.changed).toEqual([]);
     expect(res.backup).toBeNull();
   });
@@ -272,13 +272,13 @@ describe("world settings over a real daemon instance", () => {
   it("hands the daemon's refusal back to the client as its own text", async () => {
     await makeWorldZip(worldsDir, "Tulsa");
     await expect(
-      makeApi(baseUrl).saveWorldSettings("Tulsa", { gameVersion: "9.9.9" }),
+      makeApi(baseUrl, "").saveWorldSettings("Tulsa", { gameVersion: "9.9.9" }),
     ).rejects.toThrow(/never be changed/i);
     await expect(
-      makeApi(baseUrl).saveWorldSettings("Tulsa", { difficulty: "IMPOSSIBLE" }),
+      makeApi(baseUrl, "").saveWorldSettings("Tulsa", { difficulty: "IMPOSSIBLE" }),
     ).rejects.toThrow(/must be one of/i);
     await expect(
-      makeApi(baseUrl).saveWorldSettings("Tulsa", { dayTimeMod: 99 }),
+      makeApi(baseUrl, "").saveWorldSettings("Tulsa", { dayTimeMod: 99 }),
     ).rejects.toThrow(/at most 10/i);
   });
 });
