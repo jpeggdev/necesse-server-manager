@@ -1,0 +1,598 @@
+<meta charset="utf-8">
+<title>Shareable Release - Design</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1a1a1a; --muted: #5f6b7a; --line: #e2e6ea;
+    --accent: #2f6f4f; --accent-bg: #eef6f1; --warn: #8a5a00; --warn-bg: #fdf6e7;
+    --code-bg: #f5f7f9; --card: #fafbfc;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171a; --fg: #e6e9ec; --muted: #9aa6b2; --line: #2b3138;
+      --accent: #6fd39b; --accent-bg: #17281f; --warn: #e0b25c; --warn-bg: #2a2113;
+      --code-bg: #1c2126; --card: #181c20;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.65 -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 62rem; margin: 0 auto; padding: 2.5rem 1.25rem 6rem; }
+  header h1 { margin: 0 0 .3rem; font-size: 1.9rem; letter-spacing: -.02em; }
+  header .sub { color: var(--muted); margin: 0 0 2rem; }
+  h2 {
+    font-size: 1.25rem; margin: 2.75rem 0 .85rem;
+    padding-bottom: .4rem; border-bottom: 2px solid var(--line);
+  }
+  h3 { font-size: 1.02rem; margin: 1.7rem 0 .5rem; }
+  p, li { color: var(--fg); }
+  code, pre { font-family: "Cascadia Code", Consolas, monospace; font-size: .875em; }
+  code { background: var(--code-bg); padding: .12em .35em; border-radius: 3px; }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--line); border-radius: 6px;
+    padding: .85rem 1rem; overflow-x: auto; line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; }
+  .tablewrap { overflow-x: auto; margin: 1rem 0; }
+  table { border-collapse: collapse; width: 100%; font-size: .92rem; }
+  th, td { text-align: left; padding: .5rem .7rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 600; color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+  td code { white-space: nowrap; }
+  .note, .warn {
+    border-left: 3px solid var(--accent); background: var(--accent-bg);
+    padding: .8rem 1rem; border-radius: 0 5px 5px 0; margin: 1.1rem 0;
+  }
+  .warn { border-left-color: var(--warn); background: var(--warn-bg); }
+  .note p:first-child, .warn p:first-child { margin-top: 0; }
+  .note p:last-child, .warn p:last-child { margin-bottom: 0; }
+  details {
+    border: 1px solid var(--line); border-radius: 6px; padding: .6rem .9rem;
+    margin: .7rem 0; background: var(--card);
+  }
+  details[open] { padding-bottom: .9rem; }
+  summary { cursor: pointer; font-weight: 600; }
+  .pill {
+    display: inline-block; font-size: .74rem; padding: .1rem .5rem; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--muted); margin-left: .4rem; vertical-align: middle;
+  }
+  .toc { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 1rem 1.25rem; }
+  .toc ol { margin: .3rem 0 0; padding-left: 1.3rem; columns: 2; column-gap: 2rem; }
+  .toc a { color: inherit; }
+  @media (max-width: 40rem) { .toc ol { columns: 1; } }
+</style>
+
+<div class="wrap">
+<header>
+  <h1>Shareable Release</h1>
+  <p class="sub">Design document &middot; 2026-07-29 &middot; Making the daemon's location and run mode configurable, and publishing the result</p>
+</header>
+
+<div class="toc">
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#goal">Goal &amp; scope</a></li>
+    <li><a href="#decisions">Decisions taken</a></li>
+    <li><a href="#config">Daemon: configuration model</a></li>
+    <li><a href="#setup">Daemon: setup wizard</a></li>
+    <li><a href="#validate">Daemon: boot validation</a></li>
+    <li><a href="#auth">Daemon: authentication</a></li>
+    <li><a href="#client">Client: connection settings</a></li>
+    <li><a href="#packaging">Repository &amp; release</a></li>
+    <li><a href="#errors">Error handling</a></li>
+    <li><a href="#testing">Testing</a></li>
+    <li><a href="#migration">Migrating the live install</a></li>
+    <li><a href="#scope-out">Out of scope</a></li>
+  </ol>
+</div>
+
+<h2 id="goal">1. Goal &amp; scope</h2>
+
+<p>The daemon and client currently work for exactly one machine. The server's identity is
+compiled into both halves: <code>daemon/src/config.ts</code> defaults to one person's paths,
+<code>client/src/useDaemon.ts</code> hardcodes <code>http://192.168.1.106:8710</code>, and the
+Tauri CSP whitelists that single origin so no other one can be reached at runtime. Anyone else
+cannot use the software without editing and rebuilding both packages.</p>
+
+<p>This work makes the daemon's location and run mode configuration rather than source, gives the
+client a runtime connection screen, adds authentication because the daemon spawns processes, and
+publishes the result as a GitHub repository with prebuilt release artifacts. A user should be able
+to download two files, run a setup wizard, and be managing their own server without a toolchain.</p>
+
+<p>The target audience is someone running a Necesse dedicated server on a Windows box on their own
+LAN. Third-party hosting is not a goal; the repository being public is what lets anyone who wants
+that adapt it.</p>
+
+<h2 id="decisions">2. Decisions taken</h2>
+
+<div class="tablewrap">
+<table>
+  <tr><th>Question</th><th>Decision</th><th>Consequence</th></tr>
+  <tr>
+    <td>Daemon OS support</td><td>Windows only</td>
+    <td>No platform abstraction layer. Paths, scheduled tasks and steamcmd stay Windows-shaped.
+    README states Windows host; Linux is a contributor's problem.</td>
+  </tr>
+  <tr>
+    <td>How the client finds the daemon</td><td>Runtime settings screen</td>
+    <td>Forces the Tauri CSP open (&sect;7). Enables shipping a prebuilt client binary.</td>
+  </tr>
+  <tr>
+    <td>Daemon run modes</td>
+    <td>Foreground console, and scheduled task as SYSTEM at startup</td>
+    <td>Two entry points to document and test. Logon-triggered tasks and a real Windows Service
+    are not shipped.</td>
+  </tr>
+  <tr>
+    <td>Server-side configuration</td><td>Interactive setup wizard, plus strict boot validation</td>
+    <td>New code (<code>setup.ts</code>). <code>loadConfig</code> stops inventing a config.</td>
+  </tr>
+  <tr>
+    <td>Authentication</td><td>Shared bearer token, generated at setup, on by default</td>
+    <td>Every route and the WebSocket upgrade gain a check. The client gains a token field.</td>
+  </tr>
+  <tr>
+    <td>Distribution</td><td>GitHub Releases built by Actions on a version tag</td>
+    <td>Two workflow files. Unsigned installer, so SmartScreen must be documented.</td>
+  </tr>
+  <tr>
+    <td><code>scripts/</code></td><td>Parameterized, kept, values gitignored</td>
+    <td>Still the maintainer's fast deploy loop; nothing personal committed.</td>
+  </tr>
+  <tr>
+    <td>Data directory config shape</td><td><code>dataDir</code> is stored; the other two are derived</td>
+    <td>Drift becomes unrepresentable for new configs. The existing guard is kept for old ones.</td>
+  </tr>
+  <tr>
+    <td>Client settings storage</td><td><code>localStorage</code>, with copy/paste in the settings UI</td>
+    <td>No new IPC seam for vitest to mock. Portability comes from the UI, not the filesystem.</td>
+  </tr>
+</table>
+</div>
+
+<h2 id="config">3. Daemon: configuration model</h2>
+
+<h3>Derived directories</h3>
+
+<p>The game is launched with <code>-datadir</code>, and derives its mods and worlds folders from
+it. The daemon reads and writes those same two folders directly. Today all three are literal
+strings in <code>config.json</code> and <code>dataDirConflict</code> refuses to boot when they
+disagree &mdash; a guard that exists only because three literals <em>can</em> disagree.</p>
+
+<p><code>loadConfig</code> will instead always compute <code>modsDir</code> and
+<code>worldsDir</code> from <code>dataDir</code> via the existing <code>modsDirFor</code> and
+<code>worldsDirFor</code> helpers, overwriting whatever the file said. <code>saveConfig</code>
+omits both keys, so a config the daemon writes cannot carry a stale copy.</p>
+
+<p>The <code>DaemonConfig</code> type keeps both fields as required, so no consumer changes.
+Only the on-disk shape loses them:</p>
+
+<pre><code>export type StoredConfig = Omit&lt;DaemonConfig, "modsDir" | "worldsDir"&gt;;</code></pre>
+
+<div class="note">
+<p><strong>The drift guard is kept, not deleted.</strong> An existing <code>config.json</code>
+carrying the two legacy keys is checked against <code>dataDir</code> before anything else runs,
+and a disagreement still refuses to boot with today's message. Silently preferring the derived
+value would resolve real drift without telling anyone &mdash; and a person whose config drifted
+has a wrong belief about where their mods live, which they need to hear about. Once the daemon
+saves for any reason the legacy keys are dropped and the check has nothing left to fire on.</p>
+</div>
+
+<h3>Defaults</h3>
+
+<p><code>DEFAULT_CONFIG</code> loses every path. What survives is only what is universal to every
+installation:</p>
+
+<div class="tablewrap">
+<table>
+  <tr><th>Keeps a default</th><th>Has no default &mdash; required</th></tr>
+  <tr>
+    <td><code>port</code> 8710, <code>jvmArgs</code>, <code>serverAppId</code>,
+    <code>workshopAppId</code>, <code>stopTimeoutMs</code>, <code>modUploadMaxBytes</code>,
+    <code>owners</code> (empty), <code>lastWorld</code> (null), <code>steamApiKey</code> (empty),
+    <code>authToken</code> (empty &mdash; see below), and <code>modLibraryDir</code> /
+    <code>modLibraryFile</code> / <code>modSetsFile</code>, which are relative to
+    <code>DAEMON_DIR</code> and therefore already portable</td>
+    <td><code>dataDir</code>, <code>serverRoot</code>, <code>javaExe</code>,
+    <code>serverJar</code>, <code>steamcmdExe</code></td>
+  </tr>
+</table>
+</div>
+
+<p><code>loadConfig</code> no longer writes a config file when none exists. Today an absent file
+produces one full of the author's paths and a daemon that boots pointed at directories that do
+not exist on the user's machine. It throws instead:</p>
+
+<pre><code>No config.json in C:\necesse-daemon.
+Run setup.cmd in that folder to create one.</code></pre>
+
+<h3>New fields</h3>
+
+<div class="tablewrap">
+<table>
+  <tr><th>Field</th><th>Type</th><th>Meaning</th></tr>
+  <tr>
+    <td><code>authToken</code></td><td><code>string</code></td>
+    <td>Shared secret every request must present. Always generated by setup, so no configuration
+    the wizard produces is unauthenticated. Its <em>default</em> is nonetheless the empty string,
+    which disables authentication: that is both the documented trusted-LAN opt-out and what makes
+    an existing pre-token <code>config.json</code> keep working across the upgrade (&sect;11). The
+    empty value is therefore a deliberate choice, never a missing one.</td>
+  </tr>
+</table>
+</div>
+
+<p><code>PublicDaemonConfig</code> must drop <code>authToken</code> the same way and for the same
+reason it drops <code>steamApiKey</code>: replaced by a boolean rather than redacted in place, so
+there is no shape in which the secret survives the trip.</p>
+
+<pre><code>export type PublicDaemonConfig =
+  Omit&lt;DaemonConfig, "steamApiKey" | "authToken"&gt; &amp; {
+    steamApiKeyConfigured: boolean;
+    authRequired: boolean;
+  };</code></pre>
+
+<div class="warn">
+<p><strong>The doc comment on <code>PublicDaemonConfig</code> becomes false and must be
+rewritten.</strong> It currently reads &ldquo;The API has no authentication by deliberate design,
+so every field it emits is readable by anything on the LAN.&rdquo; Leaving that in place would tell
+the next reader the opposite of what the code does.</p>
+</div>
+
+<h2 id="setup">4. Daemon: setup wizard</h2>
+
+<p><code>daemon/src/setup.ts</code>, run as <code>npm run setup</code> from source or
+<code>setup.cmd</code> from a release zip. Interactive, on the server box, <em>by the human</em>.</p>
+
+<div class="note">
+<p><strong>Being run interactively is the point, not an accident.</strong> The wizard reads
+<code>process.env.APPDATA</code> to propose <code>dataDir</code>. Run as the logged-in user that
+resolves to their real <code>%APPDATA%\Necesse</code>; the value is then frozen into
+<code>config.json</code> and passed to the game as <code>-datadir</code>. That is exactly what
+lets the daemon later run as SYSTEM, whose own <code>%APPDATA%</code> is
+<code>C:\Windows\system32\config\systemprofile</code> and holds no worlds at all.</p>
+</div>
+
+<h3>Probe, propose, confirm</h3>
+
+<p>The wizard never guesses silently. For each value it shows what it found and where, and takes
+the found path as the default answer:</p>
+
+<div class="tablewrap">
+<table>
+  <tr><th>Value</th><th>Probed from</th></tr>
+  <tr><td><code>dataDir</code></td><td><code>%APPDATA%\Necesse</code>; existence of
+    <code>saves\worlds</code> inside it is reported as confirmation</td></tr>
+  <tr><td><code>serverRoot</code>, <code>serverJar</code></td><td><code>Server.jar</code> under
+    <code>C:\necesseserver</code>, then under Steam library <code>steamapps\common</code>
+    folders</td></tr>
+  <tr><td><code>javaExe</code></td><td><code>&lt;serverRoot&gt;\jre\bin\java.exe</code> if present
+    &mdash; the server ships its own JRE &mdash; otherwise <code>java.exe</code> on
+    <code>PATH</code></td></tr>
+  <tr><td><code>steamcmdExe</code></td><td><code>PATH</code>, then <code>C:\steamcmd</code>,
+    then <code>%USERPROFILE%\steam</code></td></tr>
+  <tr><td><code>port</code></td><td>Defaults to 8710; the wizard binds it briefly to check it is
+    free and says so if it is not</td></tr>
+  <tr><td><code>authToken</code></td><td>Generated, not asked:
+    <code>randomBytes(24).toString("base64url")</code>. Printed at the end.</td></tr>
+  <tr><td><code>steamApiKey</code></td><td>Asked last, optional, explaining it is needed only for
+    workshop search and where to get one</td></tr>
+</table>
+</div>
+
+<p>The probe logic is a pure function &mdash; candidate paths in, findings out &mdash; separate
+from the prompting, so it is testable without driving a terminal.</p>
+
+<p>The wizard writes <code>config.json</code> <strong>without a BOM</strong>, refuses to overwrite
+an existing config unless told to, and finishes by printing the token and the exact next command
+(<code>start-daemon.cmd</code>, or <code>register-task.ps1</code> for the scheduled task).</p>
+
+<h2 id="validate">5. Daemon: boot validation</h2>
+
+<p><code>dataDirConflict</code>'s single call site in <code>index.ts</code> is replaced by
+<code>configProblems(cfg)</code>, which returns every problem rather than the first, classified:</p>
+
+<pre><code>export interface ConfigProblem {
+  key: keyof DaemonConfig;
+  message: string;
+  fatal: boolean;
+}</code></pre>
+
+<div class="tablewrap">
+<table>
+  <tr><th>Severity</th><th>Conditions</th><th>Behaviour</th></tr>
+  <tr>
+    <td><strong>Fatal</strong></td>
+    <td>Legacy <code>modsDir</code>/<code>worldsDir</code> disagreeing with <code>dataDir</code>;
+    <code>dataDir</code>, <code>serverJar</code> or <code>javaExe</code> missing from disk;
+    any of the five required path fields absent or empty. Not <code>authToken</code>, whose empty
+    value is meaningful.</td>
+    <td>Print every fatal problem, then exit non-zero. The daemon never boots into a state where
+    it would launch the game against the wrong tree.</td>
+  </tr>
+  <tr>
+    <td><strong>Warning</strong></td>
+    <td><code>steamcmdExe</code> not found</td>
+    <td>Boot. Starting, stopping and world management do not need steamcmd; only mod installs and
+    server updates do, and those already fail with the underlying error. The warning is logged and
+    carried to the client so it surfaces before a user tries.</td>
+  </tr>
+</table>
+</div>
+
+<p>Warnings reach the client through <code>StatusPayload.configWarnings: string[]</code>. That
+payload is already documented as &ldquo;the full picture a client needs&rdquo; and is delivered on
+connect in the WebSocket backlog, so no extra request is needed and no polling is introduced.</p>
+
+<h2 id="auth">6. Daemon: authentication</h2>
+
+<p>A Fastify <code>preHandler</code> requires <code>Authorization: Bearer &lt;token&gt;</code> on
+every route and answers <code>401</code> with a plain message when it is absent or wrong. The
+comparison uses <code>timingSafeEqual</code> over equal-length buffers.</p>
+
+<p>The WebSocket upgrade cannot carry a header &mdash; browsers offer no way to set one on a
+handshake &mdash; so it reads <code>?token=</code> from the query string and rejects the upgrade
+otherwise. Both paths consult the same check function; there is one implementation of "is this
+request authorized" and no second path to forget.</p>
+
+<p>An empty <code>authToken</code> disables both checks. This is the documented opt-out for a
+trusted LAN and the reason an existing install keeps working across the upgrade (&sect;11).</p>
+
+<div class="warn">
+<p><strong>This is a shared secret over plain HTTP on a LAN, and the README will say so.</strong>
+It stops a careless or compromised device on the same network from starting processes on the
+server. It is not protection against someone who can read the traffic, and the daemon must still
+never be port-forwarded.</p>
+</div>
+
+<h2 id="client">7. Client: connection settings</h2>
+
+<h3>The CSP has to open</h3>
+
+<p><code>tauri.conf.json</code>'s <code>connect-src</code> currently names one origin. A Tauri CSP
+is baked at build time, so a user-typed host cannot be reached under it at all. It becomes:</p>
+
+<pre><code>connect-src 'self' http: https: ws: wss:</code></pre>
+
+<p>That is a genuine widening and is stated as such in the README. The alternative considered and
+rejected was proxying every daemon call through Rust to keep the CSP pinned: a large Rust surface
+plus a new client-to-Rust boundary that vitest could only mock, spent defending a webview that
+renders no untrusted HTML. <code>img-src</code> is unchanged and stays restricted to Steam's CDNs.</p>
+
+<h3>Settings module and screen</h3>
+
+<p><code>client/src/settings.ts</code> wraps <code>localStorage</code> over
+<code>{ host, port, token }</code>, with validation on read so corrupt or partial stored data
+produces "not configured" rather than a malformed URL.</p>
+
+<p>A new <code>ConnectionSettings</code> component is the first screen when nothing is stored, and
+is reachable afterwards from a gear in <code>ServerHeader</code>. It offers:</p>
+
+<ul>
+  <li>Host, port and token fields.</li>
+  <li><strong>Test connection</strong>, which reports what actually happened &mdash; unreachable,
+  connection refused, 401 rejected, or connected &mdash; rather than a single generic failure. It
+  succeeds on a <code>200</code> from <code>GET /api/status</code>; no new endpoint is added and
+  no daemon version is claimed, because the daemon does not currently report one.</li>
+  <li><strong>Copy</strong> and <strong>Paste</strong> for the <code>{host, port, token}</code>
+  blob, so setting up a second workstation is a paste rather than retyping a 32-character token.</li>
+</ul>
+
+<h3>Threading the token</h3>
+
+<p><code>useDaemon.ts</code> loses its <code>DAEMON_BASE</code> and <code>WS_URL</code> constants;
+both derive from settings. <code>App.tsx</code>'s hardcoded &ldquo;Connecting to the daemon at
+192.168.1.106:8710&rdquo; renders the configured host.</p>
+
+<p><code>makeApi(base)</code> becomes <code>makeApi(base, token)</code> and sets the bearer header
+on every request.</p>
+
+<div class="warn">
+<p><strong><code>uploadMod</code> builds its own <code>fetch</code> and will not inherit the
+header.</strong> It deliberately bypasses the shared <code>request()</code> helper because it
+sends a raw jar body rather than JSON. It is therefore the one call that would ship broken while
+every other action worked &mdash; the same shape of defect that once let five actions fail in
+production with 119 tests green. It gets the header explicitly and an integration test of its own.</p>
+</div>
+
+<h3>A 401 is terminal</h3>
+
+<p><code>useDaemon</code> retries the socket every 2 seconds. Against a rejected token that spins
+forever behind a "connecting" message that never resolves and never explains itself. A 401 from
+either channel therefore stops the retry loop and returns the user to the settings screen saying
+the token was rejected. Any other failure keeps today's retry behaviour, because a daemon that is
+merely down should be waited for.</p>
+
+<h3>Shared types</h3>
+
+<p><code>daemon/src/types.ts</code> and <code>client/src/types.ts</code> must stay byte-identical.
+This work changes them (<code>configWarnings</code>, <code>authRequired</code>,
+<code>ConfigProblem</code>), so both are written in the same pass and hashed afterwards.</p>
+
+<h2 id="packaging">8. Repository &amp; release</h2>
+
+<h3>Scrubbing</h3>
+
+<div class="tablewrap">
+<table>
+  <tr><th>File</th><th>Action</th></tr>
+  <tr><td><code>daemon/src/config.ts</code></td><td>Personal paths removed with the defaults rework (&sect;3)</td></tr>
+  <tr><td><code>scripts/seed/config.json</code></td><td>Becomes <code>config.example.json</code> with placeholder paths and a documented key table</td></tr>
+  <tr><td><code>scripts/02,03,04-*.ps1</code></td><td>Read host, key, install dir, port and task name from a gitignored <code>scripts/deploy.local.ps1</code>; a <code>.example</code> is committed</td></tr>
+  <tr><td><code>CLAUDE.md</code></td><td>Rewritten generically. Machine-specific facts (SSH target, the verified-live notes) move to a gitignored <code>CLAUDE.local.md</code></td></tr>
+  <tr><td><code>docs/verification-2026-07-27.md</code>, the v1 design HTML</td><td>Left as-is. They are evidence of what was tested, and rewriting evidence to look tidy destroys its value</td></tr>
+</table>
+</div>
+
+<p>Git history is <strong>not</strong> rewritten. A private RFC1918 address and a local Windows
+account name are not secrets, and rewriting history to hide them costs more than it buys.</p>
+
+<div class="warn">
+<p><strong>One thing must be verified rather than assumed before the repository is pushed
+public:</strong> that the Steam Web API key never landed in a commit.
+<code>config.ts</code> asserts it was deliberately kept out, but an assertion in a comment is not
+evidence. <code>git log -S</code> across the full history is, and it is a precondition of
+publishing, not a follow-up.</p>
+</div>
+
+<h3>New files</h3>
+
+<div class="tablewrap">
+<table>
+  <tr><th>Path</th><th>Purpose</th></tr>
+  <tr><td><code>README.md</code></td><td>What it is, the one-machine and two-machine layouts, daemon install &rarr; <code>setup.cmd</code> &rarr; optional task registration, client install, first connect, the security posture, and the SmartScreen warning</td></tr>
+  <tr><td><code>LICENSE</code></td><td>MIT</td></tr>
+  <tr><td><code>config.example.json</code></td><td>Every key with a comment-free placeholder, explained in the README</td></tr>
+  <tr><td><code>.github/workflows/ci.yml</code></td><td>On push and PR: both test suites and <code>tsc --noEmit</code> for both packages, on <code>windows-latest</code></td></tr>
+  <tr><td><code>.github/workflows/release.yml</code></td><td>On a <code>v*</code> tag: build both artifacts, attach to a GitHub Release</td></tr>
+  <tr><td><code>daemon/setup.cmd</code>, <code>daemon/start-daemon.cmd</code></td><td>Entry points that work from a release zip, where no TypeScript toolchain exists</td></tr>
+</table>
+</div>
+
+<div class="note">
+<p><strong>CI on <code>windows-latest</code> rather than Ubuntu.</strong> This codebase is full of
+Windows path handling, case-insensitive comparisons and backslash separators. A green Linux run
+would prove less than nothing about it.</p>
+</div>
+
+<h3>Release artifacts</h3>
+
+<div class="tablewrap">
+<table>
+  <tr><th>Artifact</th><th>Contents</th></tr>
+  <tr>
+    <td><code>necesse-daemon-vX.Y.Z.zip</code></td>
+    <td><code>dist/</code>, production-only <code>node_modules/</code>, <code>package.json</code>,
+    <code>setup.cmd</code>, <code>start-daemon.cmd</code>, <code>register-task.ps1</code>,
+    <code>config.example.json</code>, and a short <code>README-DAEMON.txt</code></td>
+  </tr>
+  <tr>
+    <td><code>NecesseServerManager_X.Y.Z_x64-setup.exe</code></td>
+    <td>The Tauri installer, unsigned</td>
+  </tr>
+</table>
+</div>
+
+<h3>Where daemon state lives</h3>
+
+<p>State stays in the daemon's own directory next to <code>dist/</code>:
+<code>config.json</code>, <code>mods.json</code>, <code>mod-library/</code>,
+<code>mod-library.json</code>, <code>mod-sets.json</code>. Moving it to
+<code>%PROGRAMDATA%</code> was considered and rejected as churn against a layout the deploy script
+and every existing install already assume.</p>
+
+<div class="warn">
+<p><strong>This makes "upgrade by deleting the folder and unzipping the new one" destructive.</strong>
+<code>mod-library/</code> is the only copy of every hand-placed and uploaded jar, and
+<code>mod-sets.json</code> is the only record of what each world loads. The README's upgrade
+instruction is therefore explicit: <em>replace <code>dist/</code> and <code>node_modules/</code>,
+keep everything else</em>. The release zip nests its replaceable content so the distinction is
+visible rather than a thing you had to have read.</p>
+</div>
+
+<h3>Repository name</h3>
+
+<p><code>necesse-server-manager</code>, matching the client binary name. The current folder name
+<code>server-gui</code> says nothing about what it manages.</p>
+
+<h2 id="errors">9. Error handling</h2>
+
+<p>The existing rule is unchanged and extends to the new code: a missing file is distinguished
+from a real failure, and everything else rethrows with the path and the underlying message. A
+<code>catch</code> that returns a default is a defect here.</p>
+
+<ul>
+  <li>Boot refusal prints <em>every</em> fatal problem, not the first. A user fixing one path at a
+  time across four restarts is a worse experience than one list.</li>
+  <li>Setup failures name the path they were writing and why it failed. A wizard that says
+  "failed to save" has wasted the user's answers.</li>
+  <li>The client's Test connection distinguishes unreachable, refused, 401 and connected. These
+  need four different fixes and a single "could not connect" hides which.</li>
+  <li>401 responses carry a plain message, not an empty body. A user whose token is stale needs to
+  read that fact, not infer it from a status code.</li>
+</ul>
+
+<h2 id="testing">10. Testing</h2>
+
+<p>The project's rule is to cover the seam rather than each side of it. Authentication is a seam,
+and it is added to the one test that crosses it for real.</p>
+
+<h3>Integration <span class="pill">client/test/api.integration.test.ts</span></h3>
+
+<p>This test stands up a real daemon on an ephemeral port and drives it with the real client
+transport. It gains a daemon configured <em>with</em> a token, and asserts:</p>
+
+<ul>
+  <li>Every mutating call succeeds with the correct token.</li>
+  <li>A wrong token and an absent token are both rejected with 401 over HTTP.</li>
+  <li>The same for the WebSocket upgrade, which uses a different mechanism (query parameter) and
+  therefore proves nothing about itself from the HTTP result.</li>
+  <li><code>uploadMod</code> specifically, because it is the one call that builds its own request
+  and so is the one that can be broken while the suite is green.</li>
+</ul>
+
+<h3>Daemon unit tests</h3>
+
+<ul>
+  <li><code>loadConfig</code> throws naming the directory when the file is absent, and does not
+  create one.</li>
+  <li><code>modsDir</code> and <code>worldsDir</code> are derived from <code>dataDir</code> and
+  ignore stored values; <code>saveConfig</code> omits both keys.</li>
+  <li>A legacy config whose stored dirs disagree with <code>dataDir</code> is still refused.</li>
+  <li><code>configProblems</code> classifies fatal versus warning correctly and returns all
+  problems rather than stopping at the first.</li>
+  <li>The setup probe function, over fixture directory layouts: server root found and not found,
+  bundled JRE present and absent, steamcmd on PATH and absent.</li>
+</ul>
+
+<h3>Client unit tests</h3>
+
+<ul>
+  <li><code>settings.ts</code> round-trips, and treats corrupt or partial stored data as
+  unconfigured rather than throwing.</li>
+  <li>The connection screen renders first when nothing is stored, and Test connection reports each
+  of the four outcomes distinctly.</li>
+  <li>A 401 stops the reconnect loop and returns to settings; a network error does not.</li>
+  <li>Copy and paste of the connection blob round-trip.</li>
+</ul>
+
+<h2 id="migration">11. Migrating the live install</h2>
+
+<p>The existing server has a <code>config.json</code> with all three directory keys, no
+<code>authToken</code>, and a running daemon. The upgrade path must not break it.</p>
+
+<ol>
+  <li>An absent <code>authToken</code> reads as empty, which disables authentication. The upgraded
+  daemon therefore keeps serving the existing client unchanged.</li>
+  <li>The stored <code>modsDir</code> and <code>worldsDir</code> agree with <code>dataDir</code>
+  today, so the back-compat guard passes and the derived values are identical. The first save
+  drops the legacy keys.</li>
+  <li>A token is adopted deliberately: add it to <code>config.json</code> with the daemon stopped,
+  restart, then enter it in the client's settings screen.</li>
+</ol>
+
+<p>The deploy scripts already copy <code>dist/</code> and never remove anything, so the mod
+library and sets are untouched by the upgrade. As always, <code>GET /api/status</code> reporting
+<code>stopped</code> is the check before deploying, because the game server is a child process of
+the daemon.</p>
+
+<h2 id="scope-out">12. Out of scope</h2>
+
+<ul>
+  <li><strong>LAN auto-discovery.</strong> Probing a subnet for open daemon ports is real work and
+  reads as port scanning to some security software. The connection screen takes a typed address.</li>
+  <li><strong>Linux or macOS daemon.</strong> Windows only, stated in the README.</li>
+  <li><strong>A real Windows Service.</strong> The scheduled task covers the same ground without a
+  third-party wrapper.</li>
+  <li><strong>Editing daemon paths from the client.</strong> An unauthenticated-by-default LAN
+  endpoint that rewrites the path of the executable the daemon spawns is a remote code execution
+  primitive. Configuration stays server-side.</li>
+  <li><strong>Code signing.</strong> The installer is unsigned and SmartScreen is documented.</li>
+  <li><strong>Filtering <code>Update All</code> by workshop timestamp.</strong>
+  <code>mod-installer.ts</code>'s <code>updateAll</code> reinstalls every managed mod
+  unconditionally; the <code>time_updated</code> comparison exists only as the badge behind
+  <code>GET /api/mods/updates</code>. That is a real gap, but it is a behaviour change to mod
+  management rather than to packaging, and it is tracked separately.</li>
+</ul>
+
+</div>
