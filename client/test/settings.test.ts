@@ -44,8 +44,12 @@ describe("loadConnection", () => {
     expect(loadConnection()).toEqual({ host: "h", port: 1, token: "" });
   });
 
-  it("rejects a stored port that is NaN", () => {
-    localStorage.setItem(CONNECTION_KEY, JSON.stringify({ host: "h", port: NaN, token: "" }));
+  it("treats stored text with invalid JSON (literal NaN) as unconfigured", () => {
+    // JSON.stringify converts NaN to null, and JSON.parse never produces NaN — NaN cannot
+    // reach the port validator through this module's public API. This test covers the only
+    // route into parse(): corrupt stored text. If ever tempted to "improve" this by making
+    // NaN testable, remember that JavaScript's JSON cannot carry it.
+    localStorage.setItem(CONNECTION_KEY, '{"host":"h","port":NaN,"token":""}');
     expect(loadConnection()).toBeNull();
   });
 
