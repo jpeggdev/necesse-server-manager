@@ -1,4 +1,5 @@
 import { spawn as nodeSpawn } from "node:child_process";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveBootConfig } from "./config.js";
@@ -10,7 +11,7 @@ import { ModSets } from "./mod-sets.js";
 import { migrateModSets } from "./mod-migration.js";
 import { resolveLegacyState } from "./migrate-state.js";
 import { ProcessManager, type SpawnFn } from "./process-manager.js";
-import { stateDir } from "./state-dir.js";
+import { BOOT_REFUSAL_FILE, stateDir } from "./state-dir.js";
 import { SteamCmd } from "./steamcmd.js";
 import { SteamWorkshop } from "./steam-workshop.js";
 import { findOrphanServer, listJavaProcesses } from "./orphan.js";
@@ -19,19 +20,42 @@ const here = dirname(fileURLToPath(import.meta.url));
 // Where the code lives. Not where state lives - see state-dir.ts.
 const installDir = join(here, "..");
 const dir = stateDir();
+const refusalLog = join(dir, BOOT_REFUSAL_FILE);
+
+/**
+ * Refuses the boot loudly enough to be found afterwards.
+ *
+ * The console half is useless in the arrangement this daemon is actually
+ * deployed in: it runs as a Scheduled Task, whose stdout is discarded, so an
+ * operator watching 04-restart-daemon.ps1 sees only "the task did not reach
+ * Running" and none of the text that says what to fix. The file is the durable
+ * half. A failure to write it is reported and then ignored - the refusal still
+ * stands, and a daemon that started anyway because it could not write a log
+ * would be strictly worse.
+ */
+async function recordRefusal(message: string): Promise<void> {
+  console.error(message);
+  try {
+    await mkdir(dir, { recursive: true });
+    await writeFile(refusalLog, `${new Date().toISOString()}\n\n${message}\n`, "utf8");
+    console.error(`\nThis message was also written to ${refusalLog}.`);
+  } catch (e) {
+    console.error(`Could not write ${refusalLog}: ${(e as Error).message}`);
+  }
+}
 
 // Before the config is even read: an install whose state is still beside dist/
 // would otherwise boot against an empty state directory, silently presenting
 // itself as a fresh install and leaving the real mod library behind.
 const legacyRefusal = await resolveLegacyState(installDir, dir);
 if (legacyRefusal !== null) {
-  console.error(legacyRefusal);
+  await recordRefusal(legacyRefusal);
   process.exit(1);
 }
 
 const boot = await resolveBootConfig(dir);
 if (!boot.ok) {
-  console.error(boot.message);
+  await recordRefusal(boot.message);
   process.exit(1);
 }
 const { cfg, configFile, configWarnings } = boot;
@@ -104,7 +128,13 @@ const app = buildServer({
   workshop,
 });
 await app.listen({ host: "0.0.0.0", port: cfg.port });
+// A refusal log that outlived the problem it described would send the next
+// operator to fix something that is already fixed.
+await rm(refusalLog, { force: true });
 console.log(
   `necesse-daemon listening on 0.0.0.0:${cfg.port} ` +
-    `(${cfg.authToken.length > 0 ? "token required" : "NO ACCESS TOKEN - anyone on this network can control the server"})`,
+    // .trim(), matching tokenMatches and publicConfig exactly. Without it a
+    // whitespace-only token banners "token required" while the daemon in fact
+    // accepts every request - the one wrong answer that reads as reassurance.
+    `(${cfg.authToken.trim().length > 0 ? "token required" : "NO ACCESS TOKEN - anyone on this network can control the server"})`,
 );

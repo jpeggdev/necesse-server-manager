@@ -32,6 +32,21 @@ export function stateFile(name: string): string {
   return join(stateDir(), name);
 }
 
+/**
+ * Where a refused boot leaves its explanation.
+ *
+ * The daemon normally runs as a Scheduled Task, whose stdout goes nowhere at
+ * all, so a refusal printed to the console is a refusal nobody ever reads -
+ * the only symptom is a task that will not stay Running.
+ *
+ * `stateDirPopulated` deliberately ignores this name. The legacy-state refusal
+ * writes the file into a state directory it has just declared empty, and if
+ * that counted as populated the next boot would conclude the migration had
+ * already happened and start against an empty state directory - the exact
+ * outcome the refusal exists to prevent.
+ */
+export const BOOT_REFUSAL_FILE = "boot-refusal.txt";
+
 /** What an install predating the state directory kept beside `dist/`. */
 export const LEGACY_STATE_FILES = [
   "config.json",

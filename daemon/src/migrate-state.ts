@@ -1,6 +1,6 @@
 import { cp, mkdir, readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { LEGACY_STATE_DIRS, LEGACY_STATE_FILES } from "./state-dir.js";
+import { BOOT_REFUSAL_FILE, LEGACY_STATE_DIRS, LEGACY_STATE_FILES } from "./state-dir.js";
 
 const present = async (p: string): Promise<boolean> => {
   try {
@@ -21,10 +21,16 @@ export async function findLegacyState(installDir: string): Promise<string[]> {
   return found;
 }
 
-/** Whether the state directory already holds anything worth keeping. */
+/**
+ * Whether the state directory already holds anything worth keeping.
+ *
+ * The boot-refusal log does not count. It is written by the very refusal this
+ * predicate produces, so counting it would make the second boot after a
+ * refusal decide the migration had already happened - see BOOT_REFUSAL_FILE.
+ */
 export async function stateDirPopulated(dir: string): Promise<boolean> {
   try {
-    return (await readdir(dir)).length > 0;
+    return (await readdir(dir)).some((name) => name !== BOOT_REFUSAL_FILE);
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw new Error(`Failed to read the state directory ${dir}: ${(e as Error).message}`);

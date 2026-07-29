@@ -17,9 +17,25 @@ $local = Join-Path $PSScriptRoot "deploy.local.ps1"
 if (Test-Path $local) { . $local }
 if (-not $InstallDir) { $InstallDir = $PSScriptRoot }
 if (-not $InstallDir) { throw "Could not determine the install directory: `$PSScriptRoot is empty and no deploy.local.ps1 (next to this script) sets `$InstallDir." }
-if (-not $DaemonPort) { $DaemonPort = 8710 }
 if (-not $TaskName)   { $TaskName = "NecesseDaemon" }
 $dir = $InstallDir
+
+# The daemon's own config.json is the authority on which port it will bind and
+# which token it will demand. Both are read here rather than assumed: the
+# firewall rule below opens ONE port, and a user who answered anything but 8710
+# in setup.cmd would otherwise get a rule for a port nothing is listening on
+# and a LAN client that cannot connect for a reason nothing reports.
+$configFile = Join-Path $env:PROGRAMDATA "NecesseServerManager\config.json"
+$configuredToken = $null
+if (Test-Path $configFile) {
+  # -Raw plus an explicit BOM strip: PowerShell 5.1's Set-Content -Encoding UTF8
+  # writes one and ConvertFrom-Json rejects it, and hand-editing this file is
+  # the documented way to set the Steam key.
+  $daemonConfig = ((Get-Content $configFile -Raw) -replace "^\uFEFF", "") | ConvertFrom-Json
+  if (-not $DaemonPort -and $daemonConfig.port) { $DaemonPort = [int]$daemonConfig.port }
+  $configuredToken = $daemonConfig.authToken
+}
+if (-not $DaemonPort) { $DaemonPort = 8710 }
 # The firewall rule id and the Scheduled Task name are deliberately separate
 # variables even though they default from the same value: they are different
 # namespaces (netsh vs. Task Scheduler), and an instruction to rename or
@@ -126,4 +142,25 @@ if ($who -notmatch 'SYSTEM$') { throw "Task registered as '$who', not SYSTEM." }
 
 Start-ScheduledTask -TaskName $TaskName
 Start-Sleep -Seconds 5
-Invoke-RestMethod "http://localhost:$DaemonPort/api/status" | ConvertTo-Json -Compress
+
+# Authenticated, because setup.cmd ALWAYS generates a token: an unauthenticated
+# check here answers 401 for every user who followed the README's install step,
+# and Invoke-RestMethod throws terminating on a 4xx in PowerShell 5.1 -- so the
+# documented "run it at boot" step ended with a stack trace on a registration
+# that had in fact worked perfectly.
+$headers = @{}
+if ($configuredToken) { $headers["Authorization"] = "Bearer $configuredToken" }
+try {
+  Invoke-RestMethod "http://localhost:$DaemonPort/api/status" -Headers $headers | ConvertTo-Json -Compress
+} catch {
+  # Not a typed catch: which exception Invoke-RestMethod wraps a 4xx in has
+  # changed across PowerShell versions, and a typed catch that misses puts the
+  # operator back in front of the stack trace this exists to replace.
+  $code = 0
+  $resp = $_.Exception.PSObject.Properties['Response']
+  if ($resp -and $resp.Value) { $code = [int]$resp.Value.StatusCode }
+  if ($code -eq 401) {
+    throw "The task is registered and the daemon is answering on port $DaemonPort, so registration succeeded. It rejected this check's token: this script read authToken from $configFile, and that is not the value the daemon booted with -- config.json was edited since it started, or the daemon is using a different state directory (NECESSE_MANAGER_DATA)."
+  }
+  throw "The task is registered, but GET http://localhost:$DaemonPort/api/status failed: $($_.Exception.Message). If the daemon refuses to boot it says why in $env:PROGRAMDATA\NecesseServerManager\boot-refusal.txt."
+}

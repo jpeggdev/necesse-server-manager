@@ -23,6 +23,37 @@ $key    = $SshKey
 # a backtick to survive interpolation untouched.
 $script = @"
 `$ErrorActionPreference = "Stop"
+
+# The daemon refuses to boot on legacy state beside dist\ and on a broken
+# config.json, and it says exactly what to do about each -- on stdout, which
+# for a Scheduled Task goes nowhere. Without this, every one of those refusals
+# reaches the operator as nothing but "the task did not reach Running".
+# Running it once in the foreground here is safe precisely because it refuses:
+# a daemon that would start is a daemon the task is about to start anyway, and
+# this copy is killed the moment it stops printing.
+function Show-DaemonRefusal {
+  `$exe = `$null
+  try { `$exe = (Get-Command node.exe -ErrorAction Stop).Source } catch {}
+  if (-not `$exe -and (Test-Path "C:\Program Files\nodejs\node.exe")) { `$exe = "C:\Program Files\nodejs\node.exe" }
+  if (-not `$exe) { Write-Output "(node.exe not found, cannot run the daemon in the foreground)"; return }
+  `$entry = Join-Path "$InstallDir" "dist\index.js"
+  if (-not (Test-Path `$entry)) { Write-Output "(no `$entry to run)"; return }
+  Write-Output "--- running the daemon in the foreground to capture why it will not start ---"
+  `$out = Join-Path `$env:TEMP "necesse-foreground.log"
+  `$err = Join-Path `$env:TEMP "necesse-foreground.err.log"
+  `$p = Start-Process -FilePath `$exe -ArgumentList "dist\index.js" -WorkingDirectory "$InstallDir" ``
+    -NoNewWindow -PassThru -RedirectStandardOutput `$out -RedirectStandardError `$err
+  # A daemon that is going to refuse has done so within a second or two; one
+  # that is going to work would otherwise sit here holding the port forever.
+  if (-not `$p.WaitForExit(15000)) { `$p.Kill(); Write-Output "(the daemon did not exit within 15s -- it did not refuse, so the failure is elsewhere)" }
+  foreach (`$f in @(`$out, `$err)) {
+    if (Test-Path `$f) { Get-Content `$f | ForEach-Object { Write-Output `$_ } }
+  }
+  `$log = Join-Path `$env:PROGRAMDATA "NecesseServerManager\boot-refusal.txt"
+  if (Test-Path `$log) { Write-Output "--- `$log ---"; Get-Content `$log | ForEach-Object { Write-Output `$_ } }
+  Write-Output "--- end foreground run ---"
+}
+
 Stop-ScheduledTask -TaskName "$TaskName"
 `$deadline = (Get-Date).AddSeconds(20)
 while ((Get-Date) -lt `$deadline) {
@@ -38,10 +69,40 @@ Start-ScheduledTask -TaskName "$TaskName"
 Start-Sleep -Seconds 4
 `$started = (Get-ScheduledTask -TaskName "$TaskName").State
 if (`$started -ne 'Running') {
-  throw "$TaskName did not reach Running after Start-ScheduledTask (state: `$started)."
+  Show-DaemonRefusal
+  throw "$TaskName did not reach Running after Start-ScheduledTask (state: `$started). See the foreground run above for the daemon's own explanation."
 }
 Write-Output "STARTED_STATE=`$started"
-`$status = Invoke-RestMethod http://localhost:$DaemonPort/api/status
+
+# The daemon 401s an unauthenticated request whenever a token is configured,
+# and setup.cmd always configures one, so the token has to be read back out of
+# config.json. Invoke-RestMethod throws terminating on any 4xx in PowerShell
+# 5.1, so without this the last line of a perfectly successful restart is a
+# stack trace.
+`$configFile = Join-Path `$env:PROGRAMDATA "NecesseServerManager\config.json"
+`$headers = @{}
+if (Test-Path `$configFile) {
+  # -Raw plus an explicit BOM strip: Set-Content -Encoding UTF8 on 5.1 writes
+  # one, and ConvertFrom-Json rejects it.
+  `$raw = (Get-Content `$configFile -Raw) -replace "^\uFEFF", ""
+  `$token = (`$raw | ConvertFrom-Json).authToken
+  if (`$token) { `$headers["Authorization"] = "Bearer `$token" }
+}
+try {
+  `$status = Invoke-RestMethod "http://localhost:$DaemonPort/api/status" -Headers `$headers
+} catch {
+  # Not `catch [System.Net.WebException]`: the exact exception type Invoke-RestMethod
+  # wraps a 4xx in has changed across PowerShell versions, and a typed catch that
+  # misses puts the operator back where this started -- a stack trace instead of
+  # a sentence. The status code is read defensively for the same reason.
+  `$code = 0
+  `$resp = `$_.Exception.PSObject.Properties['Response']
+  if (`$resp -and `$resp.Value) { `$code = [int]`$resp.Value.StatusCode }
+  if (`$code -eq 401) {
+    throw "The daemon is running and answering on port $DaemonPort, but it rejected this check's token, so the restart itself succeeded. What is wrong is the token: this script read authToken from `$configFile, and that is not the value the daemon booted with -- config.json was edited since it started, or the daemon is using a different state directory (NECESSE_MANAGER_DATA)."
+  }
+  throw
+}
 if (`$null -eq `$status.activeTasks) {
   throw "GET /api/status carries no activeTasks field, so the daemon answering on the port is a pre-round-4 build and the restart did not pick up the new dist."
 }

@@ -10,6 +10,7 @@ import {
   stateDirPopulated,
   verifyTree,
 } from "../src/migrate-state.js";
+import { BOOT_REFUSAL_FILE } from "../src/state-dir.js";
 
 let root: string;
 let install: string;
@@ -49,6 +50,20 @@ describe("stateDirPopulated", () => {
     await mkdir(state, { recursive: true });
     await writeFile(join(state, "config.json"), "{}", "utf8");
     expect(await stateDirPopulated(state)).toBe(true);
+  });
+
+  /**
+   * The refusal writes its own log into this directory. If that counted, the
+   * second boot after a refusal would find a "populated" state directory,
+   * decide the migration had already happened, and start as a fresh install
+   * against an empty one - leaving the real mod library behind, which is the
+   * single outcome the refusal exists to prevent. migrate.cmd would also then
+   * refuse to run, on the grounds that the destination is not empty.
+   */
+  it("does not count the boot-refusal log the refusal itself writes", async () => {
+    await mkdir(state, { recursive: true });
+    await writeFile(join(state, BOOT_REFUSAL_FILE), "refused", "utf8");
+    expect(await stateDirPopulated(state)).toBe(false);
   });
 });
 
@@ -165,6 +180,14 @@ describe("resolveLegacyState", () => {
     await writeFile(join(state, "config.json"), "{}", "utf8");
 
     expect(await resolveLegacyState(install, state)).toBeNull();
+  });
+
+  it("still refuses on the second boot, when its own refusal log is all that is there", async () => {
+    await writeFile(join(install, "config.json"), "{}", "utf8");
+    await mkdir(state, { recursive: true });
+    await writeFile(join(state, BOOT_REFUSAL_FILE), "refused", "utf8");
+
+    expect(await resolveLegacyState(install, state)).not.toBeNull();
   });
 });
 
