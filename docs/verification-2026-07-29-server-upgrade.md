@@ -109,22 +109,107 @@ install-directory paths still sitting in the migrated `config.json` and derives
 the state-directory ones instead. That is what makes the install directory
 disposable, which is what makes the documented upgrade safe.
 
-## CI
+## A full world cycle on the new build
+
+Tulsa started and stopped on the migrated install. This is the part that
+exercises reconciliation from the *migrated* library rather than just reading
+paths back out of a config.
+
+```
+before start:  9 jars in the mods folder, Tulsa mod set configured=True count=8
+after start:   8 jars, exactly the 8 in Tulsa's set
+```
+
+All eight were then loaded by the game itself:
+
+```
+Found mod: Advanced Starter Kit (eryr.starter.kit, 1.1) from ModsFolderModProvider
+Found mod: Aphorea Mod (aphoreateam.aphoreamod, 1.0.38) from ModsFolderModProvider
+Found mod: AutoTorch (autotorch, 1.1.0) from ModsFolderModProvider
+Found mod: CorruptedRaidMod (marko.raid, 1.1.9) from ModsFolderModProvider
+Found mod: Extended Range (oblio.extendedrange, 1.3) from ModsFolderModProvider
+Found mod: Fishing Overhaul (eryr.fishing.overhaul, 1.0.1) from ModsFolderModProvider
+Found mod: NPC Shops Expanded (eryr.shops.expanded, 1.7) from ModsFolderModProvider
+Found mod: Safe Haven QOL (torvian.qol, 2.6) from ModsFolderModProvider
+Loading existing world at C:\Users\jeffp\AppData\Roaming\Necesse\saves\worlds\Tulsa.zip
+Local address: 192.168.1.106:14159
+```
+
+`state=running`, `port=14159`, `slots=5`, `gameVersion=1.2.0`, `Found 2 saved
+players`. So `-datadir` still resolves the right tree under SYSTEM with a config
+read from the new state directory, and the mod set applied is the one the
+migrated `mod-sets.json` records.
+
+A graceful stop returned `state=stopped` with `lastError` empty, and the save
+landed:
+
+```
+Tulsa.zip mtime before: 07/28/2026 10:34:15
+Tulsa.zip mtime after:  07/30/2026 03:52:56
+```
+
+That closes the chain end to end: migrate, reconcile from the migrated library,
+launch, save, stop.
+
+## CI and the release workflow
 
 `ci.yml` ran on GitHub for the first time and passed in 1m54s (run
 `30510838190`), so the earlier document's "neither workflow has ever run" is now
-half closed.
+closed for CI. `release.yml` was then exercised for real by tagging `v1.0.0`;
+its result is recorded below.
+
+The client's version was bumped from `0.1.0` to `1.0.0` in the same commit as
+the tag, in all three places that carry it (`client/package.json`,
+`tauri.conf.json`, `src-tauri/Cargo.toml`, plus the `Cargo.lock` entry), so the
+produced artifacts match the tag instead of shipping as 0.1.0.
+
+`release.yml` succeeded on the first tag, in 11m14s (run `30512286768`), and
+published three assets:
+
+```
+necesse-daemon-v1.0.0.zip                 3200379 bytes
+Necesse.Server.GUI_1.0.0_x64-setup.exe    1958972 bytes
+Necesse.Server.GUI_1.0.0_x64_en-US.msi    2936832 bytes
+```
+
+Two things that were previously only reasoned about are now settled by
+observation. First, `windows-latest` does have a Rust/MSVC/WebView2 toolchain
+sufficient for `npm run tauri build` — that was named as the most likely first
+failure and it was not one. Second, the installer's spaces survive: the bundler
+writes `Necesse Server GUI_1.0.0_x64-setup.exe` and
+`softprops/action-gh-release` renames spaces to dots on upload, giving
+`Necesse.Server.GUI_1.0.0_x64-setup.exe`. The glob matched, nothing was
+word-split, and the earlier decision to leave `productName` alone costs nothing.
+
+### The published zip was downloaded and run
+
+Not inspected — run. `gh release download`, `Expand-Archive`, then
+`start-daemon.cmd` from the extracted directory:
+
+| Check | Result |
+|---|---|
+| Zip root layout | flat: `dist/`, `node_modules/`, three `.cmd` files, `register-task.ps1`, `config.example.json`, both manifests |
+| No extra nesting level from `Compress-Archive` | correct |
+| `start-daemon.cmd` resolves `dist/` and `node_modules` | yes, no `MODULE_NOT_FOUND` |
+| With an empty state dir, refuses and names `setup.cmd` | yes, and names the state directory |
+| With a config present, boots and listens | yes |
+| Rejects an unauthenticated request | 401 |
+| Answers with the token | 200 |
+
+So the packaging chain end to end — tag, runner build, upload, download,
+extract, run — is verified rather than assumed.
 
 ## Still not verified
 
-- **`release.yml` has never run.** It triggers on a `v*` tag and no tag exists.
-- **No world has been started on the new build.** The daemon reports `stopped`
-  and was not asked to launch a session, so mod reconciliation at start, the
-  `-datadir` launch path and a graceful save-and-stop are all still only
-  verified against the *previous* build (see
-  [`verification-2026-07-27.md`](verification-2026-07-27.md)).
 - **The built client was never launched**, so the connection screen, the token
-  round trip and the widened CSP are unexercised in a real WebView.
+  round trip and the widened CSP are unexercised in a real WebView. This is now
+  the largest remaining gap: every claim about the client rests on its test
+  suites plus a successful compile.
+- **The daemon still has no access token on this machine.** `authToken` is
+  absent, so authentication is disabled. That is what kept the existing client
+  working across the upgrade, and it means the token path — the whole of
+  `auth.ts`, the 401 handling in the client, the `?token=` socket parameter — is
+  verified only locally and in tests, never against this server.
 - **The old originals in `C:\Users\jeffp\necesse-daemon` have not been deleted.**
   That is deliberate: `migrate.cmd` copies rather than moves so the operator
   deletes them once satisfied. Until then the install directory is not actually
