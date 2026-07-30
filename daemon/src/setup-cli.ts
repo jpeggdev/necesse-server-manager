@@ -7,6 +7,16 @@ import { generateToken, probeConfig, realExists } from "./setup-probe.js";
 import { stateDir } from "./state-dir.js";
 import type { DaemonConfig } from "./types.js";
 
+/**
+ * Interactive only. `readline/promises` over a non-TTY stdin delivers the first
+ * line and drops the rest, so `setup.cmd < answers.txt` answers one question
+ * and then exits with Node's "Detected unsettled top-level await", having
+ * written nothing. Verified 2026-07-29 (docs/verification-2026-07-29-artifacts.md).
+ * It fails visibly rather than writing a half-formed config, so this is a
+ * limitation to know about rather than a defect to work around - but it does
+ * mean the wizard cannot be scripted, and anything that needs to be scriptable
+ * belongs in config.json directly.
+ */
 const rl = createInterface({ input: process.stdin, output: process.stdout });
 
 const ask = async (question: string, fallback: string | null): Promise<string> => {

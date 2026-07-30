@@ -15,6 +15,13 @@ put on the real server.** Four green suites below prove the two packages are
 internally consistent with each other's assumptions. They prove nothing about
 deployment, packaging, or the interactive tools an operator actually runs.
 
+> **Partly superseded, same day.** A later pass ran after the game server was
+> stopped and closed several of the gaps listed below by building and running
+> the real artifacts:
+> [`verification-2026-07-29-artifacts.md`](verification-2026-07-29-artifacts.md).
+> The three subsections marked SUPERSEDED below are the ones it covers. This
+> document is left otherwise intact as the record of what was true before it.
+
 ---
 
 ## What was run, and the real output
@@ -220,7 +227,12 @@ else could have caught them, because nothing executes these scripts as part
 of any suite, local or CI. Their presence is direct evidence that this class
 of bug is real and that the absence of execution is not a hypothetical gap.
 
-### The Tauri client was never built
+### The Tauri client was never built — SUPERSEDED
+
+> It has since been built cleanly, and the installer filenames are now known.
+> See [`verification-2026-07-29-artifacts.md`](verification-2026-07-29-artifacts.md).
+> What remains true below: the built app was never launched, so the CSP's
+> runtime behaviour in a real WebView is still unverified.
 
 `npx tauri build` was not run at any point in this task or any prior one on
 this branch — it is on the explicit prohibition list. The CSP change in
@@ -251,7 +263,13 @@ actually finds `dist/` and `node_modules` when extracted, and
 with the glob patterns used (verified by reading the action's source, not by
 running it).
 
-### The setup wizard's interactive path was never driven end to end
+### The setup wizard's interactive path was never driven end to end — SUPERSEDED
+
+> It has since been driven to completion against the staged build, and a real
+> limitation was found in the process (it cannot be fed by piping a file into
+> stdin). See
+> [`verification-2026-07-29-artifacts.md`](verification-2026-07-29-artifacts.md).
+> The prompting layer still has no automated coverage.
 
 `daemon/src/setup-cli.ts` opens a real `readline/promises` interface against
 `process.stdin` (`createInterface({ input: process.stdin, output:
@@ -278,7 +296,16 @@ server or a disposable stand-in for it, and this task had access to neither.
 What was previously confirmed (SYSTEM holding inherited `FullControl` on the
 relevant paths) is still all that is confirmed.
 
-### The `%PROGRAMDATA%` state directory has never been exercised on the real server
+### The `%PROGRAMDATA%` state directory has never been exercised on the real server — PARTLY SUPERSEDED
+
+> The state directory, the legacy-state refusal and `migrate.cmd` have since
+> been exercised against a real built daemon on the workstation, using scratch
+> directories. See
+> [`verification-2026-07-29-artifacts.md`](verification-2026-07-29-artifacts.md).
+> The claim about the **real server** below is unchanged and still true: no
+> daemon has booted against `C:\ProgramData\NecesseServerManager` on that box,
+> and the migration has never run against real world saves or a real mod
+> library.
 
 `daemon/src/state-dir.ts` and the `NECESSE_MANAGER_DATA` override are
 covered by `daemon/test/state-dir.test.ts` against a temp directory on the
@@ -308,10 +335,10 @@ gaps; it closes none of the old ones.
 | Area | What exists | What was actually exercised |
 |---|---|---|
 | `scripts/*.ps1` | Two Critical defects found and fixed by code review | Nothing — never executed, on this branch or ever |
-| Tauri client build | CSP and packaging config written | Read only — `tauri build` never run |
+| Tauri client build | CSP and packaging config written | **Since built cleanly** (artifacts doc); built app never launched |
 | GitHub Actions (`ci.yml`, `release.yml`) | Both files exist, YAML-valid | Never triggered on GitHub |
-| Setup wizard interactive prompts | Full readline loop in `setup-cli.ts` | Only its pure probe function (`probeConfig`) and `generateToken` |
+| Setup wizard interactive prompts | Full readline loop in `setup-cli.ts` | **Since driven end to end** (artifacts doc); still no automated coverage |
 | steamcmd under SYSTEM | Filesystem permissions confirmed pre-branch | Anonymous-login handshake under SYSTEM never run |
-| `%PROGRAMDATA%` state dir on real server | Code and unit tests against temp dirs | Never booted on the real box |
-| `migrate.cmd` | Code and unit tests against synthetic trees | Never run against a real install |
+| `%PROGRAMDATA%` state dir on real server | Code and unit tests against temp dirs | **Since booted on the workstation** (artifacts doc); never on the real box |
+| `migrate.cmd` | Code and unit tests against synthetic trees | **Since run against a staged build**; never against a real install |
 | Everything in `verification-2026-07-27.md`'s own gaps list | Unchanged | Unchanged |
