@@ -83,9 +83,17 @@ describe("LaunchOptionsDialog", () => {
     expect(screen.getByRole("button", { name: /^save$/i })).toBeDisabled();
   });
 
-  it("does not send a value for an unset number field the user never touched", async () => {
-    // The stronger half of the above: even after editing a different field,
-    // the untouched unset number must contribute nothing to the payload.
+  it("sends only the edited field, not the whole form", async () => {
+    // Corrected claim: this is NOT a second check on the unset-vs-0 rendering
+    // above. Both the rendered value and the comparison baseline come from
+    // `initialValue`, so they agree whichever value that function returns and
+    // this test passes either way - it cannot see finding 6 at all.
+    //
+    // The failure mode it DOES name is the one the dialog's own doc warns
+    // about: `changes` sending every field instead of the diff. That would
+    // write an override for `slots` and `pausewhenempty` that the user never
+    // touched, permanently detaching them from the daemon-wide defaults so a
+    // later change to a default silently stopped reaching this world.
     const api = makeApi({
       launchOptions: vi.fn().mockResolvedValue({
         ok: true,

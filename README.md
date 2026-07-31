@@ -306,18 +306,45 @@ A few things about how they work are easy to miss:
   `-owner` flags overwrite each other and only the last one survives. If you
   need more than one privileged account, that has to be handled some other
   way (in-game permissions), not through this option.
-- **Text options cannot contain a quote, and no word in them can start
-  with `-` or `+`.** The game does not read its command line argument by
-  argument. It joins the whole thing into one string first, then scans that
-  string for flags, so a message of the day like `Welcome - have fun` is read
-  back as the text `Welcome`, an empty message of the day, and a flag called
-  `have`. A value like `-settings C:/somewhere.cfg` would go further and set a
-  real option nobody asked for. The daemon refuses such a value with an error
-  rather than sending a command line that means something other than what you
-  typed. This is a limit of the game itself, so there is no way around it from
-  here: write `Welcome, have fun` instead. A hyphen inside a word is fine
-  (`Jean-Luc`, `co-op night`); it is only a word that starts with one that the
-  game misreads.
+- **Text options cannot contain `-`, `+`, `"` or `'` at all.** This one is
+  worth reading in full, because it rules out things you would expect to
+  work. The game does not read its command line argument by argument. It
+  joins the whole thing into one string, and after it reads each value it
+  looks for the next `-` or `+` *anywhere* in what is left, including in the
+  middle of a word. So every hyphen starts a new option. Measured against the
+  real `Server.jar`:
+
+  | You type | The game receives |
+  |---|---|
+  | owner `Jean-Luc` | owner `Jean-Luc`, plus an option `Luc` |
+  | motd `co-op night` | motd `co-op night`, plus an option `op` set to `night` |
+  | owner `x-settings C:/evil.cfg` | owner `x-settings C:/evil.cfg`, plus the game's real `-settings` option pointed at that file |
+
+  Note that the option you set still arrives correctly, so nothing looks
+  wrong; the damage is the *second* option you did not ask for. Three of
+  those, `-dev`, `-settings` and `-logs`, are options this daemon
+  deliberately does not offer. The daemon refuses such a value rather than
+  sending a command line that means more than what you typed.
+
+  What this costs you, plainly:
+  - An owner name cannot contain a hyphen. `Jean-Luc` has to be `Jean_Luc`
+    or `JeanLuc`.
+  - A message of the day cannot contain a hyphen or an apostrophe. Write
+    `Welcome, have fun` rather than `Welcome - have fun`, and `dont` rather
+    than `don't`.
+  - **The languages `pt-BR`, `zh-CN` and `zh-TW` cannot be set through the
+    language option at all** - three of the game's 29 locales. The other 26
+    have no hyphen and work normally. The game has its own server command for
+    setting the language, which you can run from the console panel.
+
+  This is a limitation of the game's command-line parser, not of this tool,
+  and there is no way around it from here.
+- **Number options cannot be negative.** Same cause: the game reads the
+  leading `-` as the start of another option, so `-1` arrives as an empty
+  value plus an option called `1`. The game uses `-1` internally to mean
+  "no world border" and "unlimited settlements", and **those values cannot be
+  sent on a command line**, so this tool does not offer them. Leave the option
+  unset to get the game's own default.
 - **Clearing an option and setting it to blank are different.** Setting an
   option to `null` in the client removes it, so the world falls back to the
   daemon-wide default (or the game's own default if there is no default

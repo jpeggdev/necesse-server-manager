@@ -54,12 +54,17 @@ export const LAUNCH_OPTION_FIELDS: readonly LaunchOptionField[] = [
   bool("logging", "behaviour", "Server logging", "Writes the server log to disk."),
   bool("zipsaves", "behaviour", "Zip saves", "Stores world saves as zip files."),
 
-  int("worldborder", "world", "World border", "Size of the world border. -1 for none.", -1),
+  // The three fields below documented -1 as "none"/"unlimited" and declared it
+  // as their minimum. A negative number cannot be put on this game's command
+  // line at all - probed, see checkLaunchOption - so offering it advertised a
+  // value the game can never receive. The minimum is 0 and the help says where
+  // the sentinel went, rather than the form silently refusing what it offered.
+  int("worldborder", "world", "World border", "Size of the world border. The game's -1 (no border) cannot be sent on a command line, so it is not offered here; leave this unset for the game's own default.", 0),
   int("itemslife", "world", "Dropped item lifetime", "Minutes a dropped item survives before despawning. 0 for forever.", 0),
   int("unloadlevels", "world", "Unload levels after", "Seconds before an empty level is unloaded from memory.", 2),
   bool("unloadsettlements", "world", "Unload settlements", "Lets settlements unload with their level."),
-  int("maxsettlements", "world", "Max settlements per player", "-1 for unlimited.", -1),
-  int("maxsettlers", "world", "Max settlers per settlement", "-1 for unlimited.", -1),
+  int("maxsettlements", "world", "Max settlements per player", "The game's -1 (unlimited) cannot be sent on a command line, so it is not offered here; leave this unset for the game's own default.", 0),
+  int("maxsettlers", "world", "Max settlers per settlement", "The game's -1 (unlimited) cannot be sent on a command line, so it is not offered here; leave this unset for the game's own default.", 0),
   str("language", "world", "Language", "Server language id. An unknown value falls back to the default with a warning."),
 ];
 
@@ -72,26 +77,52 @@ export function fieldByName(name: string): LaunchOptionField | undefined {
 }
 
 /**
- * Text the game's own parser would read back as something other than text.
+ * Text the game's own parser would read back as more than one option.
  *
  * `GameLaunch.parseLaunchOptions` does not walk argv element by element. It
- * calls `quoteArgs`, which wraps any element containing a space in double
- * quotes, joins the whole array into ONE string, and scans that string for `-`
- * and `+` tokens with `[^\s"']+|"([^"]*)"|'([^']*)'`. So an `owner` of
- * `-settings C:/evil.cfg` arrives as `-owner "-settings C:/evil.cfg"`; the
- * parser takes the quoted group, sees it starts with `-`, stores `owner` as
- * EMPTY and continues WITHOUT skipping past the quoted region - then finds the
- * `-` inside `-settings` and parses it as a real option. One value both empties
- * the option the operator set and injects a flag this daemon deliberately does
- * not offer, on a process running as SYSTEM. No quote character is required:
- * whitespace followed by `-` or `+` is enough.
+ * calls `quoteArgs`, joins the whole array into ONE string, and walks that
+ * string. After it takes an option's value it does NOT advance past it; it
+ * resynchronises with
  *
- * Refusing at the boundary is the only honest answer, and the consequence is
- * real rather than hidden: a message of the day like `Welcome - have fun`
- * cannot be passed to this game by anything, which is why the message says so.
- * A loud refusal beats a command line that quietly means something else.
+ *   nextOption = Math.max(full.indexOf("-", i), full.indexOf("+", i))
+ *
+ * which finds a `-` ANYWHERE, including in the middle of a word. So every
+ * hyphen in a value starts a new option. This was measured against the real
+ * `C:\necesseserver\Server.jar` with a compiled probe, not read off the
+ * decompile - an earlier version of this rule only refused a leading `-`/`+`,
+ * whitespace-then-`-`/`+`, and quotes, and the probe showed all of these
+ * getting through it:
+ *
+ *   owner  "a-dev"                 -> owner=a-dev                + dev=""
+ *   owner  "a-dev 42"              -> owner=a-dev 42             + dev="42"
+ *   owner  "x-settings C:/e.cfg"   -> owner=x-settings C:/e.cfg  + settings="C:/e.cfg"
+ *   owner  "x-logs C:/evil"        -> owner=x-logs C:/evil       + logs="C:/evil"
+ *   owner  "Jean-Luc"              -> owner=Jean-Luc             + Luc=""
+ *   motd   "co-op night"           -> motd=co-op night           + op="night"
+ *
+ * Note the shape: the option the operator set survives INTACT, so the client
+ * shows exactly what they typed while a second option they never asked for is
+ * also set. `dev`, `settings` and `logs` are all real game options this daemon
+ * deliberately withholds, and it runs as SYSTEM.
+ *
+ * `+` is refused too even though the probe shows a lone `+` inside a value
+ * currently does NOT inject (`2+2 is 4` parses cleanly). That is an accident of
+ * `Math.max` preferring the later of the two first-occurrences combined with
+ * this daemon always appending `-nogui -datadir -world` after the value, so a
+ * `-` always exists further right and wins. It is a property of our argument
+ * ORDER, not of the value, and `a-dev+x` injects via the `+`. Refusing both
+ * keeps this rule true of the value alone.
+ *
+ * Quotes are refused because they corrupt rather than inject: the probe shows
+ * `say "hi"` arriving as `say `.
+ *
+ * The consequence is real and is documented rather than hidden: an owner name
+ * or a message of the day cannot contain a hyphen, and the language ids
+ * `pt-BR`, `zh-CN` and `zh-TW` cannot be set through this option at all. That
+ * is the game's parser, not this daemon. A loud refusal beats a command line
+ * that quietly means something else.
  */
-const RETOKENISED_BY_THE_GAME = /^[-+]|\s[-+]|["']/;
+const RETOKENISED_BY_THE_GAME = /[-+"']/;
 
 /**
  * Why this value cannot be stored for this option, or null if it can.
@@ -110,11 +141,12 @@ export function checkLaunchOption(name: string, value: unknown): string | null {
     if (typeof value !== "string") return `"${name}" takes text.`;
     if (RETOKENISED_BY_THE_GAME.test(value)) {
       return (
-        `"${name}" cannot contain a quote, and no word in it can start with - or +. ` +
-        `The game joins the whole command line into one string before it parses it, so a ` +
-        `value like that is read back as another flag: it would leave "${name}" empty and ` +
-        `set an option nobody asked for. That is a limit of the game's own parser, so text ` +
-        `such as "Welcome - have fun" cannot reach this server by any route.`
+        `"${name}" cannot contain - + " or '. The game joins its whole command line into one ` +
+        `string and then looks for the next - or + anywhere in it, including inside a word, so ` +
+        `each of those characters starts a new option: "Jean-Luc" sets the owner and also turns ` +
+        `on an option called "Luc", and "x-settings C:/evil.cfg" sets the game's real -settings ` +
+        `option. Measured against Server.jar. That is a limit of the game's own parser, so text ` +
+        `like this cannot reach the server by any route.`
       );
     }
     return null;
@@ -125,6 +157,18 @@ export function checkLaunchOption(name: string, value: unknown): string | null {
   }
   if (typeof value !== "number" || !Number.isInteger(value)) {
     return `"${name}" takes a whole number.`;
+  }
+  // Before the range check, so the reason given is the parser limit rather than
+  // a bare "must be 0 or more" that reads like an arbitrary bound. Probed
+  // against Server.jar: `-worldborder -1` yields worldborder="" AND an option
+  // named "1", because the resync above finds the `-` of the value itself. A
+  // negative number is simply not expressible on this game's command line.
+  if (value < 0) {
+    return (
+      `"${name}" cannot be negative. The game reads the leading - as the start of another ` +
+      `option, so -1 arrives as an empty "${name}" plus an option called "1". Measured against ` +
+      `Server.jar. Leave "${name}" unset to get the game's own default.`
+    );
   }
   const { min, max } = field;
   if (min !== undefined && max !== undefined && (value < min || value > max)) {

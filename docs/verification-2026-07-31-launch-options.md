@@ -178,8 +178,93 @@ closes none of the old ones.
 | Area | What exists | What was actually exercised |
 |---|---|---|
 | Daemon launch-options code (schema, store, migration, routes, `buildArgs`) | 532 daemon tests, all passing; `tsc --noEmit` clean | Unit and integration tests against real Fastify `inject()` and the real filesystem; never a real game process |
-| Game acceptance of any flag | 17-field schema, clamp/reject rules, daemon-owned exclusions | Read from decompiled source only; zero observed launches |
+| Game **parsing** of a command line | `checkLaunchOption`'s text and negative-number rules | **Measured** against the real `C:\necesseserver\Server.jar` with a compiled probe calling `GameLaunch.parseLaunchOptions` directly — see "Probe against the real parser" below |
+| Game **acceptance/handling** of any flag once parsed | 17-field schema, clamp/reject rules, daemon-owned exclusions | Still read from decompiled source only; zero observed launches. The probe proves what the game *parses*, not what it then does with the value |
 | `LaunchOptionsDialog` client UI | Full dialog with 17 fields, grouped, jsdom-tested | jsdom only; never rendered in a built app or WebView2 |
 | Owner migration | Retires `DaemonConfig.owners`, seeds `defaults.owner` from the first entry | Tested against synthetic input only; never run against the real `config.json` |
 | Shared `types.ts` | `LaunchOptionValue`, `LaunchOptionField`, `LaunchOptionsResponse` | Hash-verified byte-identical across `daemon/src` and `client/src` |
 | `owners` retirement | Removed from `DaemonConfig`; survives only in the migration module and its test | Confirmed by exhaustive grep across both packages' `src/` and `test/` |
+
+---
+
+## Probe against the real parser — 2026-07-31
+
+Added after the whole-branch re-review found that the text-value rule shipped in
+`checkLaunchOption` was **wrong**, having been derived by reading the decompiled
+`GameLaunch.parseLaunchOptions` rather than by measuring it. The correction was
+found by compiling a probe against the real
+`C:\necesseserver\Server.jar` and calling `parseLaunchOptions` directly, with
+the argument vector `ProcessManager.buildArgs` actually produces (supplied
+options first, `-nogui -datadir <dir> -world <world>` last).
+
+The decompile's trace stops one line short. After the parser consumes a value it
+does **not** advance past it; it resynchronises with
+
+```java
+nextOption = Math.max(full.indexOf("-", currentIndex), full.indexOf("+", currentIndex));
+```
+
+which finds a `-` **anywhere, including inside a word**. Measured output, copied
+from the probe run:
+
+```
+a-dev                  owner=[a-dev]                  intact=true  INJECTED=true  dev=[]
+a-dev 42               owner=[a-dev 42]               intact=true  INJECTED=true  dev=[42]
+x-settings C:/evil.cfg owner=[x-settings C:/evil.cfg] intact=true  INJECTED=true  settings=[C:/evil.cfg]
+x-logs C:/evil         owner=[x-logs C:/evil]         intact=true  INJECTED=true  logs=[C:/evil]
+Jean-Luc               owner=[Jean-Luc]               intact=true  INJECTED=true  Luc=[]
+co-op night            motd=[co-op night]             intact=true  INJECTED=true  op=[night]
+```
+
+Note `intact=true` on every row: **the option the operator set arrives
+correctly**, so nothing looks wrong from either end, while a second option they
+never asked for is also set. `dev`, `settings` and `logs` are all real options
+this daemon deliberately withholds, on a process running as SYSTEM.
+
+The previous rule (`/^[-+]|\s[-+]|["']/`) blocked none of these. Worse, two of
+them were **asserted as safe** in `launch-options-schema.test.ts` and
+`launch-options-migration.test.ts`, and documented as safe in `README.md`. Those
+assertions were inverted rather than deleted so the hole cannot be
+reintroduced. The rule is now `/[-+"']/`.
+
+### Negative numbers — the same defect, separately measured
+
+```
+worldborder -1     worldborder=[]  intact=false INJECTED=true  1=[]
+maxsettlers -1     maxsettlers=[]  intact=false INJECTED=true  1=[]
+maxsettlements -1  maxsettlements=[] intact=false INJECTED=true 1=[]
+worldborder 0      worldborder=[0] intact=true  INJECTED=false
+worldborder 5000   worldborder=[5000] intact=true INJECTED=false
+```
+
+A negative number cannot be put on this game's command line at all. The schema
+had been declaring `-1` as the legal minimum for `worldborder`,
+`maxsettlements` and `maxsettlers`, and its help text advertised "-1 for none"
+and "-1 for unlimited" — a value the game can never receive.
+
+**Decision: reject the negative and raise those minimums to 0, rather than
+keeping `-1` and silently emitting it.** Rejecting alone would have left the
+form offering a minimum it would then refuse; raising the minimum alone would
+have implied `0` is a substitute for `-1`, which it is not (a zero-size border
+is not "no border"). So both were done, and the help text now says where the
+sentinel went and that leaving the option unset gets the game's own default.
+The negative check runs *before* the range check so the operator is told the
+parser limitation rather than a bare "must be 0 or more".
+
+### One result that did not match expectation
+
+A lone `+` inside a value does **not** currently inject: `2+2 is 4` parses
+cleanly. That is because `Math.max` takes the later of the two
+first-occurrences, and `buildArgs` always appends `-nogui -datadir -world`
+after the value, so a `-` further right always wins. It is a property of this
+daemon's argument **order**, not of the value — `a-dev+x` still injects through
+the `+`. `+` is refused anyway, so the rule stays true of the value in
+isolation and does not depend on argument ordering staying as it is.
+
+### What this probe does and does not establish
+
+It establishes what `GameLaunch.parseLaunchOptions` **parses** a given command
+line into. It establishes nothing about what the game then **does** with a
+parsed option, and no game process was launched. The gaps recorded above are
+unchanged: still no real launch, still nothing run against the live server, and
+the owner migration is still tested only against synthetic input.

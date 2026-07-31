@@ -63,21 +63,20 @@ describe("checkLaunchOption", () => {
   it("refuses values outside the game's clamp, naming the limit", () => {
     expect(checkLaunchOption("slots", 0)).toMatch(/1 and 250/);
     expect(checkLaunchOption("slots", 251)).toMatch(/1 and 250/);
-    expect(checkLaunchOption("port", -1)).toMatch(/0 and 65535/);
     expect(checkLaunchOption("port", 65536)).toMatch(/0 and 65535/);
     expect(checkLaunchOption("unloadlevels", 1)).toMatch(/2 or more/);
-    expect(checkLaunchOption("worldborder", -2)).toMatch(/-1 or more/);
-    expect(checkLaunchOption("itemslife", -1)).toMatch(/0 or more/);
-    expect(checkLaunchOption("maxsettlements", -2)).toMatch(/-1 or more/);
-    expect(checkLaunchOption("maxsettlers", -2)).toMatch(/-1 or more/);
+    // The negative cases that used to live here now hit the negative-number
+    // rule first, which explains the parser limit instead of naming a bound;
+    // they are asserted under "negative numbers" below.
   });
 
   /*
    * The game joins the whole command line into ONE string (quoteArgs, then
-   * GameUtils.join) before scanning it for `-` and `+` tokens, so a text value
-   * containing a word that starts with `-` is re-parsed as a flag: the option
-   * the operator set is stored empty AND an option that is not on offer here
-   * gets set, on a process running as SYSTEM. These pin the boundary refusal.
+   * GameUtils.join) and then walks it, resyncing after each value with
+   * Math.max(indexOf("-", i), indexOf("+", i)) - which finds a `-` ANYWHERE,
+   * including inside a word. So any hyphen in a text value starts a second
+   * option, reaching `dev`, `settings` and `logs` on a process running as
+   * SYSTEM. These pin the boundary refusal.
    */
   describe("text a value the game would re-tokenize", () => {
     it("refuses the exact -settings injection, naming the option", () => {
@@ -86,45 +85,115 @@ describe("checkLaunchOption", () => {
       expect(bad).toContain('"owner"');
       // The consequence is stated, not just the rule: this is the whole reason
       // refusing is better than emitting the value.
-      expect(bad).toMatch(/read back as another flag/i);
+      expect(bad).toMatch(/starts a new option/i);
     });
 
     it("refuses a flag word anywhere in the value, not just at the start", () => {
-      // No quote character is needed and the value need not start with the
-      // flag: whitespace followed by `-` or `+` is all the parser requires.
       expect(checkLaunchOption("motd", "Welcome - have fun")).not.toBeNull();
       expect(checkLaunchOption("motd", "hello -settings C:/evil.cfg")).not.toBeNull();
       expect(checkLaunchOption("motd", "hello +dev")).not.toBeNull();
       expect(checkLaunchOption("password", "-dev")).not.toBeNull();
       expect(checkLaunchOption("ip", "+dev")).not.toBeNull();
-      // \s, not just a literal space - the parser's own pattern uses \s.
       expect(checkLaunchOption("motd", "line\n-settings x")).not.toBeNull();
       expect(checkLaunchOption("motd", "tab\t-dev")).not.toBeNull();
     });
 
+    /*
+     * These six were measured against the real C:\necesseserver\Server.jar with
+     * a compiled probe, and every one of them defeated the first version of
+     * this rule (leading `-`/`+`, whitespace-then-`-`/`+`, quotes). After the
+     * parser takes a value it resyncs with
+     * Math.max(indexOf("-", i), indexOf("+", i)), which finds a hyphen INSIDE a
+     * word, so the option is set correctly AND a second one appears. `dev`,
+     * `settings` and `logs` are real options this daemon withholds, on a
+     * process running as SYSTEM.
+     *
+     * `Jean-Luc` and `co-op night` were previously asserted here as SAFE. They
+     * are not. Inverted rather than deleted so the hole cannot come back.
+     */
+    it.each([
+      ["owner", "a-dev", "dev="],
+      ["owner", "a-dev 42", "dev=42"],
+      ["owner", "x-settings C:/evil.cfg", "settings=C:/evil.cfg"],
+      ["owner", "x-logs C:/evil", "logs=C:/evil"],
+      ["owner", "Jean-Luc", "Luc="],
+      ["motd", "co-op night", "op=night"],
+    ])("refuses %s=%j, which the real parser turns into an extra %s", (name, value) => {
+      expect(checkLaunchOption(name, value)).not.toBeNull();
+    });
+
     it("refuses quote characters, which quoteArgs and argsPattern both read", () => {
+      // Probed: `say "hi"` reaches the game as `say `, so this corrupts rather
+      // than injects - still not what the operator typed.
       expect(checkLaunchOption("motd", 'say "hi"')).not.toBeNull();
       expect(checkLaunchOption("motd", "say 'hi'")).not.toBeNull();
     });
 
-    it("still accepts ordinary text, including a hyphen inside a word", () => {
-      // The rule is about words STARTING with - or +, so refusing these would
-      // be an over-broad filter that made the option unusable.
+    it("refuses a plus inside a word even though a lone one currently parses cleanly", () => {
+      // The probe shows `2+2 is 4` surviving intact, but only because Math.max
+      // prefers the later of the two first-occurrences and buildArgs always
+      // appends `-nogui -datadir -world` after the value, so a `-` always wins.
+      // That is a property of our argument ORDER, not of the value: `a-dev+x`
+      // injects through the `+`. The rule stays true of the value alone.
+      expect(checkLaunchOption("motd", "2+2 is 4")).not.toBeNull();
+      expect(checkLaunchOption("owner", "a+dev")).not.toBeNull();
+    });
+
+    it("still accepts ordinary text with none of those characters", () => {
+      // The paired positive control: without it, a checker that refused every
+      // string would pass every assertion above.
       expect(checkLaunchOption("owner", "Jeff")).toBeNull();
-      expect(checkLaunchOption("owner", "Jean-Luc")).toBeNull();
+      expect(checkLaunchOption("owner", "Jean_Luc")).toBeNull();
       expect(checkLaunchOption("motd", "Welcome to the server!")).toBeNull();
-      expect(checkLaunchOption("motd", "2+2 is 4")).toBeNull();
+      expect(checkLaunchOption("motd", "Hi. Welcome.")).toBeNull();
       expect(checkLaunchOption("motd", "line\\nbreak")).toBeNull();
       expect(checkLaunchOption("ip", "192.168.1.106")).toBeNull();
+      expect(checkLaunchOption("language", "en")).toBeNull();
       // "" is a real stored value that clears nothing - see applyChanges.
       expect(checkLaunchOption("password", "")).toBeNull();
     });
 
-    it("does not apply the text rule to the other types", () => {
-      // -1 is legal for worldborder, maxsettlements and maxsettlers, and the
-      // rule must not leak across from strings and refuse them.
-      expect(checkLaunchOption("worldborder", -1)).toBeNull();
-      expect(checkLaunchOption("maxsettlers", -1)).toBeNull();
+    it("refuses the hyphenated language ids, which is a real loss and not a bug", () => {
+      // pt-BR, zh-CN and zh-TW are three of the 29 locales shipped in
+      // C:\necesseserver\locale. They genuinely cannot be set through this
+      // option; documented in README rather than left for a user to discover.
+      expect(checkLaunchOption("language", "pt-BR")).not.toBeNull();
+      expect(checkLaunchOption("language", "zh-CN")).not.toBeNull();
+      expect(checkLaunchOption("language", "zh-TW")).not.toBeNull();
+    });
+  });
+
+  /*
+   * Probed: `-worldborder -1` reaches the game as worldborder="" plus an
+   * option named "1", because the parser's resync finds the `-` of the value.
+   * A negative number cannot be expressed on this command line at all, so the
+   * schema must not offer one.
+   */
+  describe("negative numbers", () => {
+    it("refuses a negative value, explaining the parser limit", () => {
+      const bad = checkLaunchOption("worldborder", -1);
+      expect(bad).toMatch(/cannot be negative/i);
+      expect(bad).toMatch(/option called "1"/);
+      expect(checkLaunchOption("maxsettlers", -1)).not.toBeNull();
+      expect(checkLaunchOption("maxsettlements", -1)).not.toBeNull();
+      expect(checkLaunchOption("worldborder", -5000)).not.toBeNull();
+    });
+
+    it("no longer advertises -1 as a legal minimum on any field", () => {
+      // The three fields that declared min -1 were the schema promising a value
+      // the game cannot receive. Pinned so it cannot be reintroduced.
+      for (const f of LAUNCH_OPTION_FIELDS) {
+        if (f.type !== "int") continue;
+        expect(f.min).toBeGreaterThanOrEqual(0);
+        expect(f.help).not.toMatch(/-1 for/);
+      }
+    });
+
+    it("still accepts 0 and positive values on those fields", () => {
+      expect(checkLaunchOption("worldborder", 0)).toBeNull();
+      expect(checkLaunchOption("worldborder", 5000)).toBeNull();
+      expect(checkLaunchOption("maxsettlers", 0)).toBeNull();
+      expect(checkLaunchOption("maxsettlements", 12)).toBeNull();
     });
   });
 
@@ -134,7 +203,7 @@ describe("checkLaunchOption", () => {
     expect(checkLaunchOption("port", 0)).toBeNull();
     expect(checkLaunchOption("port", 65535)).toBeNull();
     expect(checkLaunchOption("unloadlevels", 2)).toBeNull();
-    expect(checkLaunchOption("worldborder", -1)).toBeNull();
+    expect(checkLaunchOption("worldborder", 0)).toBeNull();
     expect(checkLaunchOption("itemslife", 0)).toBeNull();
   });
 });

@@ -117,7 +117,7 @@ describe("migrateOwners", () => {
     // Names the value, so the operator knows which entry to fix...
     expect(msg).toContain("-settings C:/evil.cfg");
     // ...carries the checker's own reason rather than a paraphrase...
-    expect(msg).toMatch(/read back as another flag/i);
+    expect(msg).toMatch(/starts a new option/i);
     // ...and says what the server does in the meantime.
     expect(msg).toMatch(/without -owner/);
   });
@@ -135,12 +135,23 @@ describe("migrateOwners", () => {
     expect(await store.ownersMigrated()).toBe(true);
   });
 
-  it("still migrates a valid name that merely contains a hyphen", async () => {
-    // The rule is about a word STARTING with - or +, so an over-broad check
-    // would refuse ordinary names and this would go red.
+  it("refuses a hyphenated owner name, which the real parser splits into two options", async () => {
+    // Previously asserted here as SAFE, on the belief that only a word STARTING
+    // with `-` was a problem. Probed against C:\necesseserver\Server.jar:
+    // `-owner Jean-Luc` sets owner=Jean-Luc AND an option called `Luc`, because
+    // the parser resyncs on a hyphen anywhere. Inverted rather than deleted so
+    // the hole cannot be reintroduced through this path.
     const msg = await migrateOwners(["Jean-Luc"], store);
-    expect(await store.defaults()).toEqual({ owner: "Jean-Luc" });
+    expect(await store.defaults()).toEqual({});
     expect(msg).toContain("Jean-Luc");
+    expect(await store.ownersMigrated()).toBe(false);
+  });
+
+  it("still migrates an ordinary name, so the check is not simply refusing everything", async () => {
+    // The paired positive control. Underscore, not hyphen - probed intact.
+    const msg = await migrateOwners(["Jean_Luc"], store);
+    expect(await store.defaults()).toEqual({ owner: "Jean_Luc" });
+    expect(msg).toContain("Jean_Luc");
   });
 
   it("says nothing about a collapse when there was only one owner", async () => {

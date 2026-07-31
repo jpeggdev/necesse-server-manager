@@ -2170,7 +2170,7 @@ describe("launch options", () => {
       payload: { owner: "-settings C:/evil.cfg" },
     });
     expect(res.statusCode).toBe(400);
-    expect(res.json().error).toMatch(/read back as another flag/i);
+    expect(res.json().error).toMatch(/starts a new option/i);
 
     const after = await app.inject({ method: "GET", url: "/api/worlds/Tulsa/launch-options" });
     expect(after.json().overrides).toEqual({});

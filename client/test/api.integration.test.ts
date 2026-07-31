@@ -548,7 +548,7 @@ describe("launch options across the real seam", () => {
   it("refuses a text value the game's parser would read as another flag", async () => {
     const api = makeApi(baseUrl, TOKEN);
     await expect(api.saveLaunchOptions("Tulsa", { owner: "-settings C:/evil.cfg" })).rejects.toThrow(
-      /read back as another flag/i,
+      /starts a new option/i,
     );
     expect((await api.launchOptions("Tulsa")).overrides).toEqual({});
   });
