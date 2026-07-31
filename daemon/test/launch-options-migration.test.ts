@@ -28,9 +28,15 @@ describe("migrateOwners", () => {
     expect(msg).toContain("Eli");
   });
 
-  it("creates no per-world overrides", async () => {
+  it("seeds the default and creates no per-world overrides", async () => {
+    // Asserted together: a no-op migration would also leave forWorld empty,
+    // so that alone can't tell a real migration from an absent one. Pairing
+    // it with the seeded default is what makes this fail when the migration
+    // doesn't run at all.
     await migrateOwners(["Jeff", "Eli"], store);
-    expect(await store.forWorld("Tulsa")).toEqual({});
+    const file = await store.load();
+    expect(file.defaults).toEqual({ owner: "Jeff" });
+    expect(file.worlds).toEqual({});
   });
 
   it("does nothing when a default owner is already set", async () => {

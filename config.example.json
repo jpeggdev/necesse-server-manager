@@ -7,7 +7,6 @@
   "steamcmdExe": "C:\\steamcmd\\steamcmd.exe",
   "authToken": "",
   "steamApiKey": "",
-  "owners": [],
   "lastWorld": null,
   "stopTimeoutMs": 90000,
   "jvmArgs": [
