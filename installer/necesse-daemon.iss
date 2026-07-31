@@ -75,7 +75,21 @@ Name: "{group}\Open state folder"; Filename: "{code:StateDirConst}"
 
 [Tasks]
 Name: "runsetup"; Description: "Run the setup wizard now (opens a console window)"
-Name: "boottask"; Description: "Start the daemon automatically at boot, and open its firewall port"
+; FINDING G fix, and it only became necessary because of the FINDING A fix in
+; CurPageChanged. While that procedure still ran under silence it computed this
+; checkbox from ScheduledTaskExists() or (not ConfigExists()), which is OFF on a
+; configured machine that has deliberately never registered a task. Once it
+; correctly stopped running under silence, an unattended "setup.exe /VERYSILENT"
+; with no /TASKS switch fell back to this section's defaults, and a default of
+; checked would select boottask on exactly that machine - find config.json,
+; run register-task.ps1, and hand the operator a Scheduled Task and an open
+; port 8710 they had deliberately chosen not to have.
+;
+; unchecked makes the unattended default "do not touch the boot configuration",
+; which is the only safe default for a switch nobody was there to answer.
+; Interactive runs are unaffected: CurPageChanged sets both checkboxes
+; explicitly on wpSelectTasks, overriding whatever the default here was.
+Name: "boottask"; Description: "Start the daemon automatically at boot, and open its firewall port"; Flags: unchecked
 
 [Code]
 const
@@ -110,6 +124,11 @@ end;
 function StateDirConst(Param: String): String;
 begin
   Result := StateDir();
+end;
+
+function YesNo(B: Boolean): String;
+begin
+  if B then Result := 'yes' else Result := 'no';
 end;
 
 // FINDING C fix: never block an unattended run on a dialog.
@@ -320,6 +339,17 @@ begin
   end
   else if CurStep = ssPostInstall then
   begin
+    // Logged unconditionally. "Why did my boot task not get registered" is the
+    // first question an unattended install raises, and in a silent run every
+    // other trace of this decision is invisible. It is also the only
+    // elevation-independent way to observe the choice: on a machine that
+    // cannot register a task, "no task exists afterwards" is true whether the
+    // branch was skipped or merely failed.
+    Log('ssPostInstall: runsetup=' + YesNo(WizardIsTaskSelected('runsetup')) +
+        ' boottask=' + YesNo(WizardIsTaskSelected('boottask')) +
+        ' configExists=' + YesNo(ConfigExists()) +
+        ' silent=' + YesNo(WizardSilent));
+
     if WizardIsTaskSelected('runsetup') and (not ConfigExists()) then
     begin
       // Visible and waited on: the wizard is interactive and cannot be
@@ -336,7 +366,14 @@ begin
       // now, and its outcome is no longer assumed.
       if WizardSilent then
         Log('ssPostInstall: silent install - not launching the interactive setup wizard. No config.json was created; run setup.cmd afterwards.')
-      else if (not Exec(ExpandConstant('{app}\setup.cmd'), '', ExpandConstant('{app}'), SW_SHOW, ewWaitUntilTerminated, Code)) or (Code <> 0) then
+      // Two distinct outcomes, kept apart: when Exec returns False it never
+      // assigned Code, so folding them together printed whatever happened to
+      // be in that variable as an exit status.
+      else if not Exec(ExpandConstant('{app}\setup.cmd'), '', ExpandConstant('{app}'), SW_SHOW, ewWaitUntilTerminated, Code) then
+        NotifyInstall('The daemon was installed, but the setup wizard could not be started.' + #13#10#13#10 +
+               'No configuration was created. Run "Setup" from the Start Menu before starting the daemon.',
+               mbError)
+      else if Code <> 0 then
         NotifyInstall('The daemon was installed, but the setup wizard did not complete (exit ' + IntToStr(Code) + ').' + #13#10#13#10 +
                'No configuration was created. Run "Setup" from the Start Menu before starting the daemon.',
                mbError);

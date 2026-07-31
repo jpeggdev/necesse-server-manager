@@ -205,7 +205,7 @@ function Get-StateManifest($root) {
 # ({code:StateDirConst}), which means the harness no longer has to hide it --
 # and the installer honouring the override is now something this script can
 # assert instead of something it papers over.
-function Build-Setup([string]$OutDir, [string]$Version) {
+function Build-Setup([string]$OutDir, [string]$Version, [string]$StageDir = $stage) {
   $text = Get-Content (Join-Path $repo "installer\necesse-daemon.iss") -Raw
   if (-not $isElevated) {
     $from = "PrivilegesRequired=admin"
@@ -215,7 +215,7 @@ function Build-Setup([string]$OutDir, [string]$Version) {
   [System.IO.File]::WriteAllText($issHarness, $text, (New-Object System.Text.UTF8Encoding($false)))
   try {
     $log = Join-Path $work "iscc.log"
-    & $iscc "/DStageDir=$stage" "/DAppVersion=$Version" "/DOutDir=$OutDir" $issHarness *>&1 | Out-File -FilePath $log -Encoding utf8
+    & $iscc "/DStageDir=$StageDir" "/DAppVersion=$Version" "/DOutDir=$OutDir" $issHarness *>&1 | Out-File -FilePath $log -Encoding utf8
     if ($LASTEXITCODE -ne 0) { Get-Content $log | Out-Host; throw "ISCC compile failed (exit $LASTEXITCODE)" }
     Info "ISCC: $(Get-Content $log | Select-Object -Last 1)"
   } finally { Remove-Item -Force $issHarness -ErrorAction SilentlyContinue }
@@ -350,11 +350,22 @@ try {
   # {code:StateDirConst}, so they follow NECESSE_MANAGER_DATA. The state folder
   # appearing where the override points -- and nowhere else -- is that fix.
   Check "[Dirs] created the state folder at NECESSE_MANAGER_DATA, not %PROGRAMDATA%" (Test-Path $state) ""
-  $lnk = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Microsoft\Windows\Start Menu\Programs\Necesse Server Manager\Open state folder.lnk'
-  if (Test-Path $lnk) {
-    $target = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk).TargetPath
-    Check "'Open state folder' shortcut points at the real state directory" ($target -eq $state) "target=$target"
-  }
+  # If that ever regresses, everything downstream (seeding, manifests) would
+  # throw under $ErrorActionPreference = "Stop" and abort the run before the
+  # assertions that matter. A harness should fail its check and carry on, not
+  # die on the way to it.
+  if (-not (Test-Path $state)) { New-Item -ItemType Directory -Force $state | Out-Null }
+
+  # Both Start Menu roots: {group} is the per-user profile under a
+  # lowest-privilege install and the common profile under an elevated one, so
+  # looking only in %APPDATA% makes this evaporate silently on CI -- the one
+  # place the elevated path is ever exercised. Existence is a Check, not a
+  # precondition, for the same reason.
+  $lnk = @($startMenuGroups | ForEach-Object { Join-Path $_ 'Open state folder.lnk' } | Where-Object { Test-Path $_ })
+  Check "'Open state folder' shortcut was created" ($lnk.Count -eq 1) "found $($lnk.Count) in $($startMenuGroups.Count) roots"
+  $lnkTarget = if ($lnk.Count -eq 1) { (New-Object -ComObject WScript.Shell).CreateShortcut($lnk[0]).TargetPath } else { "<no shortcut>" }
+  Check "'Open state folder' shortcut points at the real state directory" ($lnkTarget -eq $state) "target=$lnkTarget"
+
   Check "install wrote nothing into the state directory" ((Get-StateManifest $state).Count -eq 0) ""
 
   # ------------------------------------------- the bundled runtime is genuine
@@ -499,6 +510,68 @@ try {
   } else {
     Check "uninstall without /SUPPRESSMSGBOXES completes instead of hanging" $false "no uninstaller; the install above did not get that far"
   }
+
+  # ------------------------------------------- regression case for FINDING G
+  # The one topology every other case here is structurally blind to: no /TASKS
+  # switch at all, on a machine that is ALREADY configured. Everything else in
+  # this script passes /TASKS explicitly and keeps the state directory empty,
+  # so "section defaults decide" and "config.json exists" never meet -- and
+  # that intersection is precisely where the regression lived. Making
+  # CurPageChanged skip silent runs handed the decision to the [Tasks]
+  # defaults, and a default of checked would have registered a boot task on an
+  # unattended upgrade of a machine whose operator had deliberately never
+  # created one.
+  #
+  # If boottask were selected here, CurStepChanged would find config.json and
+  # execute register-task.ps1 for real, leaving a Scheduled Task and an open
+  # port 8710 on the machine running the tests -- on CI, elevated, it would
+  # succeed. So this case installs a payload whose register-task.ps1 is a
+  # sentinel that only writes a marker file: a regression is then reported
+  # rather than inflicted. Nothing else about the payload matters, because what
+  # is under test is the task-selection decision and nothing downstream of it.
+  Write-Host ""
+  Write-Host "--- regression case: no /TASKS switch, state directory already configured ---"
+  $stageG   = Join-Path $work "stage-g"
+  $outG     = Join-Path $work "out-g"
+  $destG    = Join-Path $work "app-g"
+  $stateG   = Join-Path $work "state-g"
+  $sentinel = Join-Path $work "register-task-was-invoked.txt"
+  New-Item -ItemType Directory -Force $stageG, $outG, $stateG | Out-Null
+  Set-Content -Path (Join-Path $stateG "config.json") -Value '{"port":8710,"authToken":""}' -NoNewline
+  Set-Content -Path (Join-Path $stageG "register-task.ps1") -Value "Set-Content -Path '$sentinel' -Value 'invoked' -NoNewline`r`nexit 0"
+  Set-Content -Path (Join-Path $stageG "setup.cmd") -Value "@echo off`r`nexit /b 0"
+  Set-Content -Path (Join-Path $stageG "start-daemon.cmd") -Value "@echo off`r`nexit /b 0"
+
+  $setupG = Build-Setup -OutDir $outG -Version $version -StageDir $stageG
+  $env:NECESSE_MANAGER_DATA = $stateG
+  $gLog = Join-Path $work "regression-g.log"
+  # No /TASKS at all: this is a bare "setup.exe /VERYSILENT" upgrade.
+  $g = Start-Process -FilePath $setupG -PassThru -ArgumentList @(
+    "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$destG", "/LOG=$gLog")
+  $gDone = Wait-SetupIdle 120000
+  if ($gDone) { $g.WaitForExit(15000) | Out-Null } else { Stop-SetupProcesses }
+  Check "bare /VERYSILENT install (no /TASKS) finished" $gDone ""
+
+  $gText = if (Test-Path $gLog) { Get-Content $gLog -Raw } else { "" }
+  Info "decision: $((@(Get-Content $gLog -ErrorAction SilentlyContinue | Where-Object { $_ -match 'ssPostInstall: runsetup=' }) | Select-Object -First 1))"
+  # Anti-vacuity control. "boottask=no" is also true of every empty-state case
+  # already covered above; this is what proves the dangerous topology was the
+  # one actually presented.
+  Check "control: the regression case really was an already-configured machine" ($gText -match 'configExists=yes') ""
+  Check "FINDING G: bare /VERYSILENT leaves boottask DESELECTED on a configured machine" ($gText -match 'boottask=no') ""
+  Check "FINDING G: register-task.ps1 was never invoked" (-not (Test-Path $sentinel)) ""
+  Check "FINDING G: no scheduled task was created" (
+    $null -eq (Get-ScheduledTask -TaskName 'NecesseDaemon' -ErrorAction SilentlyContinue)) ""
+  Check "FINDING G: no firewall rule was created" (
+    $null -eq (Get-NetFirewallRule -Name 'NecesseDaemon-Inbound' -ErrorAction SilentlyContinue)) ""
+
+  $uninsG = Join-Path $destG "unins000.exe"
+  if (Test-Path $uninsG) {
+    Start-Process -FilePath $uninsG -PassThru -ArgumentList @("/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART") | Out-Null
+    Wait-SetupIdle 120000 | Out-Null
+  }
+  Check "regression case uninstalled cleanly" ((Get-ArpEntries).Count -eq 0) "$((Get-ArpEntries) -join ', ')"
+  Check "regression case left its state directory intact" (Test-Path (Join-Path $stateG "config.json")) ""
 
   # -------------------------------------------------------------- real state
   Write-Host ""
