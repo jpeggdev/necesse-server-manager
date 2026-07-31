@@ -51,6 +51,10 @@ let holdWorldMods: string | null = null;
 let releaseWorldMods: (() => void) | null = null;
 /** False for a daemon too old to have GET /api/mods/library. */
 let libraryEndpointExists = true;
+/** Non-fatal daemon configuration problems, e.g. a missing steamcmd. */
+let configWarnings: string[] = [];
+/** True for a daemon that 401s everything, i.e. one holding a different token. */
+let tokenRejected = false;
 
 /*
  * The mod library the daemon holds. Two origins, because the panel treats them
@@ -118,6 +122,7 @@ function statusPayload() {
     gameVersion: null,
     lastError: null,
     activeTasks: [...activeTasks],
+    configWarnings: [...configWarnings],
   };
 }
 
@@ -126,6 +131,10 @@ function jsonResponse(body: unknown) {
 }
 
 beforeEach(() => {
+  localStorage.setItem(
+    "necesse.connection",
+    JSON.stringify({ host: "127.0.0.1", port: 8710, token: "" }),
+  );
   activeTasks = [];
   serverState = "stopped";
   releaseUpdate = null;
@@ -137,6 +146,8 @@ beforeEach(() => {
   holdWorldMods = null;
   releaseWorldMods = null;
   libraryEndpointExists = true;
+  configWarnings = [];
+  tokenRejected = false;
   worldSets = {
     Tulsa: { modIds: ["safehaven.qol"], missing: [], configured: true },
     "Jeff and Eli": { modIds: ["gagadoliano.summonerexpansion"], missing: [], configured: true },
@@ -146,6 +157,16 @@ beforeEach(() => {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string, init?: { method?: string; body?: string }) => {
+      // Before every route, the way the daemon's own auth hook sits ahead of
+      // every route: a wrong token fails the whole API, not one endpoint.
+      if (tokenRejected) {
+        return {
+          ok: false,
+          status: 401,
+          statusText: "Unauthorized",
+          json: async () => ({ error: "This daemon requires an access token." }),
+        };
+      }
       // Keyed on the verb, not the path: GET /api/mods (the list) and
       // POST /api/mods (the add) are the same url.
       if (url.endsWith("/api/mods") && init?.method === "POST") {
@@ -529,6 +550,25 @@ describe("App against a daemon with no mod library", () => {
   });
 });
 
+/*
+ * Non-fatal daemon-side configuration problems (currently only a missing
+ * steamcmd) travel on every status payload so the operator sees them before
+ * they discover one by trying to install a mod.
+ */
+describe("App config warnings", () => {
+  it("surfaces a warning the daemon reports", async () => {
+    configWarnings = ["steamcmd.exe was not found; mod installs and updates will fail."];
+    await mountConnected();
+    expect(await screen.findByText(/steamcmd\.exe was not found/i)).toBeTruthy();
+  });
+
+  it("shows two warnings that happen to say the same thing", async () => {
+    configWarnings = ["duplicate warning", "duplicate warning"];
+    await mountConnected();
+    expect(await screen.findAllByText("duplicate warning")).toHaveLength(2);
+  });
+});
+
 describe("App adding a mod by id alone", () => {
   async function addById(id: string) {
     await mountConnected();
@@ -549,5 +589,34 @@ describe("App adding a mod by id alone", () => {
     addModResponse = { ok: false, status: 400, body: { ok: false, error: message } };
     await addById("3603448084");
     expect(screen.getByText(message)).toBeTruthy();
+  });
+});
+
+describe("App when the daemon rejects the token", () => {
+  /**
+   * The app leaves the connected view on a 401 and lands on the connection
+   * screen. Before this it landed there silently, identical to the user having
+   * opened it themselves, and the only way to find out what had happened was
+   * to guess that pressing "Test connection" would say.
+   */
+  it("returns to the connection screen carrying the reason", async () => {
+    tokenRejected = true;
+    render(<App />);
+    const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
+    await act(async () => {
+      ws.onopen?.();
+    });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/rejected this access token/i);
+    expect(screen.getByLabelText(/access token/i)).toBeInTheDocument();
+  });
+
+  it("shows no such notice when the user opens the screen themselves", async () => {
+    await mountConnected();
+    fireEvent.click(screen.getByRole("button", { name: /connection settings/i }));
+    await settle();
+
+    expect(screen.getByLabelText(/access token/i)).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });

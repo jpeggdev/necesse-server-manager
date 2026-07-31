@@ -7,6 +7,7 @@ import type { StatusPayload } from "../src/types";
 const stopped: StatusPayload = {
   state: "stopped", world: null, pid: null, startedAt: null,
   port: null, slots: null, gameVersion: null, lastError: null, activeTasks: [],
+  configWarnings: [],
 };
 const running: StatusPayload = { ...stopped, state: "running", world: "Tulsa", pid: 42, port: 14159 };
 
@@ -29,6 +30,7 @@ function setup(overrides: Partial<Parameters<typeof ServerHeader>[0]> = {}) {
     onKill: vi.fn(),
     onUpdateServer: vi.fn(),
     onCandidateChange: vi.fn(),
+    onEditConnection: vi.fn(),
     ...overrides,
   };
   const { rerender } = render(<ServerHeader {...props} />);
@@ -299,6 +301,7 @@ describe("ServerHeader", () => {
         onKill={vi.fn()}
         onUpdateServer={vi.fn()}
         onCandidateChange={vi.fn()}
+        onEditConnection={vi.fn()}
       />,
     );
     const input = screen.getByLabelText(/world/i);
@@ -317,6 +320,7 @@ describe("ServerHeader", () => {
         onKill={vi.fn()}
         onUpdateServer={vi.fn()}
         onCandidateChange={vi.fn()}
+        onEditConnection={vi.fn()}
       />,
     );
 

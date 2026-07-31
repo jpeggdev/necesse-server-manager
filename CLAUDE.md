@@ -3,6 +3,9 @@
 Necesse dedicated-server manager: a Node/TypeScript **daemon** that runs on the
 game-server box, and a **Tauri 2 + React client** that drives it over the LAN.
 
+Machine-specific values (SSH target, verified-live notes, local paths) live in
+the gitignored `CLAUDE.local.md`, not here.
+
 ## Layout and commands
 
 | | |
@@ -20,77 +23,135 @@ Run the two packages separately; there is no workspace root.
 kill a live game session. Before `02-deploy.ps1` or `04-restart-daemon.ps1`,
 confirm nobody is playing — `GET /api/status` reporting `stopped` is the check.
 
-`02-deploy.ps1` seeds `config.json` and `mods.json` only when absent. That is
-deliberate: `mods.json` is the only record of which jar belongs to which
-workshop id, and clobbering it strands every installed mod as untracked.
+`02-deploy.ps1` copies `dist/`, `package.json`, `package-lock.json` and the
+three launchers (`setup.cmd`, `start-daemon.cmd`, `migrate.cmd` — the boot
+refusals name them, so an install without them tells the operator to run a
+file that is not there) and seeds nothing. **Daemon state lives in `%PROGRAMDATA%\NecesseServerManager`,
+not beside `dist/`** (overridable with the `NECESSE_MANAGER_DATA` environment
+variable). That includes `config.json`, `mods.json`, `mod-library/`,
+`mod-library.json` and `mod-sets.json` (see `docs/mod-sets-design.md`); the
+library is the only copy of every uploaded and hand-placed jar, and the sets
+are what each world loads. Because none of that lives in the install
+directory, the install directory holds nothing irreplaceable — **"delete the
+folder and unzip the new release" is the correct upgrade, not a dangerous
+one.** Deploy must never write into it: `mods.json` in particular is one of
+`LEGACY_STATE_FILES`, so a copy sitting beside `dist/` makes a fresh install
+look like a pre-migration one and refuse to boot demanding `migrate.cmd`, on a
+box that was never migrated from anything. `ModRegistry.load()` treats a
+missing `mods.json` as zero mods, not an error, so there is nothing to seed —
+the file is created on first mod install. An install whose state genuinely is
+still sitting beside `dist/` (from before this split existed) refuses to boot
+and names `migrate.cmd`, which copies the old files across rather than moving
+them, so the originals stay in place until you delete them.
 
-**The daemon's own directory holds state, not just code.** Alongside those two,
-`mod-library/`, `mod-library.json` and `mod-sets.json` live there (see
-`docs/mod-sets-design.md`); the library is the only copy of every uploaded and
-hand-placed jar, and the sets are what each world loads. Deploy copies `dist/`
-and the two manifests in and never removes anything, which is what makes that
-safe — a deploy step that mirrored or cleaned the directory would destroy jars
-that exist nowhere else. Not `C:\necesseserver`, ever: steamcmd's
-`app_update ... validate` prunes unknown files out of that tree.
+**Every boot refusal is also written to `boot-refusal.txt` in the state
+directory** and deleted again on a successful start. The daemon runs as a
+Scheduled Task, whose stdout goes nowhere, so without that file the only
+symptom of any refusal is `04-restart-daemon.ps1` saying the task did not reach
+Running — which is why that script now also runs the daemon once in the
+foreground and echoes what it printed. `stateDirPopulated` deliberately ignores
+`boot-refusal.txt`: the legacy-state refusal writes it into a directory it has
+just called empty, and counting it would make the next boot decide the
+migration had already happened.
 
-SSH: `ssh -i "$env:USERPROFILE\.ssh\necesse_server" jeffp@192.168.1.106`.
+`config.json` is written by the setup wizard (`npm run setup` in `daemon/`,
+or `node dist/setup-cli.js` against a built install) and lives in that state
+directory. Hand-edit it with the daemon stopped. **Write it without a BOM** —
+PowerShell 5.1's `Set-Content -Encoding UTF8` adds one; use
+`[System.IO.File]::WriteAllText($p, $s, (New-Object System.Text.UTF8Encoding($false)))`.
+`loadConfig` tolerates a BOM now, but nothing else does.
+
+**`03-register-task.ps1` itself is not shipped by `02-deploy.ps1`** — it has to
+already be on SERVER to run there. It reads `deploy.local.ps1` from its own
+directory the same way `02-deploy.ps1` does on the workstation, but falls back
+if that file is absent: the install directory defaults to wherever the script
+itself is sitting (so an operator who places it inside the install directory,
+e.g. a release download's `register-task.ps1` at the release root, needs no
+extra setup), and `$DaemonPort`/`$TaskName` fall back to `8710`/`NecesseDaemon`.
+If you do use a `deploy.local.ps1` on SERVER, **its `$TaskName` must be the
+same string `02-deploy.ps1`'s `deploy.local.ps1` will later assume this task
+is called** (`04-restart-daemon.ps1` looks it up by that name too) — a
+mismatch means the stop-before-re-register check silently finds no existing
+task, registers a second one, and the new daemon dies on a port already held
+by the old one while the health check at the end still talks to that old one.
+
 **The remote default shell is cmd.exe.** Do not fight nested quoting — `scp` a
 `.ps1` over and run it with `powershell -NoProfile -ExecutionPolicy Bypass -File`.
 Inline `powershell -Command "..."` through ssh gets pipe-split by the remote
 cmd.exe before powershell ever sees it.
 
-`config.json` lives only on SERVER and holds the Steam API key. Hand-edit it
-with the daemon stopped. **Write it without a BOM** — PowerShell 5.1's
-`Set-Content -Encoding UTF8` adds one; use
-`[System.IO.File]::WriteAllText($p, $s, (New-Object System.Text.UTF8Encoding($false)))`.
-`loadConfig` tolerates a BOM now, but nothing else does.
+**The daemon ships as two release artifacts:** a zip (unchanged, needs Node
+22+ already on the box) and `installer/necesse-daemon.iss`, an Inno Setup
+installer that bundles its own Node. `installer/fetch-node.ps1` downloads and
+SHA-256-verifies it into the staged payload at `node\node.exe`; `daemon/setup.cmd`,
+`daemon/start-daemon.cmd`, `daemon/migrate.cmd` and `scripts/03-register-task.ps1`
+(shipped as `register-task.ps1`, see below) all prefer `<install dir>\node\node.exe`
+over whatever `node.exe` is on `PATH` when it exists, and fall back to `PATH`
+otherwise, which is what lets the zip and the installer share one set of
+shims. `daemon/register-task.cmd` ships alongside them and is what the Start
+Menu shortcut points at: it self-elevates before running `register-task.ps1`,
+because the SYSTEM-principal scheduled task and the firewall rule both need
+admin and an unelevated run failed the second one *silently*.
+
+The pinned Node version lives in `installer/node-version.txt` (currently
+`22.23.2`); that file is the one place to change it. **Part of the release
+checklist: check `node-version.txt` against the latest 22.x** at
+`https://nodejs.org/dist/index.json` and bump it if it has moved. The bundled
+runtime is private to the install, so a user cannot patch it themselves: a
+stale pin is a Node CVE nobody on the other end can do anything about. Nothing
+enforces this automatically; `installer/verify-installer.ps1` only checks that
+the *staged* runtime matches whatever the file says.
+
+## Access token
+
+Every HTTP route and the WebSocket upgrade require an access token, sent as an
+`Authorization: Bearer` header (HTTP) or `?token=` (WebSocket, which cannot set
+headers on the handshake). The token lives in `config.json`'s `authToken`.
+**An empty `authToken` disables the check** — this is the documented
+trusted-LAN opt-out, and it is also the upgrade path for a `config.json`
+written before this feature existed: it keeps answering requests instead of
+locking itself out.
 
 ## Who the daemon runs as, and why the data directory is explicit
 
 The task is registered **AtStartup as SYSTEM** (`03-register-task.ps1`), with a
-30-second trigger delay so the daemon is not binding `0.0.0.0:8710` before the
-network stack is up. It used to be **AtLogOn as `jeffp`**, which meant an
-unattended reboot brought the box up with no daemon and no server. Autologon is
-not the fix: `jeffp` is a Microsoft account (`PrincipalSource=MicrosoftAccount`),
-so Windows pushes it to Hello/PIN, and a stored password is exactly what this
-arrangement avoids.
+30-second trigger delay so the daemon is not binding its port before the
+network stack is up. It used to be **AtLogOn** as whichever account was
+logged in, which meant an unattended reboot brought the box up with no daemon
+and no server. Autologon is not a general fix: a Microsoft account
+(`PrincipalSource=MicrosoftAccount`) gets pushed by Windows to Hello/PIN, and a
+stored password is exactly what this arrangement avoids.
 
 SYSTEM was previously impossible because **the game derives its saves and mods
 from the running account's `APPDATA`**. As SYSTEM that is
 `C:\Windows\system32\config\systemprofile\AppData\Roaming\Necesse`, so the
 server would have started with zero worlds and zero mods and reported a
 completely successful launch. `Server.jar`'s own help documents `-datadir
-<path>`, so `buildArgs` now passes it from `config.json`'s **`dataDir`**
-(`C:\Users\jeffp\AppData\Roaming\Necesse`) and the game's data directory no
-longer depends on who launched it. `-datadir` sits ahead of `-world`: the world
-is a save inside that directory.
+<path>`, so `buildArgs` now passes it from `config.json`'s **`dataDir`** and
+the game's data directory no longer depends on who launched it. `-datadir`
+sits ahead of `-world`: the world is a save inside that directory.
 
-**`dataDir` and the daemon's own `modsDir`/`worldsDir` must agree** —
-`modsDir` = `<dataDir>\mods`, `worldsDir` = `<dataDir>\saves\worlds`. All three
-are literal strings in `config.json`, and drift between them is the one
-misconfiguration nothing reports: the daemon would reconcile one mods folder
-while the game loaded another, and the server would start with the wrong mod
-set. `dataDirConflict` in `config.ts` is checked in `index.ts` before anything
-reads a folder or spawns anything, and **refuses to boot** rather than pick a
-winner. Change one of the three and you change all three.
+**`dataDir` is the single source of truth.** `modsDir` (`<dataDir>\mods`) and
+`worldsDir` (`<dataDir>\saves\worlds`) are derived from it, not stored — a
+`config.json` written by an older version that still carries them is not
+silently corrected. `configProblems` in `config.ts` compares the stored keys
+against what `dataDir` derives and, via `fatalProblems`, **refuses to boot**
+rather than pick a winner if they disagree. `resolveBootConfig` runs this
+check in `index.ts` before anything reads a folder or spawns anything. Change
+`dataDir` and `modsDir`/`worldsDir` follow automatically.
 
-Verified live on 2026-07-28 with the daemon running as `NT AUTHORITY\SYSTEM`:
-all 5 worlds listed, 8 managed / 0 untracked mods, and a real Tulsa start that
-loaded all 8 jars from `ModsFolderModProvider`, named `Tulsa.zip` on the ready
-line, and saved the world on a graceful stop.
-`C:\Windows\system32\config\systemprofile\AppData\Roaming\Necesse` was never
-created, which is the negative control — its absence is the proof `-datadir`
-took.
-
-**steamcmd under SYSTEM is still unproven.** Both invocations mutate
-(`workshop_download_item` downloads a mod, `app_update ... validate` rewrites
-`C:\necesseserver`), so there is no read-only way to exercise it and it was
-deliberately left untested rather than run unattended. What *is* confirmed is
-the filesystem prerequisite: SYSTEM holds inherited FullControl on
-`C:\Users\jeffp\steam`, `steamcmd.exe`, the workshop content folder and
-`C:\necesseserver`, and steamcmd keeps its `config/` and `userdata/` inside its
-own tree rather than in a user profile. The unknown is the anonymous-login
-handshake under SYSTEM's token. Watch the first mod install.
+**`modLibraryDir`, `modLibraryFile` and `modSetsFile` derive from the state
+directory the same way**, and for a reason worth remembering: they used to be
+evaluated at module load and written by `saveConfig` (which runs on every world
+start), so every install predating the state directory has install-directory
+values for all three stored in its `config.json`. `migrateState` copies those
+files across but rewrites no config keys, so a stored value winning would mean
+a daemon reading its mod library out of the very directory the upgrade tells
+you to delete — and `ModLibrary.load()` reports the resulting missing manifest
+as an *empty library*, not an error, so nothing would say the jars were gone.
+A stored value is ignored and dropped by the next write. `DEFAULT_CONFIG`
+carries `""` for all five derived paths; resolving them at module load would
+call `stateFile()` on import, which throws wherever `PROGRAMDATA` is unset.
 
 ## Constraints that bite
 

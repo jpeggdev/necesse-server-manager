@@ -1,6 +1,7 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
+import { AUTH_FAILURE_MESSAGE, presentedToken, tokenMatches } from "./auth.js";
 import { saveConfig } from "./config.js";
 import { listWorlds, worldExists, worldZipPath, isValidWorldName } from "./worlds.js";
 import { openWorldSettings, WorldSettingsError } from "./world-settings.js";
@@ -43,6 +44,8 @@ export interface Deps {
   sets: ModSets;
   steam: SteamCmd;
   workshop: SteamWorkshop;
+  /** Non-fatal configuration problems, published so a client can surface them. */
+  configWarnings: string[];
 }
 
 const WORKSHOP_ID = /^\d+$/;
@@ -63,24 +66,34 @@ const WORKSHOP_ID = /^\d+$/;
 export const TASK_EXPIRY_MS = 60 * 60 * 1000;
 
 /**
- * Fields a LAN client may patch via PUT /api/config. Everything else
- * (paths, jvmArgs, port, app ids) is edited by hand in config.json on the
- * machine itself — the no-auth design accepts "anyone on the LAN can
- * control the game server," not "anyone on the LAN can repoint javaExe/
- * serverJar/steamcmdExe (or inject a -javaagent) and get the daemon to
- * spawn an arbitrary executable."
+ * Fields a client may patch via PUT /api/config. Everything else (paths,
+ * jvmArgs, port, app ids) is edited by hand in config.json on the machine
+ * itself.
+ *
+ * The allowlist survives the addition of an access token rather than being
+ * relaxed by it: a token establishes that the caller is trusted to control the
+ * game server, not that it is trusted to repoint javaExe/serverJar/steamcmdExe
+ * (or inject a -javaagent) and have the daemon spawn an arbitrary executable.
+ * Those are different powers, and the token is a shared secret on a plain-HTTP
+ * LAN rather than a per-user credential.
  */
 const ALLOWED_CONFIG_KEYS = new Set<keyof DaemonConfig>(["owners", "lastWorld", "stopTimeoutMs"]);
 
 /**
- * The config as it may leave the daemon. `steamApiKey` is dropped entirely
- * rather than blanked in place: this API has no authentication by deliberate
- * design, so anything either config route returns is readable by every device
- * on the LAN, and a boolean is all a client can do anything with anyway.
+ * The config as it may leave the daemon. Secrets are dropped entirely rather
+ * than blanked in place, so there is no shape in which one could survive the
+ * trip; a boolean is all a client can act on anyway.
  */
 const publicConfig = (c: DaemonConfig): PublicDaemonConfig => {
-  const { steamApiKey, ...rest } = c;
-  return { ...rest, steamApiKeyConfigured: steamApiKey.trim().length > 0 };
+  const { steamApiKey, authToken, ...rest } = c;
+  return {
+    ...rest,
+    steamApiKeyConfigured: steamApiKey.trim().length > 0,
+    // Whitespace-only is treated as unset, same as tokenMatches: it is not a
+    // secret a client could ever send back, so reporting it as "required"
+    // would tell every client to authenticate against a token it can't use.
+    authRequired: authToken.trim().length > 0,
+  };
 };
 
 /**
@@ -105,7 +118,7 @@ const errorText = (e: unknown): string =>
   e instanceof Error ? e.message : `Non-error thrown: ${String(e)}`;
 
 export function buildServer(deps: Deps): FastifyInstance {
-  const { cfg, configFile, pm, installer, library, sets, steam, workshop } = deps;
+  const { cfg, configFile, pm, installer, library, sets, steam, workshop, configWarnings } = deps;
   const app = Fastify({ logger: false });
   type Socket = { send(data: string): void };
   const sockets = new Set<Socket>();
@@ -135,7 +148,11 @@ export function buildServer(deps: Deps): FastifyInstance {
   };
 
   /** The one place a StatusPayload is built, so every channel reports the same thing. */
-  const statusPayload = (): StatusPayload => ({ ...pm.status, activeTasks: [...activeTasks] });
+  const statusPayload = (): StatusPayload => ({
+    ...pm.status,
+    activeTasks: [...activeTasks],
+    configWarnings,
+  });
 
   const broadcastStatus = (): void => broadcast({ type: "status", status: statusPayload() });
 
@@ -340,8 +357,39 @@ export function buildServer(deps: Deps): FastifyInstance {
     },
   );
 
-  void app.register(cors, { origin: true });
+  void app.register(cors, {
+    origin: true,
+    // Named explicitly because the client now sends Authorization. With
+    // origin: true @fastify/cors reflects what was asked for, but an explicit
+    // list is what makes a future change to this header visible here rather
+    // than as an unexplained preflight failure in the app.
+    allowedHeaders: ["content-type", "authorization"],
+  });
   void app.register(websocket);
+
+  /**
+   * One authorization decision for every route and for the socket upgrade.
+   *
+   * onRequest rather than preHandler so it runs before a body is parsed - an
+   * unauthorized request should not get a 64MB upload buffered on its behalf -
+   * and because @fastify/websocket runs the same lifecycle hooks for the
+   * upgrade request, which is what lets the socket be guarded by this one
+   * implementation instead of a second copy.
+   *
+   * OPTIONS is exempt, though it is belt-and-braces rather than the thing that
+   * makes preflight work: @fastify/cors registers its own onRequest hook
+   * before this one and already answers (and short-circuits) every OPTIONS
+   * request, so in practice this branch never runs. It stays as a second line
+   * of defence against that ordering changing - a CORS preflight never
+   * carries Authorization (the browser strips it), so if this hook ever did
+   * see one, rejecting it would fail every cross-origin request with a
+   * message about a token that was, in fact, about to be sent.
+   */
+  app.addHook("onRequest", async (req, reply) => {
+    if (req.method === "OPTIONS") return;
+    if (tokenMatches(cfg.authToken, presentedToken(req))) return;
+    await reply.code(401).send({ ok: false, error: AUTH_FAILURE_MESSAGE });
+  });
 
   void app.register(async (instance) => {
     instance.get("/ws", { websocket: true }, (socket) => {

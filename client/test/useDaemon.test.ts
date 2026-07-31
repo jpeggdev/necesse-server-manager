@@ -71,7 +71,7 @@ afterEach(() => {
 });
 
 async function openConnection() {
-  const { result, unmount } = renderHook(() => useDaemon());
+  const { result, unmount } = renderHook(() => useDaemon({ host: "h", port: 1, token: "" }));
   const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
   await act(async () => {
     ws.onopen?.();
@@ -242,7 +242,7 @@ describe("useDaemon websocket connection failures", () => {
   it("says the socket is blocked while HTTP still answers, rather than spinning forever", async () => {
     vi.useFakeTimers();
     try {
-      const { result, unmount } = renderHook(() => useDaemon());
+      const { result, unmount } = renderHook(() => useDaemon({ host: "h", port: 1, token: "" }));
 
       // Below the threshold this is indistinguishable from a daemon
       // mid-restart, and must not paint an error over a transient blip.
@@ -270,13 +270,48 @@ describe("useDaemon websocket connection failures", () => {
     );
     vi.useFakeTimers();
     try {
-      const { result, unmount } = renderHook(() => useDaemon());
+      const { result, unmount } = renderHook(() => useDaemon({ host: "h", port: 1, token: "" }));
       for (let i = 0; i < WS_FAILURE_THRESHOLD; i++) await failConnection();
 
       expect(result.current.error).toMatch(/Could not reach the daemon/i);
       expect(result.current.error).toMatch(/Failed to fetch/);
       // The blocked-socket wording would be a lie here: nothing answered.
       expect(result.current.error).not.toMatch(/answers over HTTP/i);
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops retrying and reports unauthorized once the HTTP probe comes back 401", async () => {
+    // The socket itself never carries a status code for a rejected upgrade -
+    // the only channel that can distinguish "wrong token" from "daemon down"
+    // is diagnoseConnectFailure's own HTTP probe, so that is what has to 401
+    // here for the loop to have anything to react to.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: false,
+        status: 401,
+        json: async () => ({ ok: false, error: "bad token" }),
+      })),
+    );
+    vi.useFakeTimers();
+    try {
+      const { result, unmount } = renderHook(() => useDaemon({ host: "h", port: 1, token: "bad" }));
+      for (let i = 0; i < WS_FAILURE_THRESHOLD; i++) await failConnection();
+
+      expect(result.current.unauthorized).toBe(true);
+      const socketsAtLockout = FakeWebSocket.instances.length;
+
+      // The actual claim under test: not just that the flag is set, but that
+      // the retry loop that was scheduled before the 401 landed does not fire,
+      // and nothing schedules another one after it either.
+      act(() => {
+        vi.advanceTimersByTime(10_000); // several multiples of the hook's 2s retry
+      });
+      expect(FakeWebSocket.instances.length).toBe(socketsAtLockout);
+
       unmount();
     } finally {
       vi.useRealTimers();

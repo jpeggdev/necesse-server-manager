@@ -1,0 +1,15 @@
+# Copy to deploy.local.ps1 (gitignored) and fill in your own values.
+# The deploy scripts dot-source this; nothing here is committed.
+
+$RemoteUser  = "youruser"
+$RemoteHost  = "192.168.1.50"
+$SshKey      = "$env:USERPROFILE\.ssh\necesse_server"
+# Where the daemon's CODE lives on the server. Its state lives in
+# %PROGRAMDATA%\NecesseServerManager and is never touched by a deploy.
+$InstallDir  = "C:\Users\youruser\necesse-daemon"
+$DaemonPort  = 8710
+# Must match the Scheduled Task name 03-register-task.ps1 actually registers
+# (its own fallback default when this file is absent). If these disagree,
+# 03's stop-the-old-task-first check silently no-ops against a task that does
+# not exist under the new name, and -Force registers a second, colliding one.
+$TaskName    = "NecesseDaemon"

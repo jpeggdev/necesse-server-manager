@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Necesse Server GUI",
   "mainBinaryName": "NecesseServerManager",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "identifier": "com.jpegg.necessegui",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -19,7 +19,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://192.168.1.106:8710 ws://192.168.1.106:8710; img-src 'self' data: https://*.steamusercontent.com https://*.steamstatic.com https://steamuserimages-a.akamaihd.net; style-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self'; connect-src 'self' http: https: ws: wss:; img-src 'self' data: https://*.steamusercontent.com https://*.steamstatic.com https://steamuserimages-a.akamaihd.net; style-src 'self' 'unsafe-inline'"
     }
   },
   "bundle": {

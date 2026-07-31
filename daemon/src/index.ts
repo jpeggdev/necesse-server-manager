@@ -1,24 +1,67 @@
 import { spawn as nodeSpawn } from "node:child_process";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { dataDirConflict, loadConfig } from "./config.js";
+import { resolveBootConfig } from "./config.js";
 import { buildServer } from "./http.js";
 import { ModInstaller } from "./mod-installer.js";
 import { ModLibrary } from "./mod-library.js";
 import { ModRegistry } from "./mod-registry.js";
 import { ModSets } from "./mod-sets.js";
 import { migrateModSets } from "./mod-migration.js";
+import { resolveLegacyState } from "./migrate-state.js";
 import { ProcessManager, type SpawnFn } from "./process-manager.js";
+import { BOOT_REFUSAL_FILE, stateDir } from "./state-dir.js";
 import { SteamCmd } from "./steamcmd.js";
 import { SteamWorkshop } from "./steam-workshop.js";
 import { findOrphanServer, listJavaProcesses } from "./orphan.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-// The daemon's own directory, holding config.json and mods.json. Not to be
-// confused with cfg.dataDir, which is the *game's* data directory.
-const daemonDir = join(here, "..");
-const configFile = join(daemonDir, "config.json");
-const modsFile = join(daemonDir, "mods.json");
+// Where the code lives. Not where state lives - see state-dir.ts.
+const installDir = join(here, "..");
+const dir = stateDir();
+const refusalLog = join(dir, BOOT_REFUSAL_FILE);
+
+/**
+ * Refuses the boot loudly enough to be found afterwards.
+ *
+ * The console half is useless in the arrangement this daemon is actually
+ * deployed in: it runs as a Scheduled Task, whose stdout is discarded, so an
+ * operator watching 04-restart-daemon.ps1 sees only "the task did not reach
+ * Running" and none of the text that says what to fix. The file is the durable
+ * half. A failure to write it is reported and then ignored - the refusal still
+ * stands, and a daemon that started anyway because it could not write a log
+ * would be strictly worse.
+ */
+async function recordRefusal(message: string): Promise<void> {
+  console.error(message);
+  try {
+    await mkdir(dir, { recursive: true });
+    await writeFile(refusalLog, `${new Date().toISOString()}\n\n${message}\n`, "utf8");
+    console.error(`\nThis message was also written to ${refusalLog}.`);
+  } catch (e) {
+    console.error(`Could not write ${refusalLog}: ${(e as Error).message}`);
+  }
+}
+
+// Before the config is even read: an install whose state is still beside dist/
+// would otherwise boot against an empty state directory, silently presenting
+// itself as a fresh install and leaving the real mod library behind.
+const legacyRefusal = await resolveLegacyState(installDir, dir);
+if (legacyRefusal !== null) {
+  await recordRefusal(legacyRefusal);
+  process.exit(1);
+}
+
+const boot = await resolveBootConfig(dir);
+if (!boot.ok) {
+  await recordRefusal(boot.message);
+  process.exit(1);
+}
+const { cfg, configFile, configWarnings } = boot;
+for (const w of configWarnings) console.warn(`Configuration warning: ${w}`);
+
+const modsFile = join(dir, "mods.json");
 
 const spawnFn: SpawnFn = (cmd, args, opts) =>
   // `as const` fixes stdio as the literal 3-tuple ("pipe","pipe","pipe") rather
@@ -30,14 +73,6 @@ const spawnFn: SpawnFn = (cmd, args, opts) =>
     windowsHide: true,
     stdio: ["pipe", "pipe", "pipe"] as const,
   });
-
-const cfg = await loadConfig(configFile);
-
-// Before anything reads a folder or spawns anything. A daemon that reconciles
-// one mods folder while the game loads another is worse than a daemon that did
-// not start: the wrong-mod-set launch it produces looks entirely successful.
-const conflict = dataDirConflict(cfg);
-if (conflict !== null) throw new Error(`${conflict} (config: ${configFile})`);
 
 const pm = new ProcessManager(cfg, spawnFn);
 const steam = new SteamCmd(cfg, spawnFn);
@@ -81,6 +116,25 @@ try {
   console.error(`Mod library migration failed: ${(e as Error).message}`);
 }
 
-const app = buildServer({ cfg, configFile, pm, installer, library, sets, steam, workshop });
+const app = buildServer({
+  cfg,
+  configFile,
+  configWarnings,
+  pm,
+  installer,
+  library,
+  sets,
+  steam,
+  workshop,
+});
 await app.listen({ host: "0.0.0.0", port: cfg.port });
-console.log(`necesse-daemon listening on 0.0.0.0:${cfg.port}`);
+// A refusal log that outlived the problem it described would send the next
+// operator to fix something that is already fixed.
+await rm(refusalLog, { force: true });
+console.log(
+  `necesse-daemon listening on 0.0.0.0:${cfg.port} ` +
+    // .trim(), matching tokenMatches and publicConfig exactly. Without it a
+    // whitespace-only token banners "token required" while the daemon in fact
+    // accepts every request - the one wrong answer that reads as reassurance.
+    `(${cfg.authToken.trim().length > 0 ? "token required" : "NO ACCESS TOKEN - anyone on this network can control the server"})`,
+);

@@ -91,6 +91,25 @@ button.danger { background: #5a2020; border-color: #7a2a2a; }
 .error { background: #4a1c1c; border-bottom: 1px solid #7a2a2a; padding: .5rem 1rem; display: flex; justify-content: space-between; gap: 1rem; }
 .error pre { margin: 0; white-space: pre-wrap; font-size: .85rem; }
 .connecting { padding: 2rem; color: #9aa6b2; }
+.config-warning { margin: 0; padding: .5rem 1rem; border-bottom: 1px solid #2b3138; }
+
+/* Full-screen in place of the app: first run (nothing saved yet) or the
+   operator has opened it to change or fix a rejected connection. */
+.connection-settings { max-width: 480px; margin: 2rem auto; padding: 0 1rem; display: flex; flex-direction: column; gap: 1rem; }
+.connection-settings h1 { font-size: 1.2rem; margin: 0; }
+.connection-settings form { display: flex; flex-direction: column; gap: .3rem; }
+.connection-settings label { font-size: .85rem; color: #9aa6b2; }
+.connection-settings input, .connection-settings textarea {
+  background: #1f242a; color: inherit; border: 1px solid #2b3138; border-radius: 4px; padding: .4rem .5rem;
+  font: inherit;
+}
+.conn-token-row { display: flex; gap: .4rem; }
+.conn-token-row input { flex: 1; min-width: 0; }
+.conn-actions { display: flex; gap: .5rem; margin-top: .3rem; }
+.conn-share { display: flex; flex-direction: column; gap: .3rem; padding-top: .8rem; border-top: 1px solid #2b3138; }
+.conn-share textarea { min-height: 4.5rem; font-family: Consolas, monospace; font-size: .8rem; resize: vertical; }
+
+.settings-btn { margin-left: auto; font-size: 1.1rem; line-height: 1; padding: .35rem .55rem; }
 
 /* World settings editor. Modal because the edit is transactional and needs the
    server stopped, so there is nothing behind it worth interacting with. */

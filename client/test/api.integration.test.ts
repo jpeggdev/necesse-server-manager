@@ -6,9 +6,10 @@
 // with the real makeApi() over real HTTP. Never point this at the live
 // daemon on the LAN - temp dirs + a fake spawn only.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { request as httpRequest } from "node:http";
 import { buildServer } from "../../daemon/src/http.js";
 import { ProcessManager } from "../../daemon/src/process-manager.js";
 import { ModInstaller } from "../../daemon/src/mod-installer.js";
@@ -17,37 +18,106 @@ import { ModLibrary } from "../../daemon/src/mod-library.js";
 import { ModSets } from "../../daemon/src/mod-sets.js";
 import { SteamCmd } from "../../daemon/src/steamcmd.js";
 import { SteamWorkshop } from "../../daemon/src/steam-workshop.js";
-import { DEFAULT_CONFIG } from "../../daemon/src/config.js";
+import { makeTestConfig } from "../../daemon/test/fixtures/test-config.js";
 import { makeFakeSpawn } from "../../daemon/test/fixtures/fake-spawn.js";
 import { makeWorldZip } from "../../daemon/test/fixtures/world-zip.js";
 import { modJarBytes } from "../../daemon/test/fixtures/mod-jar.js";
 import { makeApi } from "../src/api";
+import { wsUrl, type Connection } from "../src/settings";
 
 /** Small enough that the oversize case is a few KB rather than 64MB of payload. */
 const UPLOAD_LIMIT = 4096;
 
+/** Every call in this file authenticates with this token; the rejection cases override it. */
+const TOKEN = "integration-test-token";
+
+const UPGRADE_TIMEOUT_MS = 2000;
+
+/**
+ * The HTTP status the daemon answers a WebSocket upgrade with.
+ *
+ * Driven at the http layer rather than through a WebSocket client because the
+ * assertion is about the handshake itself: a client library reports "it did not
+ * connect" identically for a 401 and a refused connection, and telling those
+ * apart is the whole point of this test.
+ */
+const upgradeStatus = (url: string): Promise<number> =>
+  new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const req = httpRequest({
+      host: u.hostname,
+      port: u.port,
+      path: `${u.pathname}${u.search}`,
+      headers: {
+        connection: "Upgrade",
+        upgrade: "websocket",
+        "sec-websocket-key": Buffer.from("0123456789abcdef").toString("base64"),
+        "sec-websocket-version": "13",
+      },
+    });
+    const timer = setTimeout(() => {
+      req.destroy();
+      reject(new Error(`No upgrade response from ${url} within ${UPGRADE_TIMEOUT_MS}ms`));
+    }, UPGRADE_TIMEOUT_MS);
+    req.on("upgrade", (res, socket) => {
+      clearTimeout(timer);
+      socket.destroy();
+      // res.statusCode is only optional in the type, not in practice for a real
+      // upgrade response - reading it straight through, with no fallback, means
+      // a daemon that somehow omitted it fails this assertion instead of the
+      // test quietly reporting 101 regardless of what actually happened.
+      const status = res.statusCode;
+      if (status === undefined) {
+        reject(new Error("upgrade response carried no status code"));
+        return;
+      }
+      resolve(status);
+    });
+    req.on("response", (res) => {
+      clearTimeout(timer);
+      res.resume();
+      res.socket?.destroy();
+      resolve(res.statusCode ?? 0);
+    });
+    req.on("error", (e) => {
+      clearTimeout(timer);
+      reject(e);
+    });
+    req.end();
+  });
+
+/** The Connection wsUrl() needs, built from the ephemeral port app.listen() chose this run. */
+const wsConnection = (token: string): Connection => {
+  const u = new URL(baseUrl);
+  return { host: u.hostname, port: Number(u.port), token };
+};
+
 let app: ReturnType<typeof buildServer>;
 let baseUrl: string;
 let root: string;
+/** cfg.modsDir/cfg.worldsDir, derived from dataDir - captured so tests can reach into them by their real location rather than the pre-Task-2 literal "root/mods". */
+let modsDir: string;
+let worldsDir: string;
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "necesse-client-http-"));
-  const modsDir = join(root, "mods");
-  const worldsDir = join(root, "worlds");
-  await mkdir(modsDir, { recursive: true });
-  await mkdir(worldsDir, { recursive: true });
+  // modsDir/worldsDir are derived from dataDir and makeTestConfig already
+  // creates both on disk - a config where they disagree with dataDir now
+  // refuses to boot, so overriding them here would drive this seam test
+  // through a topology loadConfig can no longer produce.
   const cfg = {
-    ...DEFAULT_CONFIG,
-    modsDir,
-    worldsDir,
+    ...makeTestConfig(root),
     stopTimeoutMs: 50,
-    // Temp dirs only, per the rule at the top of this file: DEFAULT_CONFIG
-    // points the library and the sets at the daemon's own directory in the repo.
+    // Temp dirs only, per the rule at the top of this file: makeTestConfig
+    // points the library and the sets at its own temp root, not the repo.
     modLibraryDir: join(root, "mod-library"),
     modLibraryFile: join(root, "mod-library.json"),
     modSetsFile: join(root, "mod-sets.json"),
     modUploadMaxBytes: UPLOAD_LIMIT,
+    authToken: TOKEN,
   };
+  modsDir = cfg.modsDir;
+  worldsDir = cfg.worldsDir;
   const configFile = join(root, "config.json");
   const spawn = makeFakeSpawn();
   const pm = new ProcessManager(cfg, spawn.spawn);
@@ -61,7 +131,7 @@ beforeEach(async () => {
   const workshop = new SteamWorkshop(cfg, () =>
     Promise.reject(new Error("no network in tests")),
   );
-  app = buildServer({ cfg, configFile, pm, installer, library, sets, steam, workshop });
+  app = buildServer({ cfg, configFile, configWarnings: [], pm, installer, library, sets, steam, workshop });
   baseUrl = await app.listen({ port: 0, host: "127.0.0.1" });
 });
 
@@ -77,21 +147,21 @@ afterEach(async () => {
 
 describe("makeApi against a real daemon instance", () => {
   it("stop() reaches the route handler instead of 400ing on an empty JSON body", async () => {
-    await expect(makeApi(baseUrl).stop()).rejects.toThrow(/not running/i);
+    await expect(makeApi(baseUrl, TOKEN).stop()).rejects.toThrow(/not running/i);
   });
 
   it("kill() reaches the route handler instead of 400ing on an empty JSON body", async () => {
-    await expect(makeApi(baseUrl).kill()).rejects.toThrow(/no managed server/i);
+    await expect(makeApi(baseUrl, TOKEN).kill()).rejects.toThrow(/no managed server/i);
   });
 
   it("updateServer() reaches the route handler instead of 400ing on an empty JSON body", async () => {
-    const res = await makeApi(baseUrl).updateServer();
+    const res = await makeApi(baseUrl, TOKEN).updateServer();
     expect(res.ok).toBe(true);
     expect(typeof res.taskId).toBe("string");
   });
 
   it("updateAllMods() reaches the route handler instead of 400ing on an empty JSON body", async () => {
-    const res = await makeApi(baseUrl).updateAllMods();
+    const res = await makeApi(baseUrl, TOKEN).updateAllMods();
     expect(res.ok).toBe(true);
     expect(typeof res.taskId).toBe("string");
   });
@@ -99,7 +169,7 @@ describe("makeApi against a real daemon instance", () => {
   it("removeMod() (bodyless DELETE) reaches the route handler instead of 400ing", async () => {
     // Same root cause, same request() codepath, different verb: confirm the
     // fix isn't accidentally POST-specific.
-    await expect(makeApi(baseUrl).removeMod("999")).rejects.toThrow(/not managed/i);
+    await expect(makeApi(baseUrl, TOKEN).removeMod("999")).rejects.toThrow(/not managed/i);
   });
 });
 
@@ -118,7 +188,7 @@ describe("mod library and reconcile over a real daemon instance", () => {
     modJarBytes({ id, name: id, version, gameVersion: "1.2.0" }, filler === undefined ? {} : { filler });
 
   it("uploads a jar as a raw body and reads it back out of the library", async () => {
-    const api = makeApi(baseUrl);
+    const api = makeApi(baseUrl, TOKEN);
     const bytes = await jar("someone.realmod", "3.1");
 
     const res = await api.uploadMod(bytes, "RealMod-3.1.jar");
@@ -139,13 +209,13 @@ describe("mod library and reconcile over a real daemon instance", () => {
   // wrong is a 415 that no daemon-side test can see.
   it("is refused with the daemon's own message when the jar is not a Necesse mod", async () => {
     const bytes = await modJarBytes({ id: "irrelevant" }, { omitInfo: true });
-    await expect(makeApi(baseUrl).uploadMod(bytes, "NotAMod.jar")).rejects.toThrow(
+    await expect(makeApi(baseUrl, TOKEN).uploadMod(bytes, "NotAMod.jar")).rejects.toThrow(
       /no mod\.info at its root/,
     );
   });
 
   it("cuts an oversize body off at the wire and answers 413, not a truncated success", async () => {
-    const api = makeApi(baseUrl);
+    const api = makeApi(baseUrl, TOKEN);
     await expect(api.uploadMod(Buffer.alloc(UPLOAD_LIMIT + 1, 7), "Huge.jar")).rejects.toMatchObject({
       status: 413,
     });
@@ -157,7 +227,7 @@ describe("mod library and reconcile over a real daemon instance", () => {
   });
 
   it("writes a world's set and applies it with a real reconcile", async () => {
-    const api = makeApi(baseUrl);
+    const api = makeApi(baseUrl, TOKEN);
     await api.uploadMod(await jar("a.wanted"), "Wanted-1.0.jar");
     await api.uploadMod(await jar("b.unwanted"), "Unwanted-1.0.jar");
 
@@ -167,11 +237,11 @@ describe("mod library and reconcile over a real daemon instance", () => {
     const res = await api.reconcileMods("Tulsa");
 
     expect(res.reconcile.copied).toEqual(["Wanted-1.0.jar"]);
-    expect((await readdir(join(root, "mods"))).sort()).toEqual(["Wanted-1.0.jar"]);
+    expect((await readdir(modsDir)).sort()).toEqual(["Wanted-1.0.jar"]);
   });
 
   it("hands the daemon's refusal back as its own text for an id the library lacks", async () => {
-    await expect(makeApi(baseUrl).saveWorldMods("Tulsa", ["not.here"])).rejects.toThrow(/not\.here/);
+    await expect(makeApi(baseUrl, TOKEN).saveWorldMods("Tulsa", ["not.here"])).rejects.toThrow(/not\.here/);
   });
 
   /*
@@ -183,8 +253,8 @@ describe("mod library and reconcile over a real daemon instance", () => {
    * load eight.
    */
   it("tells a world with no set apart from a world whose set is empty", async () => {
-    const api = makeApi(baseUrl);
-    await writeFile(join(root, "mods", "Wanted-1.0.jar"), await jar("a.wanted"));
+    const api = makeApi(baseUrl, TOKEN);
+    await writeFile(join(modsDir, "Wanted-1.0.jar"), await jar("a.wanted"));
 
     expect(await api.worldMods("Fresh")).toMatchObject({
       configured: false,
@@ -206,11 +276,11 @@ describe("mod library and reconcile over a real daemon instance", () => {
    * Steam.
    */
   it("carries a set onto a newer jar of the same mod, with no edit to the set", async () => {
-    const api = makeApi(baseUrl);
+    const api = makeApi(baseUrl, TOKEN);
     await api.uploadMod(await jar("a.mod", "1.0"), "Mod-1.0.jar");
     await api.saveWorldMods("Tulsa", ["a.mod"]);
     await api.reconcileMods("Tulsa");
-    expect(await readdir(join(root, "mods"))).toEqual(["Mod-1.0.jar"]);
+    expect(await readdir(modsDir)).toEqual(["Mod-1.0.jar"]);
 
     const second = await api.uploadMod(await jar("a.mod", "2.0"), "Mod-2.0.jar");
 
@@ -219,7 +289,7 @@ describe("mod library and reconcile over a real daemon instance", () => {
     const applied = await api.reconcileMods("Tulsa");
     expect(applied.reconcile.copied).toEqual(["Mod-2.0.jar"]);
     expect(applied.reconcile.removed).toEqual(["Mod-1.0.jar"]);
-    expect(await readdir(join(root, "mods"))).toEqual(["Mod-2.0.jar"]);
+    expect(await readdir(modsDir)).toEqual(["Mod-2.0.jar"]);
   });
 });
 
@@ -233,8 +303,8 @@ describe("mod library and reconcile over a real daemon instance", () => {
  */
 describe("world settings over a real daemon instance", () => {
   it("reads the file's own keys, types and option sets", async () => {
-    await makeWorldZip(join(root, "worlds"), "Tulsa");
-    const res = await makeApi(baseUrl).worldSettings("Tulsa");
+    await makeWorldZip(worldsDir, "Tulsa");
+    const res = await makeApi(baseUrl, TOKEN).worldSettings("Tulsa");
 
     const difficulty = res.fields.find((f) => f.key === "difficulty");
     // The option set the form renders comes from here, not from the client.
@@ -246,8 +316,8 @@ describe("world settings over a real daemon instance", () => {
   });
 
   it("applies a partial change and reports where the backup went", async () => {
-    await makeWorldZip(join(root, "worlds"), "Tulsa");
-    const api = makeApi(baseUrl);
+    await makeWorldZip(worldsDir, "Tulsa");
+    const api = makeApi(baseUrl, TOKEN);
     const res = await api.saveWorldSettings("Tulsa", { allowCheats: true, difficulty: "BRUTAL" });
 
     expect(res.changed).toEqual(["allowCheats", "difficulty"]);
@@ -260,22 +330,69 @@ describe("world settings over a real daemon instance", () => {
   });
 
   it("writes nothing, and takes no backup, when the values already match", async () => {
-    await makeWorldZip(join(root, "worlds"), "Tulsa");
-    const res = await makeApi(baseUrl).saveWorldSettings("Tulsa", { allowCheats: false });
+    await makeWorldZip(worldsDir, "Tulsa");
+    const res = await makeApi(baseUrl, TOKEN).saveWorldSettings("Tulsa", { allowCheats: false });
     expect(res.changed).toEqual([]);
     expect(res.backup).toBeNull();
   });
 
   it("hands the daemon's refusal back to the client as its own text", async () => {
-    await makeWorldZip(join(root, "worlds"), "Tulsa");
+    await makeWorldZip(worldsDir, "Tulsa");
     await expect(
-      makeApi(baseUrl).saveWorldSettings("Tulsa", { gameVersion: "9.9.9" }),
+      makeApi(baseUrl, TOKEN).saveWorldSettings("Tulsa", { gameVersion: "9.9.9" }),
     ).rejects.toThrow(/never be changed/i);
     await expect(
-      makeApi(baseUrl).saveWorldSettings("Tulsa", { difficulty: "IMPOSSIBLE" }),
+      makeApi(baseUrl, TOKEN).saveWorldSettings("Tulsa", { difficulty: "IMPOSSIBLE" }),
     ).rejects.toThrow(/must be one of/i);
     await expect(
-      makeApi(baseUrl).saveWorldSettings("Tulsa", { dayTimeMod: 99 }),
+      makeApi(baseUrl, TOKEN).saveWorldSettings("Tulsa", { dayTimeMod: 99 }),
     ).rejects.toThrow(/at most 10/i);
+  });
+});
+
+describe("access token over the real transport", () => {
+  it("rejects a GET with no token", async () => {
+    await expect(makeApi(baseUrl, "").status()).rejects.toThrow(/token/i);
+  });
+
+  it("rejects a GET with the wrong token", async () => {
+    await expect(makeApi(baseUrl, "wrong").status()).rejects.toThrow(/token/i);
+  });
+
+  it("rejects a bodyless POST with the wrong token", async () => {
+    await expect(makeApi(baseUrl, "wrong").stop()).rejects.toThrow(/token/i);
+  });
+
+  it("surfaces the rejection as a 401 the client can branch on", async () => {
+    await expect(makeApi(baseUrl, "wrong").status()).rejects.toMatchObject({ status: 401 });
+  });
+
+  it("rejects the raw-body jar upload with the wrong token", async () => {
+    // uploadMod builds its own fetch rather than going through request(), so
+    // it is the one call that can be missing the header while every other
+    // action works. Asserted here, over a real socket, for that reason.
+    await expect(
+      makeApi(baseUrl, "wrong").uploadMod(await modJarBytes({ id: "x.y", name: "X" }), "x.jar"),
+    ).rejects.toThrow(/token/i);
+  });
+
+  it("accepts the jar upload with the right token", async () => {
+    const r = await makeApi(baseUrl, TOKEN).uploadMod(
+      await modJarBytes({ id: "x.y", name: "X" }),
+      "x.jar",
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  it("rejects the websocket upgrade without a token", async () => {
+    // Built by the app's own wsUrl(), not a hand-rolled string: a regression that
+    // stopped the client attaching ?token= would otherwise go unnoticed here.
+    const status = await upgradeStatus(wsUrl(wsConnection("")));
+    expect(status).toBe(401);
+  });
+
+  it("accepts the websocket upgrade with the token on the query string", async () => {
+    const status = await upgradeStatus(wsUrl(wsConnection(TOKEN)));
+    expect(status).toBe(101);
   });
 });

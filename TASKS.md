@@ -1,6 +1,9 @@
 # Tasks
 
-- [~] Build v1 Necesse server GUI (Node/TS daemon on SERVER + Tauri client) per docs/superpowers/specs/2026-07-26-necesse-server-gui-design.html
-- [ ] v2: world settings editor - stop server, unzip world, edit worldSettings.cfg via typed GUI form, rezip atomically with backup, restart
-- [ ] Make daemon location/run-mode configurable and publish as a public repo per docs/superpowers/specs/2026-07-29-shareable-release-design.html
 - [ ] Update All reinstalls every managed mod unconditionally (mod-installer.ts updateAll). The time_updated vs lastUpdated comparison exists only as the GET /api/mods/updates badge and never gates the loop. Skip mods with no newer workshop entry - noting Steam moves time_updated for any entry edit, so it indicates rather than proves a new jar
+- [ ] UI for editing the server's launch parameters per world (owner, pausewhenempty, and the rest of Server.jar's command line) - decide which belong to the world and which to the daemon config, and how they interact with worldSettings.cfg
+- [ ] Installer follow-ups parked by the final review: (1) preflight.ps1 fails OPEN when NECESSE_MANAGER_DATA points somewhere unreachable - it exits 0 NO_CONFIG and the install proceeds over a possibly-live daemon. Verified fix is to gate on `Test-Path ([IO.Path]::GetPathRoot($stateDir))` rather than on the directory itself, which does not break fresh installs. (2) scripts/02-deploy.ps1 does not ship the new register-task.cmd. (3) a declined UAC prompt in register-task.cmd exits 0 with no message. (4) release notes must say that installs from pre-284c909 builds keep their scheduled task and firewall rule on uninstall
+- [x] Build v1 Necesse server GUI (Node/TS daemon on SERVER + Tauri client) per docs/superpowers/specs/2026-07-26-necesse-server-gui-design.html
+- [x] v2: world settings editor - stop server, unzip world, edit worldSettings.cfg via typed GUI form, rezip atomically with backup, restart
+- [x] Make daemon location/run-mode configurable and publish as a public repo per docs/superpowers/specs/2026-07-29-shareable-release-design.html
+- [x] Windows installer for the daemon per docs/superpowers/specs/2026-07-30-daemon-installer-design.html - bundles a private Node, runs the setup wizard, registers the boot task, and never deletes the state directory on uninstall

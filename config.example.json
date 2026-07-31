@@ -1,0 +1,22 @@
+{
+  "port": 8710,
+  "dataDir": "C:\\Users\\YOURNAME\\AppData\\Roaming\\Necesse",
+  "serverRoot": "C:\\necesseserver",
+  "serverJar": "C:\\necesseserver\\Server.jar",
+  "javaExe": "C:\\necesseserver\\jre\\bin\\java.exe",
+  "steamcmdExe": "C:\\steamcmd\\steamcmd.exe",
+  "authToken": "",
+  "steamApiKey": "",
+  "owners": [],
+  "lastWorld": null,
+  "stopTimeoutMs": 90000,
+  "jvmArgs": [
+    "-XX:+UnlockExperimentalVMOptions",
+    "-XX:+UseG1GC",
+    "-XX:+ExplicitGCInvokesConcurrent",
+    "-XX:G1NewSizePercent=20",
+    "-XX:G1ReservePercent=20",
+    "-XX:MaxGCPauseMillis=50",
+    "-XX:G1HeapRegionSize=32M"
+  ]
+}

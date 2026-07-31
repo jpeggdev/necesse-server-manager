@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
-import { makeApi, type Api, type WorldsResponse } from "./api";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { baseUrl, wsUrl, type Connection } from "./settings";
+import { DaemonError, UNAUTHORIZED_STATUS, makeApi, type Api, type WorldsResponse } from "./api";
 import type {
   ModLibraryEntry,
   ModListResponse,
@@ -8,8 +9,6 @@ import type {
   WsMessage,
 } from "./types";
 
-export const DAEMON_BASE = "http://192.168.1.106:8710";
-const WS_URL = "ws://192.168.1.106:8710/ws";
 const CONSOLE_LIMIT = 2000;
 const WS_RETRY_MS = 2000;
 
@@ -81,13 +80,32 @@ export interface DaemonState {
    */
   busy: boolean;
   refresh: () => Promise<void>;
+  /**
+   * The daemon rejected this token. Terminal, unlike every other failure: the
+   * socket retries every 2s, and against a bad token that spins forever behind
+   * a "connecting" message that will never resolve and never explain itself.
+   * The app returns to the settings screen instead.
+   */
+  unauthorized: boolean;
 }
 
-export function useDaemon(): DaemonState {
-  // Lazy useState initializer (not useRef(makeApi(...)).current) so makeApi
-  // runs exactly once - a ref initializer argument is still evaluated (and
-  // discarded) on every render.
-  const [api] = useState<Api>(() => makeApi(DAEMON_BASE));
+export function useDaemon(conn: Connection): DaemonState {
+  const base = baseUrl(conn);
+  const socketUrl = wsUrl(conn);
+  // useMemo, not a lazy useState initializer: base and token have to move
+  // together with socketUrl when the connection changes, or HTTP calls would
+  // keep hitting the old daemon with the old token while the socket reopens
+  // at the new address. Keyed on the two primitives that actually determine
+  // the request target, not on `conn` itself - `conn` is a fresh object every
+  // render (App.tsx re-derives it), and memoizing on its identity would
+  // rebuild `api` on every render for no reason.
+  const api = useMemo<Api>(() => makeApi(base, conn.token), [base, conn.token]);
+  const [unauthorized, setUnauthorized] = useState(false);
+  // A token edited from the settings screen deserves a fresh attempt, not a
+  // lockout that outlives the correction until the app restarts.
+  useEffect(() => {
+    setUnauthorized(false);
+  }, [base, conn.token]);
   const [status, setStatus] = useState<StatusPayload | null>(null);
   const [worlds, setWorlds] = useState<WorldsResponse | null>(null);
   const [mods, setMods] = useState<ModListResponse | null>(null);
@@ -113,6 +131,7 @@ export function useDaemon(): DaemonState {
       setLibrary(r.mods);
       setLibraryError(null);
     } catch (e) {
+      if (e instanceof DaemonError && e.status === UNAUTHORIZED_STATUS) setUnauthorized(true);
       // Dropped rather than kept: a stale library would offer ticks for mods
       // whose jars this daemon may no longer have.
       setLibrary(null);
@@ -136,6 +155,7 @@ export function useDaemon(): DaemonState {
       setMods(m);
       setError(null);
     } catch (e) {
+      if (e instanceof DaemonError && e.status === UNAUTHORIZED_STATUS) setUnauthorized(true);
       // Surface the daemon's/fetch's own message verbatim rather than
       // swallowing it - the operator needs to see why the UI went stale.
       setError((e as Error).message);
@@ -211,19 +231,23 @@ export function useDaemon(): DaemonState {
       try {
         await api.status();
         setError(
-          `The daemon at ${DAEMON_BASE} answers over HTTP, but the live update socket at ` +
-            `${WS_URL} could not be opened after ${attempts} attempts. Console output and status ` +
+          `The daemon at ${base} answers over HTTP, but the live update socket at ` +
+            `${socketUrl} could not be opened after ${attempts} attempts. Console output and status ` +
             `changes cannot arrive until it connects - check for a firewall or proxy blocking the ` +
             `WebSocket upgrade.`,
         );
       } catch (e) {
+        if (e instanceof DaemonError && e.status === UNAUTHORIZED_STATUS) setUnauthorized(true);
         setError((e as Error).message);
       }
     },
-    [api],
+    [api, base, socketUrl],
   );
 
   useEffect(() => {
+    // A rejected token is not a transient failure, and retrying it forever
+    // would bury the one message that tells the user what to fix.
+    if (unauthorized) return;
     let ws: WebSocket | null = null;
     let retry: ReturnType<typeof setTimeout> | null = null;
     let closed = false;
@@ -233,7 +257,7 @@ export function useDaemon(): DaemonState {
     let failures = 0;
 
     const connect = () => {
-      ws = new WebSocket(WS_URL);
+      ws = new WebSocket(socketUrl);
       ws.onopen = () => {
         failures = 0;
         setConnected(true);
@@ -297,7 +321,7 @@ export function useDaemon(): DaemonState {
       if (retry) clearTimeout(retry);
       ws?.close();
     };
-  }, [append, refresh, diagnoseConnectFailure]);
+  }, [append, refresh, diagnoseConnectFailure, socketUrl, unauthorized]);
 
   return {
     api,
@@ -319,5 +343,6 @@ export function useDaemon(): DaemonState {
     // screen with no way to see what went wrong.
     busy: (status?.activeTasks?.length ?? 0) > 0,
     refresh,
+    unauthorized,
   };
 }

@@ -51,7 +51,7 @@ describe("buildArgs", () => {
 
   /*
    * Without -datadir the server derives its saves and mods from the running
-   * account's APPDATA, which is what tied the daemon to an interactive jeffp
+   * account's APPDATA, which is what tied the daemon to an interactive user
    * logon: as SYSTEM it would silently resolve
    * C:\Windows\system32\config\systemprofile\AppData\Roaming\Necesse and start
    * with no worlds and no mods, reporting success the whole way. This asserts

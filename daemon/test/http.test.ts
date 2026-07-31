@@ -56,8 +56,10 @@ beforeEach(async () => {
     worldsDir,
     stopTimeoutMs: 50,
     // Every path the library and the sets write to lives in this test's own
-    // temp dir. DEFAULT_CONFIG points them at the daemon's real directory, and
-    // a suite that started the server would otherwise write a mod-sets.json
+    // temp dir. DEFAULT_CONFIG leaves all three empty - they are derived from
+    // the state directory by loadConfig, which is not involved here - so
+    // without these a suite that started the server would resolve them
+    // relative to the process's working directory and write a mod-sets.json
     // into the repo.
     modLibraryDir: join(root, "mod-library"),
     modLibraryFile: join(root, "mod-library.json"),
@@ -76,7 +78,7 @@ beforeEach(async () => {
   installer = new ModInstaller(cfg, registry, steam, library);
   net = makeFakeFetch();
   workshop = new SteamWorkshop(cfg, net.fetch);
-  app = buildServer({ cfg, configFile, pm, installer, library, sets, steam, workshop });
+  app = buildServer({ cfg, configFile, configWarnings: [], pm, installer, library, sets, steam, workshop });
 });
 
 describe("GET /api/status", () => {
@@ -97,6 +99,7 @@ describe("GET /api/status", () => {
     const selfHealApp = buildServer({
       cfg,
       configFile,
+      configWarnings: [],
       pm: deadPm,
       installer,
       library,
@@ -110,6 +113,76 @@ describe("GET /api/status", () => {
     expect(res.statusCode).toBe(200);
     expect(res.json().state).toBe("stopped");
     expect(res.json().pid).toBeNull();
+  });
+});
+
+// `Deps.configWarnings` reaching `statusPayload` is only real if some test
+// fails when it doesn't - a literal `[]` in statusPayload would leave every
+// other test in this suite green, since every other app in this file is built
+// with configWarnings: []. These build an app with a real warning and check
+// both channels a client can learn about it from: the poll and the socket
+// backlog it gets on connect.
+describe("configWarnings in the status payload", () => {
+  const warning = "steamcmd is missing";
+
+  it("carries a non-fatal configuration problem through GET /api/status", async () => {
+    const warnedApp = buildServer({
+      cfg,
+      configFile,
+      configWarnings: [warning],
+      pm,
+      installer,
+      library,
+      sets,
+      steam,
+      workshop,
+    });
+
+    const res = await warnedApp.inject({ method: "GET", url: "/api/status" });
+
+    expect(res.json().configWarnings).toEqual([warning]);
+  });
+
+  it("carries the same warning in the websocket backlog frame a connecting client actually receives", async () => {
+    const warnedApp = buildServer({
+      cfg,
+      configFile,
+      configWarnings: [warning],
+      pm,
+      installer,
+      library,
+      sets,
+      steam,
+      workshop,
+    });
+    await warnedApp.ready();
+
+    // The backlog frame is sent the instant the connection handler runs,
+    // which can be before `injectWS`'s own promise resolves - a `message`
+    // listener attached after `await` is a race that drops it. `onInit` runs
+    // at socket creation, ahead of the handshake, so it cannot lose that race.
+    let resolveBacklog!: (msg: WsMessage) => void;
+    const backlogReceived = new Promise<WsMessage>((resolve) => {
+      resolveBacklog = resolve;
+    });
+    const ws = await warnedApp.injectWS("/ws", undefined, {
+      // `ws` ships no type declarations of its own (it's a transitive
+      // dependency here, per the note at the top of ws-auth.test.ts), so
+      // `socket` resolves to `any` and this callback gets none of its own -
+      // annotated explicitly rather than left as an implicit any.
+      onInit: (socket) => {
+        socket.once("message", (data: unknown) =>
+          resolveBacklog(JSON.parse(String(data)) as WsMessage),
+        );
+      },
+    });
+    try {
+      const backlog = await backlogReceived;
+      if (backlog.type !== "backlog") throw new Error(`Expected a backlog frame, got ${backlog.type}`);
+      expect(backlog.status.configWarnings).toEqual([warning]);
+    } finally {
+      ws.terminate();
+    }
   });
 });
 
@@ -148,6 +221,7 @@ describe("activeTasks in the status payload", () => {
     const rejectApp = buildServer({
       cfg,
       configFile,
+      configWarnings: [],
       pm,
       installer,
       library,
@@ -1844,5 +1918,77 @@ describe("world settings", () => {
       expect(sha(await zipBytes())).toBe(sha(before));
       expect(await readdir(cfg.worldsDir)).not.toContain("settings-backups");
     });
+  });
+});
+
+describe("access token", () => {
+  beforeEach(() => {
+    cfg.authToken = "s3cret";
+    app = buildServer({ cfg, configFile, configWarnings: [], pm, installer, library, sets, steam, workshop });
+  });
+
+  it("rejects a request with no token", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/status" });
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error).toMatch(/token/i);
+  });
+
+  it("rejects a wrong token", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/status",
+      headers: { authorization: "Bearer nope" },
+    });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("accepts the right token", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/status",
+      headers: { authorization: "Bearer s3cret" },
+    });
+    expect(res.statusCode).toBe(200);
+  });
+
+  // Named for what it can actually observe. @fastify/cors answers a valid
+  // preflight in its own onRequest hook and short-circuits, so this passes
+  // identically with the auth hook's OPTIONS exemption deleted - it pins that
+  // a preflight is answered at all, not which hook exempted it.
+  it("answers a CORS preflight, which cannot carry an Authorization header", async () => {
+    const res = await app.inject({
+      method: "OPTIONS",
+      url: "/api/status",
+      headers: {
+        origin: "http://tauri.localhost",
+        "access-control-request-method": "GET",
+      },
+    });
+    expect(res.statusCode).toBeLessThan(400);
+  });
+
+  it("never returns the token from GET /api/config", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/config",
+      headers: { authorization: "Bearer s3cret" },
+    });
+    expect(JSON.stringify(res.json())).not.toContain("s3cret");
+    expect(res.json().authRequired).toBe(true);
+  });
+
+  // The defect this pins: authRequired and the hook itself must agree on what
+  // "configured" means. Without trimming both, a whitespace-only token would
+  // report authRequired: false (nothing to send) while still 401ing every
+  // request, or the reverse - either way the operator has no usable fix.
+  it("treats a whitespace-only token as unset, in both the hook and the reported flag", async () => {
+    cfg.authToken = "   ";
+    const whitespaceApp = buildServer({ cfg, configFile, configWarnings: [], pm, installer, library, sets, steam, workshop });
+
+    const status = await whitespaceApp.inject({ method: "GET", url: "/api/status" });
+    expect(status.statusCode).toBe(200);
+
+    const config = await whitespaceApp.inject({ method: "GET", url: "/api/config" });
+    expect(config.json().authRequired).toBe(false);
   });
 });

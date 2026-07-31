@@ -48,16 +48,25 @@ export const STOP_TIMEOUT_STATUS = 504;
  */
 export type WorldSettingValue = boolean | number | string;
 
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
+/** The daemon answers anything without a valid access token with this. */
+export const UNAUTHORIZED_STATUS = 401;
+
+const authHeader = (token: string): Record<string, string> =>
+  token.length > 0 ? { authorization: `Bearer ${token}` } : {};
+
+async function request<T>(url: string, token: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
     res = await fetch(url, {
       ...init,
-      // Only claim a JSON body when one is actually being sent - Fastify's
-      // default JSON parser rejects an empty body under this header with
-      // FST_ERR_CTP_EMPTY_JSON_BODY (400), which broke every bodyless
-      // mutation (stop/kill/updateServer/updateAllMods/removeMod).
-      ...(init?.body === undefined ? {} : { headers: { "content-type": "application/json" } }),
+      headers: {
+        ...authHeader(token),
+        // Only claim a JSON body when one is actually being sent - Fastify's
+        // default JSON parser rejects an empty body under this header with
+        // FST_ERR_CTP_EMPTY_JSON_BODY (400), which broke every bodyless
+        // mutation (stop/kill/updateServer/updateAllMods/removeMod).
+        ...(init?.body === undefined ? {} : { "content-type": "application/json" }),
+      },
     });
   } catch (e) {
     throw new Error(`Could not reach the daemon at ${url}: ${(e as Error).message}`);
@@ -69,20 +78,19 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
-export function makeApi(base: string) {
+export function makeApi(base: string, token: string) {
+  const get = <T>(path: string): Promise<T> => request<T>(`${base}${path}`, token);
   const post = <T>(path: string, payload?: unknown): Promise<T> =>
-    request<T>(`${base}${path}`, {
+    request<T>(`${base}${path}`, token, {
       method: "POST",
       body: payload === undefined ? undefined : JSON.stringify(payload),
     });
 
   return {
-    status: () => request<StatusPayload>(`${base}/api/status`),
+    status: () => get<StatusPayload>("/api/status"),
     worlds: (name?: string) =>
-      request<WorldsResponse>(
-        name === undefined
-          ? `${base}/api/worlds`
-          : `${base}/api/worlds?name=${encodeURIComponent(name)}`,
+      get<WorldsResponse>(
+        name === undefined ? "/api/worlds" : `/api/worlds?name=${encodeURIComponent(name)}`,
       ),
     /**
      * A world's `worldSettings.cfg` as the daemon reads it: every line the file
@@ -90,9 +98,7 @@ export function makeApi(base: string) {
      * allowed whatever the server is doing - only the write needs it stopped.
      */
     worldSettings: (world: string) =>
-      request<WorldSettingsResponse>(
-        `${base}/api/worlds/${encodeURIComponent(world)}/settings`,
-      ),
+      get<WorldSettingsResponse>(`/api/worlds/${encodeURIComponent(world)}/settings`),
     /**
      * Applies a PARTIAL set of changes: every key sent is a line the daemon
      * rewrites, so a caller that sent the whole form would rewrite lines the
@@ -101,20 +107,21 @@ export function makeApi(base: string) {
     saveWorldSettings: (world: string, changes: Record<string, WorldSettingValue>) =>
       request<WorldSettingsWriteResponse>(
         `${base}/api/worlds/${encodeURIComponent(world)}/settings`,
+        token,
         { method: "PUT", body: JSON.stringify(changes) },
       ),
     start: (world: string) => post<{ ok: true }>("/api/server/start", { world }),
     stop: () => post<{ ok: true }>("/api/server/stop"),
     kill: () => post<{ ok: true }>("/api/server/kill"),
     updateServer: () => post<{ ok: true; taskId: string }>("/api/server/update"),
-    mods: () => request<ModListResponse>(`${base}/api/mods`),
+    mods: () => get<ModListResponse>("/api/mods"),
     /**
      * Which managed mods have a newer workshop entry. A separate call from
      * mods() on purpose: the mod list is read off the server's disk and must
      * keep working when Steam is down, so this one failing (502) costs badges
      * and nothing else. Never fold the two together.
      */
-    modUpdates: () => request<ModUpdatesResponse>(`${base}/api/mods/updates`),
+    modUpdates: () => get<ModUpdatesResponse>("/api/mods/updates"),
     /**
      * Empty `q` is a browse rather than an error - the daemon omits
      * `search_text` and Steam ranks by trend. `cursor` comes from a previous
@@ -127,9 +134,7 @@ export function makeApi(base: string) {
       if (cursor !== undefined) params.set("cursor", cursor);
       if (count !== undefined) params.set("count", String(count));
       const qs = params.toString();
-      return request<WorkshopSearchResponse>(
-        `${base}/api/workshop/search${qs.length > 0 ? `?${qs}` : ""}`,
-      );
+      return get<WorkshopSearchResponse>(`/api/workshop/search${qs.length > 0 ? `?${qs}` : ""}`);
     },
     /**
      * `name` is optional: with no name the daemon resolves the title from
@@ -145,28 +150,28 @@ export function makeApi(base: string) {
         name !== undefined && name.trim().length > 0 ? { id, name: name.trim() } : { id },
       ),
     removeMod: (id: string) =>
-      request<{ ok: true }>(`${base}/api/mods/${id}`, { method: "DELETE" }),
+      request<{ ok: true }>(`${base}/api/mods/${id}`, token, { method: "DELETE" }),
     updateAllMods: () => post<{ ok: true; taskId: string }>("/api/mods/update-all"),
     /**
      * Every mod the daemon holds a jar for. This, not the mods folder, is what a
      * world's set is chosen from: the folder only ever holds one world's worth
      * at a time.
      */
-    modLibrary: () => request<ModLibraryResponse>(`${base}/api/mods/library`),
+    modLibrary: () => get<ModLibraryResponse>("/api/mods/library"),
     /**
      * Which mods a world will load. For a world nobody has chosen a set for
      * this reports what starting it would seed the set with - what is installed
      * right now - with `configured: false` saying the choice has not been made.
      */
     worldMods: (world: string) =>
-      request<WorldModsResponse>(`${base}/api/worlds/${encodeURIComponent(world)}/mods`),
+      get<WorldModsResponse>(`/api/worlds/${encodeURIComponent(world)}/mods`),
     /**
      * Chooses which mods a world loads. Takes effect at that world's next
      * start, because the game reads its mod set once, at startup. Every id must
      * be one the library holds; the daemon answers 400 naming any that is not.
      */
     saveWorldMods: (world: string, modIds: string[]) =>
-      request<WorldModsResponse>(`${base}/api/worlds/${encodeURIComponent(world)}/mods`, {
+      request<WorldModsResponse>(`${base}/api/worlds/${encodeURIComponent(world)}/mods`, token, {
         method: "PUT",
         body: JSON.stringify({ modIds }),
       }),
@@ -175,7 +180,9 @@ export function makeApi(base: string) {
      * is one file with no other form fields, so multipart would buy only a
      * dependency. The content-type is what routes it to the daemon's buffer
      * parser and must be set - `request()` above only sets a JSON one, so this
-     * call deliberately does not go through it.
+     * call deliberately does not go through it. It must still carry the access
+     * token by hand for the same reason: nothing here runs through `request()`
+     * to inherit it from.
      *
      * `filename` is a label; the mod's identity comes from the `mod.info` inside
      * the bytes, which the daemon validates before storing anything.
@@ -188,7 +195,7 @@ export function makeApi(base: string) {
       try {
         res = await fetch(url, {
           method: "POST",
-          headers: { "content-type": "application/java-archive" },
+          headers: { ...authHeader(token), "content-type": "application/java-archive" },
           body: bytes as BodyInit,
         });
       } catch (e) {

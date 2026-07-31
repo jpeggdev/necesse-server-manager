@@ -5,8 +5,10 @@ import { ConsolePanel } from "./ConsolePanel";
 import { ErrorBanner } from "./ErrorBanner";
 import { Splitter } from "./Splitter";
 import { WorldSettingsDialog } from "./WorldSettingsDialog";
+import { ConnectionSettings } from "./ConnectionSettings";
 import { useDaemon } from "./useDaemon";
 import { DaemonError, STOP_TIMEOUT_STATUS, type WorldSettingValue } from "./api";
+import { loadConnection, saveConnection, type Connection } from "./settings";
 import type { WorldModsResponse } from "./types";
 import "./App.css";
 
@@ -15,7 +17,84 @@ const MODS_WIDTH_DEFAULT = 432;
 const MODS_WIDTH_MIN = 300;
 const MODS_WIDTH_MAX = 900;
 
+/**
+ * Shown on the connection screen when the app sent itself there. The daemon's
+ * own 401 body is not used: it is written for whoever is holding the wrong
+ * token, not for someone who has just been dropped out of a working app, and
+ * this has to explain the navigation as well as the failure.
+ */
+export const TOKEN_REJECTED_NOTICE =
+  "The daemon rejected this access token, so the app cannot stay connected. Check the token " +
+  "against the one setup.cmd printed (it is in config.json on the server, under authToken), " +
+  "then Connect again.";
+
 export default function App() {
+  const [conn, setConn] = useState<Connection | null>(() => loadConnection());
+  const [editing, setEditing] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const editConnection = useCallback(() => {
+    setNotice(null);
+    setEditing(true);
+  }, []);
+  const tokenRejected = useCallback(() => {
+    setNotice(TOKEN_REJECTED_NOTICE);
+    setEditing(true);
+  }, []);
+
+  if (conn === null || editing) {
+    return (
+      <main className="app">
+        <ConnectionSettings
+          initial={conn}
+          notice={notice}
+          onSave={(c) => {
+            saveConnection(c);
+            setConn(c);
+            setEditing(false);
+            setNotice(null);
+          }}
+          onCancel={() => {
+            setEditing(false);
+            setNotice(null);
+          }}
+        />
+      </main>
+    );
+  }
+
+  return (
+    <ConnectedApp
+      // Keyed on the whole connection, token included, so switching daemons
+      // remounts the whole tree rather than leaving one daemon's worlds and
+      // console on screen under another daemon's status. Host/port alone would
+      // miss a token-only edit - the single most likely correction a user makes
+      // on this screen - and refresh()/readLibrary() have no request-generation
+      // guard, so a stale response from the old daemon could still land and
+      // populate state under the new one.
+      key={`${conn.host}:${conn.port}:${conn.token}`}
+      conn={conn}
+      onEditConnection={editConnection}
+      onTokenRejected={tokenRejected}
+    />
+  );
+}
+
+function ConnectedApp({
+  conn,
+  onEditConnection,
+  onTokenRejected,
+}: {
+  conn: Connection;
+  onEditConnection: () => void;
+  /**
+   * Separate from onEditConnection because the two arrive at the same screen
+   * for opposite reasons, and only one of them owes the user an explanation.
+   * Not one callback taking a reason: ServerHeader wires its button straight to
+   * onEditConnection, so a click would pass its MouseEvent as the reason.
+   */
+  onTokenRejected: () => void;
+}) {
   const {
     api,
     status,
@@ -30,7 +109,12 @@ export default function App() {
     error: daemonError,
     busy: taskBusy,
     refresh,
-  } = useDaemon();
+    unauthorized,
+  } = useDaemon(conn);
+  // A rejected token is the one connection failure the user can only fix here.
+  useEffect(() => {
+    if (unauthorized) onTokenRejected();
+  }, [unauthorized, onTokenRejected]);
   const [error, setError] = useState<string | null>(null);
   const [candidate, setCandidate] = useState<{ name: string; valid: boolean; exists: boolean } | null>(null);
   // Covers the click-to-response span only: from the moment a mutation is
@@ -237,7 +321,9 @@ export default function App() {
     return (
       <main className="app">
         <ErrorBanner error={error} onDismiss={() => setError(null)} />
-        <p className="connecting">Connecting to the daemon at 192.168.1.106:8710&hellip;</p>
+        <p className="connecting">
+          Connecting to the daemon at {conn.host}:{conn.port}&hellip;
+        </p>
       </main>
     );
   }
@@ -248,6 +334,14 @@ export default function App() {
   return (
     <main className="app">
       <ErrorBanner error={error} onDismiss={() => setError(null)} />
+      {status.configWarnings.map((w, i) => (
+        // Index, not the text: two warnings can legitimately say the same
+        // thing (e.g. steamcmd missing, reported the same way after every
+        // reconnect), and a duplicate string as the key would collide.
+        <p key={i} className="hint hint-warn config-warning">
+          {w}
+        </p>
+      ))}
       <ServerHeader
         status={status}
         worlds={worlds}
@@ -255,6 +349,7 @@ export default function App() {
         busy={busy}
         stopTimedOut={stopTimedOut}
         onCandidateChange={onCandidateChange}
+        onEditConnection={onEditConnection}
         onStart={(w) => guard(() => api.start(w))()}
         onStop={guard(
           () => api.stop(),

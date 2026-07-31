@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    # Windows, not Ubuntu. This codebase is full of Windows path handling,
+    # case-insensitive comparisons and backslash separators; a green Linux run
+    # would prove nothing about it.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install daemon deps
+        run: npm ci
+        working-directory: daemon
+      - name: Install client deps
+        run: npm ci
+        working-directory: client
+      - name: Typecheck daemon
+        run: npx tsc --noEmit
+        working-directory: daemon
+      - name: Typecheck client
+        run: npx tsc --noEmit
+        working-directory: client
+      # tsconfig.json is the typecheck config (src + test, noEmit); the one that
+      # emits is tsconfig.build.json, and nothing above exercises it. A break
+      # that lives only in the build config - a bad "include", an "exclude" that
+      # swallows a new source file - would otherwise surface for the first time
+      # in the release workflow, at tag time, with no green run to bisect from.
+      - name: Build daemon
+        run: npm run build
+        working-directory: daemon
+
+      - name: Test daemon
+        run: npx vitest run
+        working-directory: daemon
+      - name: Test client
+        run: npx vitest run
+        working-directory: client
+
+      # Compiling the installer against a real stage is what catches a missing
+      # file, a wrong path or a bad define. A syntax-only check would not: the
+      # commonest breakage here is [Files] pointing at something that is no
+      # longer produced, and that only shows up when the payload is real.
+      #
+      # Deliberately AFTER the tests. This step downloads a Node runtime from
+      # nodejs.org on every push and installs Inno Setup from chocolatey when
+      # the runner has none, so ahead of the tests a nodejs.org or chocolatey
+      # blip blocked all test feedback on a change that had nothing to do with
+      # the installer. Nothing below depends on it.
+      - name: Build the daemon installer
+        shell: pwsh
+        run: |
+          # resolve-iscc.ps1 is shared with installer/verify-installer.ps1 and
+          # the release workflow, so there is one definition of "where is
+          # ISCC.exe" rather than a hardcoded path here that only matches
+          # choco's layout and not winget's.
+          . installer/resolve-iscc.ps1
+          try { $iscc = Resolve-Iscc } catch {
+            choco install innosetup -y --no-progress
+            $iscc = Resolve-Iscc
+          }
+          pwsh -File installer/stage-daemon.ps1 -RepoRoot $PWD -StageDir "$env:RUNNER_TEMP\stage"
+          if ($LASTEXITCODE -ne 0) { throw "stage-daemon.ps1 failed with exit $LASTEXITCODE" }
+          pwsh -File installer/fetch-node.ps1 -StageDir "$env:RUNNER_TEMP\stage" -RepoRoot $PWD
+          if ($LASTEXITCODE -ne 0) { throw "fetch-node.ps1 failed with exit $LASTEXITCODE" }
+          & $iscc "/DStageDir=$env:RUNNER_TEMP\stage" "/DAppVersion=0.0.0-ci" "/DOutDir=$env:RUNNER_TEMP\out" installer/necesse-daemon.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit $LASTEXITCODE" }
+          Get-ChildItem "$env:RUNNER_TEMP\out"
+
+      - name: Shared types are byte-identical
+        shell: pwsh
+        run: |
+          $a = (Get-FileHash daemon/src/types.ts -Algorithm SHA256).Hash
+          $b = (Get-FileHash client/src/types.ts -Algorithm SHA256).Hash
+          if ($a -ne $b) { throw "daemon/src/types.ts and client/src/types.ts have diverged" }

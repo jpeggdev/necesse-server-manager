@@ -13,6 +13,8 @@ export interface ServerHeaderProps {
   onKill: () => void;
   onUpdateServer: () => void;
   onCandidateChange: (name: string) => void;
+  /** Opens the connection screen, to change which daemon this app talks to. */
+  onEditConnection: () => void;
   /**
    * Opens the world settings editor for the name currently in the field.
    * Absent means the editor is not offered at all.
@@ -203,6 +205,15 @@ export function ServerHeader(props: ServerHeaderProps) {
       )}
 
       {status.lastError && <span className="hint hint-bad">{status.lastError}</span>}
+
+      <button
+        className="settings-btn"
+        onClick={props.onEditConnection}
+        aria-label="Connection settings"
+        title="Connection settings"
+      >
+        &#9881;
+      </button>
     </header>
   );
 }

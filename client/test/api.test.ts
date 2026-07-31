@@ -19,14 +19,14 @@ function err(status: number, body: unknown) {
 describe("makeApi", () => {
   it("GETs status from the configured base url", async () => {
     fetchMock.mockResolvedValue(ok({ state: "stopped" }));
-    const api = makeApi(BASE);
+    const api = makeApi(BASE, "");
     expect((await api.status()).state).toBe("stopped");
     expect(fetchMock).toHaveBeenCalledWith(`${BASE}/api/status`, expect.anything());
   });
 
   it("POSTs the world name as JSON on start", async () => {
     fetchMock.mockResolvedValue(ok({ ok: true }));
-    await makeApi(BASE).start("Tulsa");
+    await makeApi(BASE, "").start("Tulsa");
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe(`${BASE}/api/server/start`);
     expect(init.method).toBe("POST");
@@ -35,17 +35,17 @@ describe("makeApi", () => {
 
   it("throws the daemon's own error text, not a generic message", async () => {
     fetchMock.mockResolvedValue(err(409, { ok: false, error: "Server is already running" }));
-    await expect(makeApi(BASE).start("Tulsa")).rejects.toThrow("Server is already running");
+    await expect(makeApi(BASE, "").start("Tulsa")).rejects.toThrow("Server is already running");
   });
 
   it("distinguishes an unreachable daemon from a daemon error", async () => {
     fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
-    await expect(makeApi(BASE).status()).rejects.toThrow(/could not reach the daemon/i);
+    await expect(makeApi(BASE, "").status()).rejects.toThrow(/could not reach the daemon/i);
   });
 
   it("encodes the world name in the candidate query", async () => {
     fetchMock.mockResolvedValue(ok({ worlds: [], lastWorld: null, candidate: null }));
-    await makeApi(BASE).worlds("Jeff and Eli");
+    await makeApi(BASE, "").worlds("Jeff and Eli");
     expect(fetchMock.mock.calls[0][0]).toBe(`${BASE}/api/worlds?name=Jeff%20and%20Eli`);
   });
 
@@ -53,13 +53,13 @@ describe("makeApi", () => {
     // Not `name: ""` - the daemon branches on an explicit name winning, and an
     // empty string must not be mistaken for one.
     fetchMock.mockResolvedValue(ok({ ok: true, taskId: "t1" }));
-    await makeApi(BASE).addMod("3731244177");
+    await makeApi(BASE, "").addMod("3731244177");
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ id: "3731244177" });
   });
 
   it("sends an explicit name when one is supplied", async () => {
     fetchMock.mockResolvedValue(ok({ ok: true, taskId: "t1" }));
-    await makeApi(BASE).addMod("3731244177", "  Safe Haven QOL  ");
+    await makeApi(BASE, "").addMod("3731244177", "  Safe Haven QOL  ");
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
       id: "3731244177",
       name: "Safe Haven QOL",
@@ -70,18 +70,18 @@ describe("makeApi", () => {
     fetchMock.mockResolvedValue(
       err(400, { ok: false, error: "Steam has no title for 999. Supply a name explicitly." }),
     );
-    await expect(makeApi(BASE).addMod("999")).rejects.toThrow(/supply a name/i);
+    await expect(makeApi(BASE, "").addMod("999")).rejects.toThrow(/supply a name/i);
   });
 
   it("GETs mod updates from their own endpoint, separate from the mod list", async () => {
     fetchMock.mockResolvedValue(ok({ ok: true, checkedAt: "2026-07-27T00:00:00.000Z", mods: [] }));
-    await makeApi(BASE).modUpdates();
+    await makeApi(BASE, "").modUpdates();
     expect(fetchMock.mock.calls[0][0]).toBe(`${BASE}/api/mods/updates`);
   });
 
   it("puts the search text, cursor and count in the query string", async () => {
     fetchMock.mockResolvedValue(ok({ ok: true, items: [], nextCursor: null, total: 0 }));
-    await makeApi(BASE).workshopSearch("safe haven", "AoIIQySEBHDOj9hp", 5);
+    await makeApi(BASE, "").workshopSearch("safe haven", "AoIIQySEBHDOj9hp", 5);
     const url = new URL(fetchMock.mock.calls[0][0]);
     expect(url.pathname).toBe("/api/workshop/search");
     expect(url.searchParams.get("q")).toBe("safe haven");
@@ -91,25 +91,25 @@ describe("makeApi", () => {
 
   it("omits an empty query so the daemon browses rather than searching for nothing", async () => {
     fetchMock.mockResolvedValue(ok({ ok: true, items: [], nextCursor: null, total: 0 }));
-    await makeApi(BASE).workshopSearch("   ");
+    await makeApi(BASE, "").workshopSearch("   ");
     expect(fetchMock.mock.calls[0][0]).toBe(`${BASE}/api/workshop/search`);
   });
 
   it("surfaces the daemon's 503 no-key message from search verbatim", async () => {
     const message = "No Steam Web API key is configured. Set steamApiKey in config.json.";
     fetchMock.mockResolvedValue(err(503, { ok: false, error: message }));
-    await expect(makeApi(BASE).workshopSearch("x")).rejects.toThrow(message);
+    await expect(makeApi(BASE, "").workshopSearch("x")).rejects.toThrow(message);
   });
 
   it("GETs a world's settings, with the name encoded into the path", async () => {
     fetchMock.mockResolvedValue(ok({ ok: true, world: "Jeff and Eli", entry: "x", fields: [] }));
-    await makeApi(BASE).worldSettings("Jeff and Eli");
+    await makeApi(BASE, "").worldSettings("Jeff and Eli");
     expect(fetchMock.mock.calls[0][0]).toBe(`${BASE}/api/worlds/Jeff%20and%20Eli/settings`);
   });
 
   it("PUTs only the changes it was given", async () => {
     fetchMock.mockResolvedValue(ok({ ok: true, world: "Tulsa", entry: "x", fields: [], backup: null, changed: [] }));
-    await makeApi(BASE).saveWorldSettings("Tulsa", { allowCheats: true, dayTimeMod: 2.5 });
+    await makeApi(BASE, "").saveWorldSettings("Tulsa", { allowCheats: true, dayTimeMod: 2.5 });
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe(`${BASE}/api/worlds/Tulsa/settings`);
     expect(init.method).toBe("PUT");
@@ -120,15 +120,49 @@ describe("makeApi", () => {
   it("surfaces the daemon's refusal to write a settings file verbatim", async () => {
     const message = '"gameVersion" is written by the game and can never be changed here.';
     fetchMock.mockResolvedValue(err(400, { ok: false, error: message }));
-    await expect(makeApi(BASE).saveWorldSettings("Tulsa", { gameVersion: "9" })).rejects.toThrow(
+    await expect(makeApi(BASE, "").saveWorldSettings("Tulsa", { gameVersion: "9" })).rejects.toThrow(
       message,
     );
   });
 
   it("DELETEs a mod by id", async () => {
     fetchMock.mockResolvedValue(ok({ ok: true }));
-    await makeApi(BASE).removeMod("3731244177");
+    await makeApi(BASE, "").removeMod("3731244177");
     expect(fetchMock.mock.calls[0][0]).toBe(`${BASE}/api/mods/3731244177`);
     expect(fetchMock.mock.calls[0][1].method).toBe("DELETE");
+  });
+});
+
+describe("access token", () => {
+  it("sends a bearer header on GETs", async () => {
+    fetchMock.mockResolvedValue(ok({}));
+    await makeApi(BASE, "s3cret").status();
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect((init.headers as Record<string, string>).authorization).toBe("Bearer s3cret");
+  });
+
+  it("sends it on bodyless POSTs without claiming a JSON body", async () => {
+    fetchMock.mockResolvedValue(ok({}));
+    await makeApi(BASE, "s3cret").stop();
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    const headers = init.headers as Record<string, string>;
+    expect(headers.authorization).toBe("Bearer s3cret");
+    expect(headers["content-type"]).toBeUndefined();
+  });
+
+  it("sends it on the raw-body jar upload, which builds its own request", async () => {
+    fetchMock.mockResolvedValue(ok({}));
+    await makeApi(BASE, "s3cret").uploadMod(new Uint8Array([1, 2, 3]), "a.jar");
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    const headers = init.headers as Record<string, string>;
+    expect(headers.authorization).toBe("Bearer s3cret");
+    expect(headers["content-type"]).toBe("application/java-archive");
+  });
+
+  it("sends no authorization header when there is no token", async () => {
+    fetchMock.mockResolvedValue(ok({}));
+    await makeApi(BASE, "").status();
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect((init.headers as Record<string, string> | undefined)?.authorization).toBeUndefined();
   });
 });
