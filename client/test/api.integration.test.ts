@@ -483,6 +483,13 @@ describe("launch options across the real seam", () => {
     expect(emptied.overrides).toEqual({ owner: "" });
     expect(emptied.effective.owner).toBe("");
 
+    // The PUT echo alone only proves the daemon reflected "" back, not that
+    // it was stored - a load() that dropped empty strings would still pass
+    // the two assertions above. Re-read with a fresh GET to prove it landed.
+    const reread = await api.launchOptions("Tulsa");
+    expect(reread.overrides).toEqual({ owner: "" });
+    expect(reread.effective.owner).toBe("");
+
     const cleared = await api.saveLaunchOptions("Tulsa", { owner: null });
     expect(cleared.overrides).toEqual({});
     expect(cleared.effective.owner).toBe("Jeff");
@@ -500,8 +507,11 @@ describe("launch options across the real seam", () => {
     ).rejects.toThrow(/not a known/i);
   });
 
-  it("serves a field list with no daemon-owned argument in it", async () => {
+  it("serves a field list with the daemon's real fields and no daemon-owned argument", async () => {
     const names = (await makeApi(baseUrl, TOKEN).launchOptions()).fields.map((f) => f.name);
+    // Self-supporting, matching daemon/test/http.test.ts:2070: without this an
+    // empty field list would trivially "never offer" a forbidden name too.
+    expect(names).toEqual(expect.arrayContaining(["owner", "slots", "port"]));
     for (const forbidden of ["datadir", "world", "nogui"]) {
       expect(names).not.toContain(forbidden);
     }
@@ -535,14 +545,22 @@ describe("launch options across the real seam", () => {
     expect(fresh).toEqual(put);
   });
 
-  it("accepts an empty-body PUT the way it accepts an empty-body POST", async () => {
-    const res = await rawPut(`${baseUrl}/api/launch-options`, {
-      authorization: `Bearer ${TOKEN}`,
-      "content-type": "application/json",
-    });
-    expect(res.status).toBe(200);
-    const body = JSON.parse(res.body) as { ok: boolean; world: string | null };
-    expect(body.ok).toBe(true);
-    expect(body.world).toBeNull();
+  it("accepts an empty-body PUT the way it accepts an empty-body POST, on both routes", async () => {
+    const headers = { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" };
+
+    const defaultsRes = await rawPut(`${baseUrl}/api/launch-options`, headers);
+    expect(defaultsRes.status).toBe(200);
+    const defaultsBody = JSON.parse(defaultsRes.body) as { ok: boolean; world: string | null };
+    expect(defaultsBody.ok).toBe(true);
+    expect(defaultsBody.world).toBeNull();
+
+    // The defaults route and the world route parse the body independently -
+    // `req.body ?? {}` appears once per handler in http.ts, so a fix (or a
+    // regression) to one route says nothing about the other.
+    const worldRes = await rawPut(`${baseUrl}/api/worlds/Tulsa/launch-options`, headers);
+    expect(worldRes.status).toBe(200);
+    const worldBody = JSON.parse(worldRes.body) as { ok: boolean; world: string | null };
+    expect(worldBody.ok).toBe(true);
+    expect(worldBody.world).toBe("Tulsa");
   });
 });
