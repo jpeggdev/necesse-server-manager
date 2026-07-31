@@ -1,0 +1,369 @@
+<meta charset="utf-8">
+<title>Per-World Launch Options - Design</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1a1a1a; --muted: #5f6b7a; --line: #e2e6ea;
+    --accent: #2f6f4f; --accent-bg: #eef6f1; --warn: #8a5a00; --warn-bg: #fdf6e7;
+    --code-bg: #f5f7f9; --card: #fafbfc;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171a; --fg: #e6e9ec; --muted: #9aa6b2; --line: #2b3138;
+      --accent: #6fd39b; --accent-bg: #17281f; --warn: #e0b25c; --warn-bg: #2a2113;
+      --code-bg: #1c2126; --card: #181c20;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.65 -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 62rem; margin: 0 auto; padding: 2.5rem 1.25rem 6rem; }
+  header h1 { margin: 0 0 .3rem; font-size: 1.9rem; letter-spacing: -.02em; }
+  header .sub { color: var(--muted); margin: 0 0 2rem; }
+  h2 {
+    font-size: 1.25rem; margin: 2.75rem 0 .85rem;
+    padding-bottom: .4rem; border-bottom: 2px solid var(--line);
+  }
+  h3 { font-size: 1.02rem; margin: 1.7rem 0 .5rem; }
+  p, li { color: var(--fg); }
+  code, pre { font-family: "Cascadia Code", Consolas, monospace; font-size: .875em; }
+  code { background: var(--code-bg); padding: .12em .35em; border-radius: 3px; }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--line); border-radius: 6px;
+    padding: .85rem 1rem; overflow-x: auto; line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; }
+  .tablewrap { overflow-x: auto; margin: 1rem 0; }
+  table { border-collapse: collapse; width: 100%; font-size: .92rem; }
+  th, td { text-align: left; padding: .5rem .7rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 600; color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+  td code { white-space: nowrap; }
+  .note, .warn {
+    border-left: 3px solid var(--accent); background: var(--accent-bg);
+    padding: .8rem 1rem; border-radius: 0 5px 5px 0; margin: 1.1rem 0;
+  }
+  .warn { border-left-color: var(--warn); background: var(--warn-bg); }
+  .note p:first-child, .warn p:first-child { margin-top: 0; }
+  .note p:last-child, .warn p:last-child { margin-bottom: 0; }
+  .toc { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 1rem 1.25rem; }
+  .toc ol { margin: .3rem 0 0; padding-left: 1.3rem; columns: 2; column-gap: 2rem; }
+  .toc a { color: inherit; }
+  @media (max-width: 40rem) { .toc ol { columns: 1; } }
+</style>
+
+<div class="wrap">
+<header>
+  <h1>Per-World Launch Options</h1>
+  <p class="sub">Design document &middot; 2026-07-31 &middot; Editing the server's command line per world, from the client</p>
+</header>
+
+<div class="toc">
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#goal">Goal, and the bug that prompted it</a></li>
+    <li><a href="#truth">Verified ground truth</a></li>
+    <li><a href="#decisions">Decisions taken</a></li>
+    <li><a href="#model">Model and storage</a></li>
+    <li><a href="#boundary">The boundary that must not move</a></li>
+    <li><a href="#migration">Migration</a></li>
+    <li><a href="#validation">Validation</a></li>
+    <li><a href="#api">API and client</a></li>
+    <li><a href="#testing">Testing</a></li>
+    <li><a href="#scope-out">Out of scope</a></li>
+  </ol>
+</div>
+
+<h2 id="goal">1. Goal, and the bug that prompted it</h2>
+
+<p>The daemon launches the game with a fixed command line. Everything except the
+world name is baked into <code>config.json</code> and applies to every world
+equally, so there is no way to give one world a different player cap, message of
+the day, password, or owner without hand-editing a file on the server and
+restarting.</p>
+
+<div class="warn">
+<p><strong>This started as a live bug, not a feature request.</strong>
+<code>buildArgs</code> emits one <code>-owner</code> per entry in
+<code>config.json</code>'s <code>owners</code> array. But
+<code>GameLaunch.parseLaunchOptions</code> accumulates into a
+<code>HashMap&lt;String, String&gt;</code> and calls <code>out.put(option, value)</code>,
+so a repeated flag <em>overwrites</em> rather than appending, and
+<code>ServerLoader</code> then reads a single value:</p>
+<pre><code>String owner = GameLaunch.launchOptions.getOrDefault("owner", null);
+Settings.serverOwnerName = owner;</code></pre>
+<p>Necesse supports exactly one owner. With <code>owners: ["Jeff", "Eli"]</code>
+the server has been applying <strong>Eli only</strong>, silently, since the
+feature was written. <code>DaemonConfig.owners: string[]</code> models a
+capability the game does not have, and that mismatch is what produced the
+defect.</p>
+</div>
+
+<h2 id="truth">2. Verified ground truth</h2>
+
+<p>Read from the decompiled game at
+<code>necesse\engine\loading\ServerLoader.java</code> (<code>handleLaunchArgs</code>,
+plus the option reads in <code>loadGame</code>), not from documentation or
+memory.</p>
+
+<p>This is every option this feature exposes. <code>ServerLoader</code> reads
+four more that it deliberately does not: <code>world</code>,
+<code>datadir</code> and <code>nogui</code> belong to the daemon (&sect;5), and
+<code>settings</code> and <code>logs</code> are excluded for the reasons given
+there. Options handled further up in <code>GameLaunch</code> rather than by the
+server loader - <code>dev</code>, <code>lowmemory</code>,
+<code>hiddencheats</code> and similar - are outside this feature entirely.</p>
+
+<div class="tablewrap">
+<table>
+  <tr><th>Option</th><th>Type</th><th>The game's own handling</th></tr>
+  <tr><td><code>owner</code></td><td>string</td><td>Single value. Any client connecting with this name gets owner permissions</td></tr>
+  <tr><td><code>motd</code></td><td>string</td><td><code>\n</code> is expanded to a real newline</td></tr>
+  <tr><td><code>password</code></td><td>string</td><td>-</td></tr>
+  <tr><td><code>slots</code></td><td>int</td><td>Clamped to 1-250</td></tr>
+  <tr><td><code>port</code></td><td>int</td><td>Clamped to 0-65535</td></tr>
+  <tr><td><code>ip</code></td><td>string</td><td>Bind address</td></tr>
+  <tr><td><code>pausewhenempty</code></td><td>bool</td><td><code>true</code>/<code>1</code> or <code>false</code>/<code>0</code>; anything else warns and leaves the default</td></tr>
+  <tr><td><code>strictserverauthority</code></td><td>bool</td><td>Same</td></tr>
+  <tr><td><code>logging</code></td><td>bool</td><td>Same</td></tr>
+  <tr><td><code>zipsaves</code></td><td>bool</td><td>Only <code>1</code>/<code>true</code> is true; anything else is false</td></tr>
+  <tr><td><code>unloadsettlements</code></td><td>bool</td><td>Same as zipsaves</td></tr>
+  <tr><td><code>language</code></td><td>string</td><td>Validated; falls back to the default with a warning</td></tr>
+  <tr><td><code>worldborder</code></td><td>int</td><td>Minimum -1</td></tr>
+  <tr><td><code>itemslife</code></td><td>int</td><td>Minimum 0, in minutes</td></tr>
+  <tr><td><code>unloadlevels</code></td><td>int</td><td>Minimum 2, in seconds</td></tr>
+  <tr><td><code>maxsettlements</code></td><td>int</td><td>Minimum -1, per player</td></tr>
+  <tr><td><code>maxsettlers</code></td><td>int</td><td>Minimum -1, per settlement</td></tr>
+</table>
+</div>
+
+<div class="note">
+<p><strong>Two properties of that table matter more than the individual rows.</strong>
+The game <em>clamps</em> rather than rejects, and an unparseable integer only
+logs a warning and keeps the default. So a wrong value never fails a launch -
+it quietly becomes a different value. And because the parser is a map, a
+duplicated flag silently keeps the last occurrence, which is the exact
+mechanism behind the owner bug.</p>
+</div>
+
+<h2 id="decisions">3. Decisions taken</h2>
+
+<div class="tablewrap">
+<table>
+  <tr><th>Question</th><th>Decision</th><th>Consequence</th></tr>
+  <tr>
+    <td>Scope</td><td>Per world, with daemon-wide defaults</td>
+    <td>A world sets only what it wants to differ; the rest is inherited. Costs
+    a merge at launch and a UI that distinguishes inherited from overridden.</td>
+  </tr>
+  <tr>
+    <td>Owner</td><td>A per-world option like any other</td>
+    <td><code>DaemonConfig.owners: string[]</code> is retired. Different worlds
+    can have different owners, which is the thing that could not be expressed
+    before.</td>
+  </tr>
+  <tr>
+    <td>Coverage</td><td>All options, grouped</td>
+    <td>One schema drives the form, so twenty fields cost about what six would.
+    Nothing has to be added later when a rarely-used option turns out to
+    matter.</td>
+  </tr>
+  <tr>
+    <td>Validation</td><td>In the daemon, at save time</td>
+    <td>The value shown in the UI is the value that runs. Rejects what the game
+    would silently clamp.</td>
+  </tr>
+</table>
+</div>
+
+<h2 id="model">4. Model and storage</h2>
+
+<p>A new <code>launch-options.json</code> in the state directory, shaped like
+<code>mod-sets.json</code> because that file already solves per-world storage:</p>
+
+<pre><code>{
+  "defaults": { "owner": "Jeff", "slots": 5 },
+  "worlds": {
+    "Tulsa": { "motd": "Tulsa server", "pausewhenempty": true }
+  },
+  "updatedAt": "2026-07-31T00:00:00.000Z"
+}</code></pre>
+
+<p>Defaults live here rather than in <code>config.json</code>: that file is
+about <em>where things are</em>, this one is about <em>how the game runs</em>.
+Effective options for a launch are <code>defaults</code> merged with that
+world's overrides. An option set in neither is <strong>not passed at all</strong>,
+so the game applies its own default rather than the daemon guessing at one.</p>
+
+<p><code>launch-options-schema.ts</code> is the single source of truth for the
+option set: CLI name, type, group, label, and the game's constraint. It mirrors
+<code>world-settings-schema.ts</code>, which already drives a typed form from a
+schema, so the client form is generated rather than hand-written.</p>
+
+<p>Groups, for the UI only: <strong>Identity</strong> (owner, motd, password),
+<strong>Capacity</strong> (slots, port, ip), <strong>Behaviour</strong>
+(pausewhenempty, strictserverauthority, zipsaves, logging),
+<strong>World</strong> (worldborder, itemslife, unloadlevels, unloadsettlements,
+maxsettlements, maxsettlers, language).</p>
+
+<h2 id="boundary">5. The boundary that must not move</h2>
+
+<p><code>-nogui</code>, <code>-datadir</code> and <code>-world</code> stay
+daemon-controlled and are <strong>not in the schema</strong>, so they cannot be
+set or overridden through any path.</p>
+
+<div class="warn">
+<p><strong><code>-datadir</code> is the one that would be catastrophic.</strong>
+It is the entire reason the daemon can run as SYSTEM and still find the real
+worlds and mods: without it the game derives those folders from the running
+account, and as SYSTEM that is a profile directory containing nothing. A
+user-supplied value would produce a server that starts cleanly, loads zero
+worlds and zero mods, and reports a completely successful launch. That is the
+worst failure shape in this codebase, and the schema's omission is what
+prevents it.</p>
+</div>
+
+<p><code>-settings</code> is excluded for a different reason: it loads a
+settings file whose values <code>handleLaunchArgs</code> then overrides, so
+allowing both would create two sources of truth with a non-obvious precedence.
+<code>-logs</code> is excluded because it relocates the game's log directory,
+and the daemon reads the game's output from the process rather than from disk -
+moving it would change nothing the operator can see through this app while
+quietly breaking the assumption that logs sit under the data directory.</p>
+
+<h2 id="migration">6. Migration</h2>
+
+<p><code>config.json</code>'s <code>owners</code> array becomes
+<code>defaults.owner</code>, taking the <strong>first</strong> entry (trimmed).
+It is removed from <code>ALLOWED_CONFIG_KEYS</code> in <code>http.ts</code>, so
+nothing can set it any more. No per-world overrides are created: every world
+inherits the default until one is deliberately overridden.</p>
+
+<p><strong><code>owners</code> is NOT dropped from the config file.</strong>
+<code>loadConfig</code> and <code>saveConfig</code> round-trip every key they do
+not explicitly derive, so the array stays in <code>config.json</code> forever
+and is still readable at every later boot. That is why the migration's re-run
+guard cannot be "a default owner exists": an operator who deliberately cleared
+the owner would have had it re-seeded from the stale array at the next daemon
+start, silently. The guard is a durable <code>ownersMigratedAt</code> marker in
+<code>launch-options.json</code> instead, so the migration runs at most once
+whatever the current state is. An install that already had an owner when the
+marker was introduced is recorded as migrated and left untouched.</p>
+
+<div class="warn">
+<p><strong>This changes behaviour on the existing install, deliberately and by
+the owner's decision.</strong> The server currently applies <code>Eli</code>,
+because the last <code>-owner</code> wins. Seeding the first entry means the
+next start of any world moves owner permissions to <code>Jeff</code>. That is
+the fix the feature exists to deliver, but it happens at the next
+<em>start</em>, not when the UI is next opened, so the daemon logs once what it
+migrated and which name it kept.</p>
+</div>
+
+<h2 id="validation">7. Validation</h2>
+
+<p>Values are validated in the daemon when saved, against the same bounds
+&sect;2 records, and an out-of-range value is refused with a message naming the
+game's limit. It is not passed through for the game to clamp.</p>
+
+<p>The reason is the failure mode, not tidiness: the game clamps silently. Type
+300 into a slots field that forwards blindly, and the UI shows 300, the server
+runs 250, and the only evidence is a line in a log nobody reads. Refusing at
+save time is what keeps the number on screen and the number in effect the same
+number. <code>world-settings-schema.ts</code>'s <code>checkChange</code>
+already sets this precedent.</p>
+
+<p>Booleans are emitted as <code>true</code>/<code>false</code>. That is correct
+for every boolean option including <code>zipsaves</code> and
+<code>unloadsettlements</code>, which treat anything that is not
+<code>1</code>/<code>true</code> as false.</p>
+
+<h2 id="api">8. API and client</h2>
+
+<div class="tablewrap">
+<table>
+  <tr><th>Route</th><th>Behaviour</th></tr>
+  <tr>
+    <td><code>GET /api/worlds/:world/launch-options</code></td>
+    <td>Returns <code>effective</code>, <code>overrides</code>,
+    <code>defaults</code> and the schema. The schema is served rather than
+    duplicated into the client: <code>types.ts</code> is already a
+    byte-identical duplicate and one such file is enough to keep in step.</td>
+  </tr>
+  <tr>
+    <td><code>PUT /api/worlds/:world/launch-options</code></td>
+    <td>A partial set of changes. An explicit <code>null</code> clears an
+    override so the field falls back to the default.</td>
+  </tr>
+  <tr>
+    <td><code>GET</code> / <code>PUT /api/launch-options/defaults</code></td>
+    <td>The daemon-wide set, same validation.</td>
+  </tr>
+</table>
+</div>
+
+<p><code>buildArgs</code> becomes a pure function of the config, the world and
+the effective options, emitting <code>-name value</code> only for options that
+are set. Iterating a record guarantees each flag appears at most once, which
+matters because a duplicate would silently win - the mechanism behind the
+original bug.</p>
+
+<p>The client gets a dialog in the style of <code>WorldSettingsDialog</code>,
+opened from the same place, with the four groups. Inherited values render muted
+with an "inherited from defaults" marker and a control to override; overridden
+values get "revert to default".</p>
+
+<p>Editing is allowed at any time, because it only writes a JSON file. Changes
+take effect at that world's <strong>next start</strong>, since the game reads
+its arguments once. If the server is currently running that world the dialog
+says so, rather than implying the change is already live.</p>
+
+<div class="note">
+<p><strong>One warning belongs in the UI, not only the docs.</strong>
+<code>port</code> here is the <em>game</em> port, not the daemon's. The firewall
+rule <code>register-task.ps1</code> creates covers the daemon's port only.
+Change the game port and players can reach nothing until a matching rule
+exists - while the daemon continues to look perfectly healthy, because its own
+port still answers.</p>
+</div>
+
+<h2 id="testing">9. Testing</h2>
+
+<p>Beyond schema bounds and merge behaviour, two tests carry the weight:</p>
+
+<ul>
+  <li><strong>The daemon's own arguments cannot be overridden.</strong> Feed
+  <code>buildArgs</code> an overrides record that tries to set
+  <code>datadir</code>, <code>world</code> and <code>nogui</code>, and assert the
+  emitted array still carries the daemon's values, exactly once each. A
+  regression here produces a server that starts successfully with nothing in
+  it.</li>
+  <li><strong>The migration seeds the intended owner.</strong> From a config
+  with <code>owners: ["Jeff", "Eli"]</code>, assert
+  <code>defaults.owner === "Jeff"</code> and that no per-world override is
+  created.</li>
+</ul>
+
+<p>Also: each numeric bound refused at its edge with the limit named; an unset
+option absent from the argument list entirely rather than emitted empty; an
+override beating a default and an unset field falling through to it; and a seam
+test in <code>client/test/api.integration.test.ts</code> that PUTs overrides and
+GETs them back through the real client transport, since that is the only place
+a real request crosses a real socket.</p>
+
+<h2 id="scope-out">10. Out of scope</h2>
+
+<ul>
+  <li><strong>Applying changes to a running server.</strong> The game reads its
+  arguments once at startup; there is no live reload to build.</li>
+  <li><strong><code>-settings</code> file support.</strong> Excluded for the
+  precedence reason in &sect;5.</li>
+  <li><strong>Opening a firewall rule for a changed game port.</strong> Warned
+  about, not automated: the daemon does not manage the game's own port today
+  and making it do so is a separate decision.</li>
+  <li><strong>Changes to <code>worldSettings.cfg</code> or its editor.</strong>
+  That file holds the world's own rules and is a different concern that already
+  has a working editor.</li>
+</ul>
+
+</div>

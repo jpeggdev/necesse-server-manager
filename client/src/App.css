@@ -131,3 +131,18 @@ button.danger { background: #5a2020; border-color: #7a2a2a; }
 .ws-row .ws-readonly { color: #9aa6b2; background: #191d22; }
 .ws-note { grid-column: 1 / span 2; margin: 0; font-size: .75rem; }
 .ws-row-mod label { color: #e0b25c; }
+
+/* Launch options editor. Same modal shell as world settings, but grouped
+   into sections (identity/capacity/behaviour/world) instead of one flat
+   list, since the daemon's field list is long enough to want headings. */
+.lo-group { margin-top: 1rem; }
+.lo-group:first-of-type { margin-top: .6rem; }
+.lo-group h3 { margin: 0 0 .3rem; font-size: .85rem; color: #9aa6b2; text-transform: uppercase; letter-spacing: .04em; }
+.lo-fields { margin-top: .3rem; }
+.lo-row { display: grid; grid-template-columns: 1fr 12rem; gap: .2rem .8rem; align-items: center; padding: .3rem 0; border-bottom: 1px solid #23282e; }
+.lo-row label { font-size: .9rem; word-break: break-word; }
+.lo-row input { background: #1f242a; color: inherit; border: 1px solid #2b3138; border-radius: 4px; padding: .3rem .45rem; min-width: 0; }
+.lo-row input[type="checkbox"] { justify-self: start; width: 1.05rem; height: 1.05rem; }
+.lo-note, .lo-status { grid-column: 1 / span 2; margin: 0; font-size: .75rem; }
+.lo-status button { margin-left: .4rem; font-size: .75rem; padding: .15rem .5rem; }
+.lo-firewall-note { margin: .4rem 0; }

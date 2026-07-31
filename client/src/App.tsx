@@ -5,6 +5,8 @@ import { ConsolePanel } from "./ConsolePanel";
 import { ErrorBanner } from "./ErrorBanner";
 import { Splitter } from "./Splitter";
 import { WorldSettingsDialog } from "./WorldSettingsDialog";
+import { LaunchOptionsDialog } from "./LaunchOptionsDialog";
+import { sameWorld } from "./world-name";
 import { ConnectionSettings } from "./ConnectionSettings";
 import { useDaemon } from "./useDaemon";
 import { DaemonError, STOP_TIMEOUT_STATUS, type WorldSettingValue } from "./api";
@@ -133,6 +135,11 @@ function ConnectedApp({
   // comes from the header's own field, so the dialog always edits the world
   // the header's candidate check just verified exists.
   const [settingsWorld, setSettingsWorld] = useState<string | null>(null);
+  // The world whose launch options dialog is open, or null for closed. Kept
+  // separate from settingsWorld: the two dialogs can be opened independently,
+  // and unlike world settings this one is not blocked on the server being
+  // stopped, so it must not share that dialog's lifecycle.
+  const [launchOptionsWorld, setLaunchOptionsWorld] = useState<string | null>(null);
 
   const [modsWidth, setModsWidth] = useState(() => {
     const saved = Number(localStorage.getItem(MODS_WIDTH_KEY));
@@ -363,6 +370,7 @@ function ConnectedApp({
         onKill={guard(() => api.kill())}
         onUpdateServer={guard(() => api.updateServer())}
         onEditWorldSettings={(w) => setSettingsWorld(w)}
+        onEditLaunchOptions={(w) => setLaunchOptionsWorld(w)}
       />
       <div className="body">
         <div className="mods-pane" style={{ width: modsWidth }}>
@@ -410,6 +418,26 @@ function ConnectedApp({
           onClose={() => setSettingsWorld(null)}
           // A write changes the zip's mtime, which the world list shows.
           onSaved={() => void refresh()}
+        />
+      )}
+      {launchOptionsWorld !== null && (
+        <LaunchOptionsDialog
+          key={launchOptionsWorld}
+          world={launchOptionsWorld}
+          api={api}
+          // `running` alone misses `starting`, where the process is already
+          // spawned with its command line - a save made then still has to
+          // wait for the NEXT start, same as `running`. And `status.world`
+          // has to be compared with `sameWorld`, not `===`: world lookup is
+          // case-insensitive everywhere else in this client, and the header's
+          // free-text box is exactly where a case-only retype would slip past
+          // a strict comparison and silently suppress the notice.
+          serverRunningThisWorld={
+            (status.state === "running" || status.state === "starting") &&
+            status.world !== null &&
+            sameWorld(status.world, launchOptionsWorld)
+          }
+          onClose={() => setLaunchOptionsWorld(null)}
         />
       )}
     </main>

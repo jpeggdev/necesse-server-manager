@@ -39,7 +39,6 @@ export const DEFAULT_CONFIG: DaemonConfig = {
     "-XX:MaxGCPauseMillis=50",
     "-XX:G1HeapRegionSize=32M",
   ],
-  owners: [],
   lastWorld: null,
   serverAppId: 1169370,
   workshopAppId: 1169040,

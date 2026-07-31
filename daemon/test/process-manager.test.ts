@@ -5,7 +5,7 @@ import { DEFAULT_CONFIG } from "../src/config.js";
 import type { DaemonConfig } from "../src/types.js";
 import * as F from "./fixtures/log-fixtures.js";
 
-const cfg: DaemonConfig = { ...DEFAULT_CONFIG, owners: ["Jeff", "Eli"], stopTimeoutMs: 50 };
+const cfg: DaemonConfig = { ...DEFAULT_CONFIG, stopTimeoutMs: 50 };
 
 let spawn: ReturnType<typeof makeFakeSpawn>;
 let pm: ProcessManager;
@@ -31,24 +31,6 @@ const eperm = (): never => {
 const alive = (): void => {};
 
 describe("buildArgs", () => {
-  it("puts jvm args before -jar and one -owner per configured owner", () => {
-    const args = pm.buildArgs("Infected Toenail");
-    expect(args).toEqual([
-      ...cfg.jvmArgs,
-      "-jar",
-      cfg.serverJar,
-      "-nogui",
-      "-datadir",
-      cfg.dataDir,
-      "-world",
-      "Infected Toenail",
-      "-owner",
-      "Jeff",
-      "-owner",
-      "Eli",
-    ]);
-  });
-
   /*
    * Without -datadir the server derives its saves and mods from the running
    * account's APPDATA, which is what tied the daemon to an interactive user
@@ -59,7 +41,7 @@ describe("buildArgs", () => {
    * dropped or defaulted here is invisible until a real launch.
    */
   it("hands the game its data directory explicitly, before the world that lives in it", () => {
-    const args = pm.buildArgs("Tulsa");
+    const args = pm.buildArgs("Tulsa", {});
     const at = args.indexOf("-datadir");
     expect(at).toBeGreaterThan(-1);
     expect(args[at + 1]).toBe(cfg.dataDir);
@@ -71,19 +53,19 @@ describe("buildArgs", () => {
   it("passes a data directory containing spaces as one unsplit argument", () => {
     const spaced = "D:\\Game Data\\Necesse Server";
     const pm2 = new ProcessManager({ ...cfg, dataDir: spaced }, spawn.spawn);
-    expect(pm2.buildArgs("Tulsa")).toContain(spaced);
+    expect(pm2.buildArgs("Tulsa", {})).toContain(spaced);
   });
 });
 
 describe("start", () => {
   it("spawns java with the server root as cwd", () => {
-    pm.start("Tulsa");
+    pm.start("Tulsa", {});
     expect(child().cmd).toBe(cfg.javaExe);
     expect(child().cwd).toBe(cfg.serverRoot);
   });
 
   it("enters starting, then running only on the ready line", () => {
-    pm.start("Infected Toenail");
+    pm.start("Infected Toenail", {});
     expect(pm.status.state).toBe("starting");
     child().child.emitLine(F.MOD_FOUND);
     expect(pm.status.state).toBe("starting");
@@ -92,7 +74,7 @@ describe("start", () => {
   });
 
   it("drives the real coloured stdout, and strips the colour out of the backlog", () => {
-    pm.start("Tulsa");
+    pm.start("Tulsa", {});
     child().child.emitLine(F.REAL_DEBUG);
     child().child.emitLine(F.REAL_READY);
     expect(pm.status.state).toBe("running");
@@ -104,7 +86,7 @@ describe("start", () => {
   });
 
   it("records port, slots, and version from the ready line", () => {
-    pm.start("Infected Toenail");
+    pm.start("Infected Toenail", {});
     child().child.emitLine(F.READY_LINE_WITH_TS);
     expect(pm.status.port).toBe(14159);
     expect(pm.status.slots).toBe(5);
@@ -112,15 +94,15 @@ describe("start", () => {
   });
 
   it("refuses to start when not stopped", () => {
-    pm.start("Tulsa");
-    expect(() => pm.start("Tulsa")).toThrow(/already/i);
+    pm.start("Tulsa", {});
+    expect(() => pm.start("Tulsa", {})).toThrow(/already/i);
     expect(spawn.calls).toHaveLength(1);
   });
 
   it("splits multi-line chunks and strips carriage returns", () => {
     const seen: string[] = [];
     pm.on("line", (l) => seen.push(l.line));
-    pm.start("Tulsa");
+    pm.start("Tulsa", {});
     child().child.stdout.emit("data", Buffer.from("one\r\ntwo\r\n"));
     expect(seen).toEqual(["one", "two"]);
   });
@@ -128,7 +110,7 @@ describe("start", () => {
   it("buffers a partial line until its newline arrives", () => {
     const seen: string[] = [];
     pm.on("line", (l) => seen.push(l.line));
-    pm.start("Tulsa");
+    pm.start("Tulsa", {});
     child().child.stdout.emit("data", Buffer.from("par"));
     expect(seen).toEqual([]);
     child().child.stdout.emit("data", Buffer.from("tial\r\n"));
@@ -149,7 +131,7 @@ describe("start", () => {
   it("keeps a split stdout line intact when a stderr line lands in the middle of it", () => {
     const seen: string[] = [];
     pm.on("line", (l) => seen.push(l.line));
-    pm.start("Tulsa");
+    pm.start("Tulsa", {});
 
     const split = F.REAL_READY.indexOf("with 5 slots");
     child().child.stdout.emit("data", Buffer.from(F.REAL_READY.slice(0, split)));
@@ -170,7 +152,7 @@ describe("start", () => {
   it("buffers a partial stderr line without stdout completing it", () => {
     const seen: string[] = [];
     pm.on("line", (l) => seen.push(l.line));
-    pm.start("Tulsa");
+    pm.start("Tulsa", {});
 
     child().child.stderr.emit("data", Buffer.from("Exception in thread "));
     child().child.stdout.emit("data", Buffer.from("normal stdout line\r\n"));
@@ -183,7 +165,7 @@ describe("start", () => {
 
 describe("stop", () => {
   it("writes stop to stdin and resolves when the process exits", async () => {
-    pm.start("Tulsa");
+    pm.start("Tulsa", {});
     child().child.emitLine(F.READY_LINE_WITH_TS);
     const done = pm.stop();
     expect(child().child.written).toEqual(["stop\n"]);
@@ -194,7 +176,7 @@ describe("stop", () => {
   });
 
   it("rejects on timeout without killing the process", async () => {
-    pm.start("Tulsa");
+    pm.start("Tulsa", {});
     child().child.emitLine(F.READY_LINE_WITH_TS);
     await expect(pm.stop()).rejects.toThrow(/did not exit/i);
     expect(child().child.killed).toBe(false);
@@ -206,7 +188,7 @@ describe("stop", () => {
   });
 
   it("still records an abnormal exit after the stop timeout already rejected", async () => {
-    pm.start("Tulsa");
+    pm.start("Tulsa", {});
     child().child.emitLine(F.READY_LINE_WITH_TS);
     await expect(pm.stop()).rejects.toThrow(/did not exit/i);
     expect(pm.status.state).toBe("stopping");
@@ -218,7 +200,7 @@ describe("stop", () => {
   });
 
   it("still reports a clean stop for a zero exit after the stop timeout already rejected", async () => {
-    pm.start("Tulsa");
+    pm.start("Tulsa", {});
     child().child.emitLine(F.READY_LINE_WITH_TS);
     await expect(pm.stop()).rejects.toThrow(/did not exit/i);
     expect(pm.status.state).toBe("stopping");
@@ -241,7 +223,7 @@ describe("stop", () => {
    * the bug.
    */
   it("reports an externally-initiated shutdown as stopped, not crashed", () => {
-    pm.start("Tulsa");
+    pm.start("Tulsa", {});
     child().child.emitLine(F.REAL_READY);
     expect(pm.status.state).toBe("running");
 
@@ -258,7 +240,7 @@ describe("stop", () => {
   });
 
   it("treats a zero exit code during stop as clean, with no lastError", async () => {
-    pm.start("Tulsa");
+    pm.start("Tulsa", {});
     child().child.emitLine(F.READY_LINE_WITH_TS);
     const done = pm.stop();
     child().child.exit(0);
@@ -268,7 +250,7 @@ describe("stop", () => {
   });
 
   it("records lastError and rejects the pending stop() when the child exits nonzero mid-stop", async () => {
-    pm.start("Tulsa");
+    pm.start("Tulsa", {});
     child().child.emitLine(F.READY_LINE_WITH_TS);
     const done = pm.stop();
     child().child.exit(1);
@@ -280,7 +262,7 @@ describe("stop", () => {
 
 describe("crash detection", () => {
   it("marks crashed when the child exits during starting", () => {
-    pm.start("Tulsa");
+    pm.start("Tulsa", {});
     child().child.emitLine("Some mod blew up");
     child().child.exit(1);
     expect(pm.status.state).toBe("crashed");
@@ -295,7 +277,7 @@ describe("crash detection", () => {
    * must not assert one.
    */
   it("does not describe a clean code-0 exit during starting as a crash", () => {
-    pm.start("Tulsa");
+    pm.start("Tulsa", {});
     child().child.exit(0);
     expect(pm.status.state).toBe("crashed");
     expect(pm.status.lastError).toMatch(/code 0/);
@@ -303,30 +285,30 @@ describe("crash detection", () => {
   });
 
   it("says a signal killed it when the exit carries no code", () => {
-    pm.start("Tulsa");
+    pm.start("Tulsa", {});
     child().child.exit(null);
     expect(pm.status.lastError).toMatch(/terminated by a signal/i);
     expect(pm.status.lastError).not.toMatch(/code null/i);
   });
 
   it("marks crashed when a running server exits on its own", () => {
-    pm.start("Tulsa");
+    pm.start("Tulsa", {});
     child().child.emitLine(F.READY_LINE_WITH_TS);
     child().child.exit(1);
     expect(pm.status.state).toBe("crashed");
   });
 
   it("clears lastError on the next start", () => {
-    pm.start("Tulsa");
+    pm.start("Tulsa", {});
     child().child.exit(1);
-    pm.start("Tulsa");
+    pm.start("Tulsa", {});
     expect(pm.status.lastError).toBeNull();
   });
 });
 
 describe("backlog", () => {
   it("caps the ring buffer at 2000 lines keeping the newest", () => {
-    pm.start("Tulsa");
+    pm.start("Tulsa", {});
     for (let i = 0; i < 2100; i++) child().child.emitLine(`line ${i}`);
     expect(pm.backlog).toHaveLength(2000);
     expect(pm.backlog[pm.backlog.length - 1].line).toBe("line 2099");
@@ -336,7 +318,7 @@ describe("backlog", () => {
 
 describe("kill", () => {
   it("kills the child and reports stopped after exit", () => {
-    pm.start("Tulsa");
+    pm.start("Tulsa", {});
     pm.kill();
     expect(child().child.killed).toBe(true);
     child().child.exit(null);
@@ -388,7 +370,7 @@ describe("markUnmanaged", () => {
   it("refuses to start while a server it does not own is running", () => {
     const pm2 = new ProcessManager(cfg, spawn.spawn, alive);
     pm2.markUnmanaged(9001);
-    expect(() => pm2.start("Tulsa")).toThrow(/unmanaged/i);
+    expect(() => pm2.start("Tulsa", {})).toThrow(/unmanaged/i);
   });
 
   it("cannot be stopped gracefully, and says why", async () => {
@@ -469,5 +451,77 @@ describe("refreshUnmanaged / status purity", () => {
     pm2.refreshUnmanaged();
     expect(pm2.status.state).toBe("unmanaged");
     expect(pm2.status.pid).toBe(9001);
+  });
+});
+
+describe("buildArgs", () => {
+  it("passes the daemon's own arguments", () => {
+    const args = pm.buildArgs("Tulsa", {});
+    expect(args).toContain("-nogui");
+    expect(args[args.indexOf("-datadir") + 1]).toBe(cfg.dataDir);
+    expect(args[args.indexOf("-world") + 1]).toBe("Tulsa");
+  });
+
+  it("omits an option that is not set rather than passing it empty", () => {
+    const args = pm.buildArgs("Tulsa", {});
+    expect(args).not.toContain("-owner");
+    expect(args).not.toContain("-slots");
+    expect(args).not.toContain("-motd");
+  });
+
+  it("emits set options as flag and value", () => {
+    const args = pm.buildArgs("Tulsa", { owner: "Jeff", slots: 5, motd: "hi" });
+    expect(args[args.indexOf("-owner") + 1]).toBe("Jeff");
+    expect(args[args.indexOf("-slots") + 1]).toBe("5");
+    expect(args[args.indexOf("-motd") + 1]).toBe("hi");
+  });
+
+  it("emits booleans as true and false", () => {
+    const on = pm.buildArgs("Tulsa", { pausewhenempty: true });
+    expect(on[on.indexOf("-pausewhenempty") + 1]).toBe("true");
+    const off = pm.buildArgs("Tulsa", { pausewhenempty: false });
+    expect(off[off.indexOf("-pausewhenempty") + 1]).toBe("false");
+  });
+
+  it("emits each flag at most once", () => {
+    // parseLaunchOptions in the game is a HashMap: a repeated flag silently
+    // overwrites. Emitting from a record makes a duplicate impossible, and this
+    // pins it, because a duplicate is exactly how the owner bug happened.
+    const args = pm.buildArgs("Tulsa", { owner: "Jeff", slots: 5 });
+    for (const flag of args.filter((a) => a.startsWith("-"))) {
+      expect(args.filter((a) => a === flag)).toHaveLength(1);
+    }
+  });
+
+  it("cannot be made to override the daemon's own arguments", () => {
+    // The schema does not expose these, so this can only arrive from a bug or a
+    // hand-edited launch-options.json. A user-supplied -datadir produces a
+    // server that starts cleanly with zero worlds and reports success.
+    const args = pm.buildArgs("Tulsa", {
+      datadir: "C:\\evil",
+      world: "SomeOtherWorld",
+      nogui: "no",
+    } as never);
+    expect(args[args.indexOf("-datadir") + 1]).toBe(cfg.dataDir);
+    expect(args[args.indexOf("-world") + 1]).toBe("Tulsa");
+    expect(args.filter((a) => a === "-datadir")).toHaveLength(1);
+    expect(args.filter((a) => a === "-world")).toHaveLength(1);
+    expect(args).not.toContain("C:\\evil");
+    expect(args).not.toContain("SomeOtherWorld");
+  });
+
+  it("writes -nogui, -datadir and -world after every supplied option, independent of the filter", () => {
+    // Isolates the second mechanism: even with legitimate, filter-untouched
+    // options, the daemon's own flags must land last so a HashMap-based parser
+    // that kept the last occurrence of a repeated flag would still resolve to
+    // the daemon's value if the filter above were ever bypassed.
+    const args = pm.buildArgs("Tulsa", { owner: "Jeff", slots: 5, motd: "hi" });
+    expect(args.slice(args.length - 5)).toEqual([
+      "-nogui",
+      "-datadir",
+      cfg.dataDir,
+      "-world",
+      "Tulsa",
+    ]);
   });
 });

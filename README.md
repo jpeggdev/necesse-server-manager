@@ -265,7 +265,6 @@ be looking at a path that is not there.
 | `steamcmdExe` | Full path to `steamcmd.exe`. Leave `""` if you don't use mod installs or server updates through this app. |
 | `authToken` | The shared access token. `""` disables authentication (see Security). |
 | `steamApiKey` | A Steam Web API key, needed only for Workshop search. Everything else, including installing a mod by its Workshop id, updating mods and updating the server, works without one. Get one at https://steamcommunity.com/dev/apikey. |
-| `owners` | List of world owner names. The client can edit this remotely. |
 | `lastWorld` | The most recently started world. The client can edit this remotely. |
 | `stopTimeoutMs` | How long a graceful stop is given before the daemon reports it as timed out (it does not kill the process on timeout). Default `90000`. The client can edit this remotely. |
 | `jvmArgs` | JVM flags passed to `Server.jar`. Sensible defaults are shipped; only change these if you know why. |
@@ -287,6 +286,79 @@ not configured, and the daemon recomputes all five every time it starts:
 
 A few other keys (`modUploadMaxBytes`, `serverAppId`, `workshopAppId`)
 exist with working defaults and normally don't need to be touched at all.
+
+## Launch options
+
+Server launch options (owner, password, player slots, world border and so
+on) live outside `config.json`, in the client's launch options dialog. There
+are daemon-wide defaults, and each world can override any of them; a world
+that sets nothing just uses the defaults.
+
+A few things about how they work are easy to miss:
+
+- **Changes take effect at the world's next start, not immediately.** The
+  game reads its command line only at launch, so editing options while a
+  world is running does not affect that running world; the daemon accepts
+  the write anyway; you just have to stop and start the world for it to
+  apply.
+- **`owner` holds one name, not a list**, because the game itself only
+  supports one: it builds its launch options into a plain map, so repeated
+  `-owner` flags overwrite each other and only the last one survives. If you
+  need more than one privileged account, that has to be handled some other
+  way (in-game permissions), not through this option.
+- **Text options cannot contain `-`, `+`, `"` or `'` at all.** This one is
+  worth reading in full, because it rules out things you would expect to
+  work. The game does not read its command line argument by argument. It
+  joins the whole thing into one string, and after it reads each value it
+  looks for the next `-` or `+` *anywhere* in what is left, including in the
+  middle of a word. So every hyphen starts a new option. Measured against the
+  real `Server.jar`:
+
+  | You type | The game receives |
+  |---|---|
+  | owner `Jean-Luc` | owner `Jean-Luc`, plus an option `Luc` |
+  | motd `co-op night` | motd `co-op night`, plus an option `op` set to `night` |
+  | owner `x-settings C:/evil.cfg` | owner `x-settings C:/evil.cfg`, plus the game's real `-settings` option pointed at that file |
+
+  Note that the option you set still arrives correctly, so nothing looks
+  wrong; the damage is the *second* option you did not ask for. Three of
+  those, `-dev`, `-settings` and `-logs`, are options this daemon
+  deliberately does not offer. The daemon refuses such a value rather than
+  sending a command line that means more than what you typed.
+
+  What this costs you, plainly:
+  - An owner name cannot contain a hyphen. `Jean-Luc` has to be `Jean_Luc`
+    or `JeanLuc`.
+  - A message of the day cannot contain a hyphen or an apostrophe. Write
+    `Welcome, have fun` rather than `Welcome - have fun`, and `dont` rather
+    than `don't`.
+  - **The languages `pt-BR`, `zh-CN` and `zh-TW` cannot be set through the
+    language option at all** - three of the game's 29 locales. The other 26
+    have no hyphen and work normally. The game has its own server command for
+    setting the language, which you can run from the console panel.
+
+  This is a limitation of the game's command-line parser, not of this tool,
+  and there is no way around it from here.
+- **Number options cannot be negative.** Same cause: the game reads the
+  leading `-` as the start of another option, so `-1` arrives as an empty
+  value plus an option called `1`. The game uses `-1` internally to mean
+  "no world border" and "unlimited settlements", and **those values cannot be
+  sent on a command line**, so this tool does not offer them. Leave the option
+  unset to get the game's own default.
+- **Clearing an option and setting it to blank are different.** Setting an
+  option to `null` in the client removes it, so the world falls back to the
+  daemon-wide default (or the game's own default if there is no default
+  either). Setting it to an empty string keeps it set, and the game receives
+  that flag with an empty value.
+- **The game's port is not the daemon's port.** The daemon listens on
+  `8710` (or whatever `port` is set to) for the client to talk to it; the
+  `port` launch option is what players connect to. Changing the game port
+  needs its own inbound firewall rule, the same way the daemon's own port
+  does (see "Open the port" above). Changing one port does not touch the
+  other.
+- A handful of options are not offered at all: `-nogui`, `-datadir` and
+  `-world` are the daemon's own arguments and cannot be set from here, at
+  any level.
 
 ## Building from source
 

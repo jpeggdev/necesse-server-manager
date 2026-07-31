@@ -133,6 +133,41 @@ describe("makeApi", () => {
   });
 });
 
+describe("launch options", () => {
+  it("GETs the daemon defaults when given no world", async () => {
+    fetchMock.mockResolvedValue(ok({ ok: true }));
+    await makeApi(BASE, "").launchOptions();
+    expect(fetchMock.mock.calls[0][0]).toBe(`${BASE}/api/launch-options`);
+  });
+
+  it("GETs a world's options, encoding the name", async () => {
+    fetchMock.mockResolvedValue(ok({ ok: true }));
+    await makeApi(BASE, "").launchOptions("Jeff and Eli");
+    expect(fetchMock.mock.calls[0][0]).toBe(`${BASE}/api/worlds/Jeff%20and%20Eli/launch-options`);
+  });
+
+  it("PUTs world changes as JSON", async () => {
+    fetchMock.mockResolvedValue(ok({ ok: true }));
+    await makeApi(BASE, "").saveLaunchOptions("Tulsa", { slots: 5 });
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(init.method).toBe("PUT");
+    expect(JSON.parse(init.body as string)).toEqual({ slots: 5 });
+  });
+
+  it("PUTs defaults when the world is null", async () => {
+    fetchMock.mockResolvedValue(ok({ ok: true }));
+    await makeApi(BASE, "").saveLaunchOptions(null, { owner: "Jeff" });
+    expect(fetchMock.mock.calls[0][0]).toBe(`${BASE}/api/launch-options`);
+  });
+
+  it("surfaces the daemon's refusal verbatim", async () => {
+    fetchMock.mockResolvedValue(err(400, { ok: false, error: '"slots" must be between 1 and 250' }));
+    await expect(makeApi(BASE, "").saveLaunchOptions("Tulsa", { slots: 999 })).rejects.toThrow(
+      /between 1 and 250/,
+    );
+  });
+});
+
 describe("access token", () => {
   it("sends a bearer header on GETs", async () => {
     fetchMock.mockResolvedValue(ok({}));

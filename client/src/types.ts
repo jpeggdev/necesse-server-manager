@@ -98,7 +98,6 @@ export interface DaemonConfig {
    */
   modUploadMaxBytes: number;
   jvmArgs: string[];
-  owners: string[];
   lastWorld: string | null;
   serverAppId: number;
   workshopAppId: number;
@@ -495,4 +494,40 @@ export type WsMessage =
 export interface ApiError {
   ok: false;
   error: string;
+}
+
+/** A launch option's value. The game takes strings; these are the typed forms. */
+export type LaunchOptionValue = string | number | boolean;
+
+export type LaunchOptionType = "string" | "int" | "boolean";
+
+export type LaunchOptionGroup = "identity" | "capacity" | "behaviour" | "world";
+
+/**
+ * One option the server accepts on its command line, as this daemon exposes it.
+ *
+ * `name` is the flag without its leading dash, which is also the key used in
+ * launch-options.json. The daemon's own arguments (nogui, datadir, world) are
+ * deliberately absent from the field list: they are not settable, and their
+ * absence here is what enforces that.
+ */
+export interface LaunchOptionField {
+  name: string;
+  type: LaunchOptionType;
+  group: LaunchOptionGroup;
+  label: string;
+  help: string;
+  /** int only, inclusive, mirroring the game's own clamp. */
+  min?: number;
+  max?: number;
+}
+
+export interface LaunchOptionsResponse {
+  ok: true;
+  /** Absent for the daemon-wide defaults. */
+  world: string | null;
+  effective: Record<string, LaunchOptionValue>;
+  overrides: Record<string, LaunchOptionValue>;
+  defaults: Record<string, LaunchOptionValue>;
+  fields: LaunchOptionField[];
 }

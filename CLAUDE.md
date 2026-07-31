@@ -184,6 +184,31 @@ call `stateFile()` on import, which throws wherever `PROGRAMDATA` is unset.
   during shutdown; killing it risks the save. `kill` is a separate endpoint so
   it can never happen implicitly.
 
+## Launch options
+
+`launch-options.json` lives in the state directory alongside `mod-sets.json`:
+daemon-wide defaults plus each world's overrides, both applied at the
+world's next start (the game only reads its command line at launch).
+
+`LAUNCH_OPTION_FIELDS` in `daemon/src/launch-options-schema.ts` is the single
+source of truth for which options exist, their types and their limits.
+`nogui`, `datadir` and `world` are deliberately excluded: they are the
+daemon's own arguments, and their absence from this list is the whole
+mechanism that keeps a user from overriding them (`process-manager.ts` also
+filters them out of supplied options and writes its own values last, so even
+a filter bypass would still resolve to the daemon's value under the game's
+last-flag-wins parser). `settings` and `logs` are excluded too: `settings`
+would create a second source of truth that these options then override, and
+`logs` moves a log directory the daemon does not read from anyway.
+
+`DaemonConfig.owners` (an array) is retired. The game's own
+`parseLaunchOptions` builds a plain map from its command-line flags, so
+repeated `-owner` flags overwrite each other and only the last one survives
+a launch. Launch options now hold a single `owner` string instead, and
+`launch-options-migration.ts` moves an existing `config.json`'s `owners`
+array to it (seeding the first entry) the first time the daemon boots after
+upgrading.
+
 ## Testing
 
 Cover the seam, not just each side of it. 113 daemon tests and 6 client tests

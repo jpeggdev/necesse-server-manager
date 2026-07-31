@@ -1,4 +1,6 @@
 import type {
+  LaunchOptionsResponse,
+  LaunchOptionValue,
   ModLibraryResponse,
   ModListResponse,
   ModUpdatesResponse,
@@ -211,6 +213,31 @@ export function makeApi(base: string, token: string) {
      * because the game reads that folder once at startup.
      */
     reconcileMods: (world: string) => post<ReconcileResponse>("/api/mods/reconcile", { world }),
+    /**
+     * A world's launch options, or the daemon-wide defaults when no world is
+     * given. The response carries the field list too, so the form is built from
+     * the daemon's schema rather than a second copy kept in step by hand.
+     */
+    launchOptions: (world?: string) =>
+      request<LaunchOptionsResponse>(
+        world === undefined
+          ? `${base}/api/launch-options`
+          : `${base}/api/worlds/${encodeURIComponent(world)}/launch-options`,
+        token,
+      ),
+    /**
+     * Applies a PARTIAL set of changes. A null value clears that option so it
+     * falls back to the default; omitting a key leaves it alone. Passing null
+     * for `world` edits the defaults.
+     */
+    saveLaunchOptions: (world: string | null, changes: Record<string, LaunchOptionValue | null>) =>
+      request<LaunchOptionsResponse>(
+        world === null
+          ? `${base}/api/launch-options`
+          : `${base}/api/worlds/${encodeURIComponent(world)}/launch-options`,
+        token,
+        { method: "PUT", body: JSON.stringify(changes) },
+      ),
   };
 }
 

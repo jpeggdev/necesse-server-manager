@@ -7,6 +7,13 @@ import { listWorlds, worldExists, worldZipPath, isValidWorldName } from "./world
 import { openWorldSettings, WorldSettingsError } from "./world-settings.js";
 import type { WorldSettingsFile } from "./world-settings-file.js";
 import { knownField, checkChange, isSameValue } from "./world-settings-schema.js";
+import type { LaunchOptions } from "./launch-options.js";
+import {
+  checkLaunchOption,
+  effectiveOptions,
+  fieldByName,
+  LAUNCH_OPTION_FIELDS,
+} from "./launch-options-schema.js";
 import type { ModInstaller } from "./mod-installer.js";
 import type { ModLibrary } from "./mod-library.js";
 import type { ModSets } from "./mod-sets.js";
@@ -18,6 +25,8 @@ import { WorkshopError, type SteamWorkshop } from "./steam-workshop.js";
 import type {
   DaemonConfig,
   InstallResult,
+  LaunchOptionsResponse,
+  LaunchOptionValue,
   ModLibraryResponse,
   ModUpdateInfo,
   ModUploadResponse,
@@ -46,6 +55,7 @@ export interface Deps {
   workshop: SteamWorkshop;
   /** Non-fatal configuration problems, published so a client can surface them. */
   configWarnings: string[];
+  launchOptions: LaunchOptions;
 }
 
 const WORKSHOP_ID = /^\d+$/;
@@ -77,7 +87,7 @@ export const TASK_EXPIRY_MS = 60 * 60 * 1000;
  * Those are different powers, and the token is a shared secret on a plain-HTTP
  * LAN rather than a per-user credential.
  */
-const ALLOWED_CONFIG_KEYS = new Set<keyof DaemonConfig>(["owners", "lastWorld", "stopTimeoutMs"]);
+const ALLOWED_CONFIG_KEYS = new Set<keyof DaemonConfig>(["lastWorld", "stopTimeoutMs"]);
 
 /**
  * The config as it may leave the daemon. Secrets are dropped entirely rather
@@ -118,7 +128,8 @@ const errorText = (e: unknown): string =>
   e instanceof Error ? e.message : `Non-error thrown: ${String(e)}`;
 
 export function buildServer(deps: Deps): FastifyInstance {
-  const { cfg, configFile, pm, installer, library, sets, steam, workshop, configWarnings } = deps;
+  const { cfg, configFile, pm, installer, library, sets, steam, workshop, configWarnings, launchOptions } =
+    deps;
   const app = Fastify({ logger: false });
   type Socket = { send(data: string): void };
   const sockets = new Set<Socket>();
@@ -676,8 +687,25 @@ export function buildServer(deps: Deps): FastifyInstance {
     } finally {
       releaseTask(reservation);
     }
+    // Loaded outside the try/catch below on purpose: a failure here must not
+    // be folded into the 409-means-"already running" mapping that surrounds
+    // pm.start, and it must never be swallowed into an empty options object.
+    // Starting with zero options is the same silent-success shape this whole
+    // feature exists to prevent - the world loads, the launch reports success,
+    // and nobody holds owner - so a broken launch-options.json fails the start
+    // outright, naming the file and the underlying error, rather than being
+    // treated as "no options configured".
+    let options: Record<string, LaunchOptionValue>;
     try {
-      pm.start(world);
+      options = await launchOptions.effectiveFor(world);
+    } catch (e) {
+      return reply.code(500).send({
+        ok: false,
+        error: `Could not read launch options for "${world}": ${(e as Error).message}`,
+      });
+    }
+    try {
+      pm.start(world, options);
     } catch (e) {
       return reply.code(409).send({ ok: false, error: (e as Error).message });
     }
@@ -1098,6 +1126,111 @@ export function buildServer(deps: Deps): FastifyInstance {
     }
   });
 
+  /**
+   * The four launch-option routes below are deliberately NOT gated on
+   * `requireStopped` or `requireNoActiveTask`. They write one small JSON file
+   * in the state directory - never the mods folder and never a world zip - so
+   * there is nothing here for a concurrent steamcmd run or reconcile to
+   * corrupt. And unlike a world setting, the game reads its command line
+   * exactly once, at process launch: an edit saved while a session is running
+   * cannot partially apply or land in an inconsistent state, it simply has no
+   * effect until that world's next start. Forcing a stop to save "the owner
+   * for tomorrow" would buy nothing.
+   */
+
+  /**
+   * Validates a whole payload before storing any of it.
+   *
+   * All-or-nothing on purpose: a partial apply leaves the operator looking at a
+   * form where some edits took and some did not, with a single error message to
+   * explain the difference.
+   */
+  const checkAll = (changes: Record<string, unknown>): string | null => {
+    for (const [name, value] of Object.entries(changes)) {
+      if (value === null) {
+        // A null clears an option; there is nothing to range-check, but the
+        // name still has to be one we know, or it is a typo that silently does
+        // nothing.
+        if (fieldByName(name) === undefined) return `"${name}" is not a known launch option.`;
+        continue;
+      }
+      const bad = checkLaunchOption(name, value);
+      if (bad !== null) return bad;
+    }
+    return null;
+  };
+
+  app.get("/api/launch-options", async () => {
+    const defaults = await launchOptions.defaults();
+    return {
+      ok: true,
+      world: null,
+      effective: defaults,
+      overrides: defaults,
+      defaults,
+      fields: [...LAUNCH_OPTION_FIELDS],
+    } satisfies LaunchOptionsResponse;
+  });
+
+  app.put("/api/launch-options", async (req, reply) => {
+    const changes = (req.body ?? {}) as Record<string, unknown>;
+    const bad = checkAll(changes);
+    if (bad !== null) return reply.code(400).send({ ok: false, error: bad });
+    const defaults = await launchOptions.setDefaults(
+      changes as Record<string, LaunchOptionValue | null>,
+    );
+    return {
+      ok: true,
+      world: null,
+      effective: defaults,
+      overrides: defaults,
+      defaults,
+      fields: [...LAUNCH_OPTION_FIELDS],
+    } satisfies LaunchOptionsResponse;
+  });
+
+  app.get("/api/worlds/:world/launch-options", async (req, reply) => {
+    const { world } = req.params as { world: string };
+    if (!isValidWorldName(world)) {
+      return reply.code(400).send({ ok: false, error: `Invalid world name: ${JSON.stringify(world)}` });
+    }
+    const [defaults, overrides] = await Promise.all([
+      launchOptions.defaults(),
+      launchOptions.forWorld(world),
+    ]);
+    return {
+      ok: true,
+      world,
+      effective: effectiveOptions(defaults, overrides),
+      overrides,
+      defaults,
+      fields: [...LAUNCH_OPTION_FIELDS],
+    } satisfies LaunchOptionsResponse;
+  });
+
+  app.put("/api/worlds/:world/launch-options", async (req, reply) => {
+    const { world } = req.params as { world: string };
+    if (!isValidWorldName(world)) {
+      return reply.code(400).send({ ok: false, error: `Invalid world name: ${JSON.stringify(world)}` });
+    }
+    const changes = (req.body ?? {}) as Record<string, unknown>;
+    const bad = checkAll(changes);
+    if (bad !== null) return reply.code(400).send({ ok: false, error: bad });
+    const overrides = await launchOptions.setForWorld(
+      world,
+      changes as Record<string, LaunchOptionValue | null>,
+    );
+    const defaults = await launchOptions.defaults();
+    return {
+      ok: true,
+      world,
+      effective: effectiveOptions(defaults, overrides),
+      overrides,
+      defaults,
+      fields: [...LAUNCH_OPTION_FIELDS],
+    } satisfies LaunchOptionsResponse;
+  });
+
   app.get("/api/config", async () => publicConfig(cfg));
 
   app.put("/api/config", async (req, reply) => {
@@ -1105,12 +1238,6 @@ export function buildServer(deps: Deps): FastifyInstance {
     for (const key of Object.keys(patch)) {
       if (!ALLOWED_CONFIG_KEYS.has(key as keyof DaemonConfig)) {
         return reply.code(400).send({ ok: false, error: `Field "${key}" cannot be changed remotely.` });
-      }
-    }
-    if ("owners" in patch) {
-      const owners = patch.owners;
-      if (!Array.isArray(owners) || !owners.every((o) => typeof o === "string" && o.trim().length > 0)) {
-        return reply.code(400).send({ ok: false, error: "owners must be an array of non-empty strings." });
       }
     }
     if ("stopTimeoutMs" in patch) {

@@ -9,6 +9,7 @@ import { ModInstaller } from "../src/mod-installer.js";
 import { ModRegistry } from "../src/mod-registry.js";
 import { ModLibrary } from "../src/mod-library.js";
 import { ModSets } from "../src/mod-sets.js";
+import { LaunchOptions } from "../src/launch-options.js";
 import { SteamCmd } from "../src/steamcmd.js";
 import { SteamWorkshop } from "../src/steam-workshop.js";
 import { DEFAULT_CONFIG } from "../src/config.js";
@@ -41,6 +42,7 @@ let sets: ModSets;
 let steam: SteamCmd;
 let net: FakeFetch;
 let workshop: SteamWorkshop;
+let launchOptions: LaunchOptions;
 let app: ReturnType<typeof buildServer>;
 
 beforeEach(async () => {
@@ -78,7 +80,19 @@ beforeEach(async () => {
   installer = new ModInstaller(cfg, registry, steam, library);
   net = makeFakeFetch();
   workshop = new SteamWorkshop(cfg, net.fetch);
-  app = buildServer({ cfg, configFile, configWarnings: [], pm, installer, library, sets, steam, workshop });
+  launchOptions = new LaunchOptions(join(root, "launch-options.json"));
+  app = buildServer({
+    cfg,
+    configFile,
+    configWarnings: [],
+    pm,
+    installer,
+    library,
+    sets,
+    steam,
+    workshop,
+    launchOptions,
+  });
 });
 
 describe("GET /api/status", () => {
@@ -106,6 +120,7 @@ describe("GET /api/status", () => {
       sets,
       steam,
       workshop,
+      launchOptions,
     });
 
     const res = await selfHealApp.inject({ method: "GET", url: "/api/status" });
@@ -136,6 +151,7 @@ describe("configWarnings in the status payload", () => {
       sets,
       steam,
       workshop,
+      launchOptions,
     });
 
     const res = await warnedApp.inject({ method: "GET", url: "/api/status" });
@@ -154,6 +170,7 @@ describe("configWarnings in the status payload", () => {
       sets,
       steam,
       workshop,
+      launchOptions,
     });
     await warnedApp.ready();
 
@@ -228,6 +245,7 @@ describe("activeTasks in the status payload", () => {
       sets,
       steam: throwingSteam,
       workshop,
+      launchOptions,
     });
 
     const launch = await rejectApp.inject({ method: "POST", url: "/api/server/update" });
@@ -1924,7 +1942,18 @@ describe("world settings", () => {
 describe("access token", () => {
   beforeEach(() => {
     cfg.authToken = "s3cret";
-    app = buildServer({ cfg, configFile, configWarnings: [], pm, installer, library, sets, steam, workshop });
+    app = buildServer({
+      cfg,
+      configFile,
+      configWarnings: [],
+      pm,
+      installer,
+      library,
+      sets,
+      steam,
+      workshop,
+      launchOptions,
+    });
   });
 
   it("rejects a request with no token", async () => {
@@ -1983,12 +2012,242 @@ describe("access token", () => {
   // request, or the reverse - either way the operator has no usable fix.
   it("treats a whitespace-only token as unset, in both the hook and the reported flag", async () => {
     cfg.authToken = "   ";
-    const whitespaceApp = buildServer({ cfg, configFile, configWarnings: [], pm, installer, library, sets, steam, workshop });
+    const whitespaceApp = buildServer({
+      cfg,
+      configFile,
+      configWarnings: [],
+      pm,
+      installer,
+      library,
+      sets,
+      steam,
+      workshop,
+      launchOptions,
+    });
 
     const status = await whitespaceApp.inject({ method: "GET", url: "/api/status" });
     expect(status.statusCode).toBe(200);
 
     const config = await whitespaceApp.inject({ method: "GET", url: "/api/config" });
     expect(config.json().authRequired).toBe(false);
+  });
+
+  // Not just "no token 401s" - that alone would pass identically if the route
+  // did not exist at all, since the auth hook 401s any path before routing
+  // gets a chance to 404 it. Asserting the right token actually reaches a real
+  // 200 is what proves the route (and the auth check in front of it) both
+  // exist, rather than just proving the hook itself works.
+  it("rejects a launch-options request with no token, and serves it with the right one", async () => {
+    const noToken = await app.inject({ method: "GET", url: "/api/launch-options" });
+    expect(noToken.statusCode).toBe(401);
+    expect(noToken.json().error).toMatch(/token/i);
+
+    const withToken = await app.inject({
+      method: "GET",
+      url: "/api/launch-options",
+      headers: { authorization: "Bearer s3cret" },
+    });
+    expect(withToken.statusCode).toBe(200);
+  });
+});
+
+describe("launch options", () => {
+  it("serves the defaults with the field list", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/launch-options" });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.world).toBeNull();
+    expect(Array.isArray(body.fields)).toBe(true);
+    expect(body.fields.some((f: { name: string }) => f.name === "owner")).toBe(true);
+  });
+
+  it("never offers a daemon-owned argument as a field", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/launch-options" });
+    const names = res.json().fields.map((f: { name: string }) => f.name);
+    // Self-supporting: without this an empty field list would trivially
+    // "never offer" a forbidden name too. Asserting real, allowed fields are
+    // present is what makes the negative check below mean something.
+    expect(names).toEqual(expect.arrayContaining(["owner", "slots", "port"]));
+    for (const forbidden of ["datadir", "world", "nogui"]) {
+      expect(names).not.toContain(forbidden);
+    }
+  });
+
+  it("stores a default and reports it as effective for a world", async () => {
+    const put = await app.inject({
+      method: "PUT",
+      url: "/api/launch-options",
+      payload: { owner: "Jeff" },
+    });
+    expect(put.statusCode).toBe(200);
+    const res = await app.inject({ method: "GET", url: "/api/worlds/Tulsa/launch-options" });
+    expect(res.json().effective).toEqual({ owner: "Jeff" });
+    expect(res.json().overrides).toEqual({});
+  });
+
+  it("lets a world override a default", async () => {
+    await app.inject({ method: "PUT", url: "/api/launch-options", payload: { owner: "Jeff" } });
+    await app.inject({
+      method: "PUT",
+      url: "/api/worlds/Tulsa/launch-options",
+      payload: { owner: "Eli" },
+    });
+    const res = await app.inject({ method: "GET", url: "/api/worlds/Tulsa/launch-options" });
+    expect(res.json().effective.owner).toBe("Eli");
+    expect(res.json().defaults.owner).toBe("Jeff");
+  });
+
+  it("clears an override with null", async () => {
+    await app.inject({ method: "PUT", url: "/api/launch-options", payload: { slots: 5 } });
+    await app.inject({ method: "PUT", url: "/api/worlds/Tulsa/launch-options", payload: { slots: 20 } });
+    await app.inject({ method: "PUT", url: "/api/worlds/Tulsa/launch-options", payload: { slots: null } });
+    const res = await app.inject({ method: "GET", url: "/api/worlds/Tulsa/launch-options" });
+    expect(res.json().overrides).toEqual({});
+    expect(res.json().effective).toEqual({ slots: 5 });
+  });
+
+  it("refuses an out-of-range value naming the limit, and stores nothing", async () => {
+    const res = await app.inject({
+      method: "PUT",
+      url: "/api/worlds/Tulsa/launch-options",
+      payload: { slots: 999 },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/1 and 250/);
+    const after = await app.inject({ method: "GET", url: "/api/worlds/Tulsa/launch-options" });
+    expect(after.json().overrides).toEqual({});
+  });
+
+  // Without this, an illegal name like a whitespace-only or a colon-bearing
+  // one is accepted and stored under `normaliseWorld`'s trimmed key - which
+  // `POST /api/server/start` (isValidWorldName-gated) can never look up by
+  // that same illegal name - so the write would be saved, echoed back as
+  // saved, and silently never applied. Every sibling `/api/worlds/:name/*`
+  // route already refuses this; these two must match it.
+  it("refuses an invalid world name on both the GET and the PUT", async () => {
+    const getRes = await app.inject({ method: "GET", url: "/api/worlds/bad%3Aname/launch-options" });
+    expect(getRes.statusCode).toBe(400);
+    expect(getRes.json().error).toMatch(/world name/i);
+
+    const putRes = await app.inject({
+      method: "PUT",
+      url: "/api/worlds/bad%3Aname/launch-options",
+      payload: { owner: "Jeff" },
+    });
+    expect(putRes.statusCode).toBe(400);
+    expect(putRes.json().error).toMatch(/world name/i);
+  });
+
+  it("refuses an unknown option rather than ignoring it", async () => {
+    const res = await app.inject({
+      method: "PUT",
+      url: "/api/worlds/Tulsa/launch-options",
+      payload: { nosuchthing: "x" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/not a known/i);
+  });
+
+  it("refuses a daemon-owned argument", async () => {
+    const res = await app.inject({
+      method: "PUT",
+      url: "/api/worlds/Tulsa/launch-options",
+      payload: { datadir: "C:\\evil" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/not a known/i);
+  });
+
+  // The game joins the whole command line into one string before parsing it,
+  // so a text value carrying a word that starts with `-` is re-read as a flag:
+  // `-owner "-settings C:/evil.cfg"` stores owner as empty AND sets `settings`,
+  // which is deliberately not on offer here, on a daemon running as SYSTEM.
+  // The name filter cannot see this at all; only value validation can.
+  it("refuses a text value the game's parser would read as another flag", async () => {
+    const res = await app.inject({
+      method: "PUT",
+      url: "/api/worlds/Tulsa/launch-options",
+      payload: { owner: "-settings C:/evil.cfg" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/starts a new option/i);
+
+    const after = await app.inject({ method: "GET", url: "/api/worlds/Tulsa/launch-options" });
+    expect(after.json().overrides).toEqual({});
+  });
+
+  it("rejects the whole payload when one value is bad", async () => {
+    // All-or-nothing: a partial apply would leave the operator looking at a
+    // form where some edits took and some did not, with one error to explain it.
+    const res = await app.inject({
+      method: "PUT",
+      url: "/api/worlds/Tulsa/launch-options",
+      payload: { owner: "Jeff", slots: 999 },
+    });
+    expect(res.statusCode).toBe(400);
+    const after = await app.inject({ method: "GET", url: "/api/worlds/Tulsa/launch-options" });
+    expect(after.json().overrides).toEqual({});
+  });
+
+  it("starts the server with the world's effective launch options", async () => {
+    await app.inject({ method: "PUT", url: "/api/launch-options", payload: { owner: "Jeff" } });
+    await app.inject({
+      method: "PUT",
+      url: "/api/worlds/Tulsa/launch-options",
+      payload: { slots: 12 },
+    });
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/server/start",
+      payload: { world: "Tulsa" },
+    });
+    expect(res.statusCode).toBe(200);
+    // Adjacency, not just presence: `-owner` and `Jeff` each showing up
+    // somewhere in argv would also pass for a command line that put every
+    // flag first and every value after, which is not a command line the game
+    // would parse correctly.
+    //
+    // Accepted as-is for these two values, but do NOT copy the technique for a
+    // free-text value: joining argv on " " and substring-matching cannot tell
+    // ["-motd", "x -owner Eli"] from ["-motd", "x", "-owner", "Eli"], so a
+    // value containing a space would make it assert about a command line that
+    // is not the one being built. Index-based adjacency is the correct form,
+    // as in daemon/test/process-manager.test.ts's buildArgs tests:
+    //   expect(argv[argv.indexOf("-owner") + 1]).toBe("Jeff")
+    const argv = spawn.calls[0].args.join(" ");
+    expect(argv).toContain("-owner Jeff");
+    expect(argv).toContain("-slots 12");
+  });
+
+  // The load-bearing requirement: a broken launch-options.json must fail the
+  // start outright rather than silently starting with zero options, which
+  // would be the same silent-success shape (world loads, launch reports
+  // success, nobody holds owner) this whole feature exists to prevent.
+  it("refuses to start the server when launch options cannot be read, rather than starting with none", async () => {
+    const broken = new LaunchOptions(join(cfg.worldsDir, "..", "launch-options.json"));
+    await mkdir(join(cfg.worldsDir, ".."), { recursive: true });
+    await writeFile(join(cfg.worldsDir, "..", "launch-options.json"), "{not json");
+    const brokenApp = buildServer({
+      cfg,
+      configFile,
+      configWarnings: [],
+      pm,
+      installer,
+      library,
+      sets,
+      steam,
+      workshop,
+      launchOptions: broken,
+    });
+
+    const res = await brokenApp.inject({
+      method: "POST",
+      url: "/api/server/start",
+      payload: { world: "Tulsa" },
+    });
+
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error).toMatch(/launch-options\.json/);
+    expect(spawn.calls).toHaveLength(0);
   });
 });

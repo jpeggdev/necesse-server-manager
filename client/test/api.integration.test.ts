@@ -16,6 +16,7 @@ import { ModInstaller } from "../../daemon/src/mod-installer.js";
 import { ModRegistry } from "../../daemon/src/mod-registry.js";
 import { ModLibrary } from "../../daemon/src/mod-library.js";
 import { ModSets } from "../../daemon/src/mod-sets.js";
+import { LaunchOptions } from "../../daemon/src/launch-options.js";
 import { SteamCmd } from "../../daemon/src/steamcmd.js";
 import { SteamWorkshop } from "../../daemon/src/steam-workshop.js";
 import { makeTestConfig } from "../../daemon/test/fixtures/test-config.js";
@@ -131,7 +132,19 @@ beforeEach(async () => {
   const workshop = new SteamWorkshop(cfg, () =>
     Promise.reject(new Error("no network in tests")),
   );
-  app = buildServer({ cfg, configFile, configWarnings: [], pm, installer, library, sets, steam, workshop });
+  const launchOptions = new LaunchOptions(join(root, "launch-options.json"));
+  app = buildServer({
+    cfg,
+    configFile,
+    configWarnings: [],
+    pm,
+    installer,
+    library,
+    sets,
+    steam,
+    workshop,
+    launchOptions,
+  });
   baseUrl = await app.listen({ port: 0, host: "127.0.0.1" });
 });
 
@@ -394,5 +407,218 @@ describe("access token over the real transport", () => {
   it("accepts the websocket upgrade with the token on the query string", async () => {
     const status = await upgradeStatus(wsUrl(wsConnection(TOKEN)));
     expect(status).toBe(101);
+  });
+});
+
+/**
+ * A raw PUT with no body at all - not through `makeApi`, because
+ * `saveLaunchOptions` always JSON.stringifies a payload and so can never
+ * produce this shape itself. `addContentTypeParser` in http.ts treats an
+ * empty JSON body as absent for bodyless POSTs (stop/kill/update-all), and
+ * the daemon suite proves that generic behaviour via `inject()` - but nothing
+ * before this file has sent a real bodyless PUT over a real socket, and PUT
+ * is the one verb the launch-options routes accept. A client, curl script, or
+ * second GUI that sets the JSON content-type on a no-op save must not 400.
+ */
+const rawPut = (url: string, headers: Record<string, string>): Promise<{ status: number; body: string }> =>
+  new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const req = httpRequest(
+      { host: u.hostname, port: u.port, path: `${u.pathname}${u.search}`, method: "PUT", headers },
+      (res) => {
+        let data = "";
+        res.on("data", (chunk: Buffer) => (data += chunk));
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, body: data }));
+      },
+    );
+    req.on("error", reject);
+    req.end();
+  });
+
+/*
+ * Launch options across the real seam.
+ *
+ * Routed here out of the Task 5/6 reviews as things their own tests
+ * structurally could not see: `null` vs `""` surviving the wire distinctly,
+ * the PUT content-type over a real socket, `encodeURIComponent(world)`
+ * round-tripping through the daemon's echoed `world`, verbatim 400 text over
+ * a real socket, and PUT-echo agreeing with a fresh GET.
+ */
+describe("launch options across the real seam", () => {
+  it("stores a default and reads it back as effective for a world", async () => {
+    const api = makeApi(baseUrl, TOKEN);
+    await api.saveLaunchOptions(null, { owner: "Jeff" });
+    const res = await api.launchOptions("Tulsa");
+    expect(res.effective.owner).toBe("Jeff");
+    expect(res.overrides).toEqual({});
+  });
+
+  it("lets a world override a default", async () => {
+    const api = makeApi(baseUrl, TOKEN);
+    await api.saveLaunchOptions(null, { owner: "Jeff" });
+    await api.saveLaunchOptions("Tulsa", { owner: "Eli" });
+    const res = await api.launchOptions("Tulsa");
+    expect(res.effective.owner).toBe("Eli");
+    expect(res.defaults.owner).toBe("Jeff");
+  });
+
+  it("clears an override with an explicit null", async () => {
+    const api = makeApi(baseUrl, TOKEN);
+    await api.saveLaunchOptions(null, { slots: 5 });
+    await api.saveLaunchOptions("Tulsa", { slots: 20 });
+    await api.saveLaunchOptions("Tulsa", { slots: null });
+    expect((await api.launchOptions("Tulsa")).effective).toEqual({ slots: 5 });
+  });
+
+  // The most important item on the routed list: the client sends `null` to
+  // clear an option and "" to store an empty flag value, and the two must
+  // never collapse into each other on the way through JSON, Fastify
+  // validation, and `applyChanges`. A falsy-check regression (`if (!value)`
+  // instead of `if (value === null)`) would delete "" as if it were a clear.
+  it("keeps an explicit empty string distinct from a clearing null", async () => {
+    const api = makeApi(baseUrl, TOKEN);
+    await api.saveLaunchOptions(null, { owner: "Jeff" });
+
+    const emptied = await api.saveLaunchOptions("Tulsa", { owner: "" });
+    expect(emptied.overrides).toEqual({ owner: "" });
+    expect(emptied.effective.owner).toBe("");
+
+    // The PUT echo alone only proves the daemon reflected "" back, not that
+    // it was stored - a load() that dropped empty strings would still pass
+    // the two assertions above. Re-read with a fresh GET to prove it landed.
+    const reread = await api.launchOptions("Tulsa");
+    expect(reread.overrides).toEqual({ owner: "" });
+    expect(reread.effective.owner).toBe("");
+
+    const cleared = await api.saveLaunchOptions("Tulsa", { owner: null });
+    expect(cleared.overrides).toEqual({});
+    expect(cleared.effective.owner).toBe("Jeff");
+  });
+
+  /*
+   * `null` clears, and every other value is a stored override - including the
+   * falsy ones. `""` was already covered above; `false` and `0` were not, and
+   * a falsy-check regression in `applyChanges` collapses all three into a
+   * clear. Each asserts the stored override AND the different answer a clear
+   * would give, over a real socket, so neither half passes on its own.
+   */
+  it("keeps a false boolean distinct from a clearing null", async () => {
+    const api = makeApi(baseUrl, TOKEN);
+    await api.saveLaunchOptions(null, { pausewhenempty: true });
+
+    const off = await api.saveLaunchOptions("Tulsa", { pausewhenempty: false });
+    expect(off.overrides).toEqual({ pausewhenempty: false });
+    expect(off.effective.pausewhenempty).toBe(false);
+
+    // A PUT echo alone would still pass if the daemon reflected the payload
+    // back without storing it. Re-read to prove it landed.
+    const reread = await api.launchOptions("Tulsa");
+    expect(reread.overrides).toEqual({ pausewhenempty: false });
+    expect(reread.effective.pausewhenempty).toBe(false);
+
+    const cleared = await api.saveLaunchOptions("Tulsa", { pausewhenempty: null });
+    expect(cleared.overrides).toEqual({});
+    expect(cleared.effective.pausewhenempty).toBe(true);
+  });
+
+  it("keeps a 0 distinct from a clearing null", async () => {
+    // 0 means "dropped items last forever" for itemslife: a real value, and
+    // the opposite of the 30 it would fall back to if it were treated as a
+    // clear.
+    const api = makeApi(baseUrl, TOKEN);
+    await api.saveLaunchOptions(null, { itemslife: 30 });
+
+    const zero = await api.saveLaunchOptions("Tulsa", { itemslife: 0 });
+    expect(zero.overrides).toEqual({ itemslife: 0 });
+    expect(zero.effective.itemslife).toBe(0);
+
+    const reread = await api.launchOptions("Tulsa");
+    expect(reread.overrides).toEqual({ itemslife: 0 });
+    expect(reread.effective.itemslife).toBe(0);
+
+    const cleared = await api.saveLaunchOptions("Tulsa", { itemslife: null });
+    expect(cleared.overrides).toEqual({});
+    expect(cleared.effective.itemslife).toBe(30);
+  });
+
+  // The game parses its whole command line as one joined string, so a text
+  // value with a word starting with `-` empties the option it was set on and
+  // injects a flag that is not on offer here. Pinned across the real socket
+  // because the client is what sends free text.
+  it("refuses a text value the game's parser would read as another flag", async () => {
+    const api = makeApi(baseUrl, TOKEN);
+    await expect(api.saveLaunchOptions("Tulsa", { owner: "-settings C:/evil.cfg" })).rejects.toThrow(
+      /starts a new option/i,
+    );
+    expect((await api.launchOptions("Tulsa")).overrides).toEqual({});
+  });
+
+  it("refuses an out-of-range value with the daemon's own message", async () => {
+    await expect(makeApi(baseUrl, TOKEN).saveLaunchOptions("Tulsa", { slots: 999 })).rejects.toThrow(
+      /1 and 250/,
+    );
+  });
+
+  it("refuses a daemon-owned argument over the wire", async () => {
+    await expect(
+      makeApi(baseUrl, TOKEN).saveLaunchOptions("Tulsa", { datadir: "C:\\evil" } as never),
+    ).rejects.toThrow(/not a known/i);
+  });
+
+  it("serves a field list with the daemon's real fields and no daemon-owned argument", async () => {
+    const names = (await makeApi(baseUrl, TOKEN).launchOptions()).fields.map((f) => f.name);
+    // Self-supporting, matching daemon/test/http.test.ts:2070: without this an
+    // empty field list would trivially "never offer" a forbidden name too.
+    expect(names).toEqual(expect.arrayContaining(["owner", "slots", "port"]));
+    for (const forbidden of ["datadir", "world", "nogui"]) {
+      expect(names).not.toContain(forbidden);
+    }
+  });
+
+  // The client builds the URL with encodeURIComponent(world); the daemon
+  // decodes the :world param and echoes it back as `world` in the response;
+  // LaunchOptionsDialog compares that echo against the world it asked about
+  // to know its read has landed. A plain name like "Tulsa" never exercises
+  // that encode/decode step - this name needs it (space, &, %, and a non-ASCII
+  // character all force real percent-encoding).
+  it("round-trips a world name that needs percent-encoding", async () => {
+    const world = "Owner's World & Café 100%";
+    const api = makeApi(baseUrl, TOKEN);
+
+    const put = await api.saveLaunchOptions(world, { owner: "Jeff" });
+    expect(put.world).toBe(world);
+
+    const fresh = await api.launchOptions(world);
+    expect(fresh.world).toBe(world);
+    expect(fresh.effective.owner).toBe("Jeff");
+  });
+
+  // What a PUT hands back must be exactly what a subsequent GET reports, or
+  // the dialog shows one thing right after saving and a different thing on
+  // reload.
+  it("agrees with a fresh GET after a PUT", async () => {
+    const api = makeApi(baseUrl, TOKEN);
+    const put = await api.saveLaunchOptions("Tulsa", { owner: "Jeff", slots: 10 });
+    const fresh = await api.launchOptions("Tulsa");
+    expect(fresh).toEqual(put);
+  });
+
+  it("accepts an empty-body PUT the way it accepts an empty-body POST, on both routes", async () => {
+    const headers = { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" };
+
+    const defaultsRes = await rawPut(`${baseUrl}/api/launch-options`, headers);
+    expect(defaultsRes.status).toBe(200);
+    const defaultsBody = JSON.parse(defaultsRes.body) as { ok: boolean; world: string | null };
+    expect(defaultsBody.ok).toBe(true);
+    expect(defaultsBody.world).toBeNull();
+
+    // The defaults route and the world route parse the body independently -
+    // `req.body ?? {}` appears once per handler in http.ts, so a fix (or a
+    // regression) to one route says nothing about the other.
+    const worldRes = await rawPut(`${baseUrl}/api/worlds/Tulsa/launch-options`, headers);
+    expect(worldRes.status).toBe(200);
+    const worldBody = JSON.parse(worldRes.body) as { ok: boolean; world: string | null };
+    expect(worldBody.ok).toBe(true);
+    expect(worldBody.world).toBe("Tulsa");
   });
 });

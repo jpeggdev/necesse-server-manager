@@ -4,6 +4,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveBootConfig } from "./config.js";
 import { buildServer } from "./http.js";
+import { LaunchOptions } from "./launch-options.js";
+import { runOwnerMigration } from "./launch-options-migration.js";
 import { ModInstaller } from "./mod-installer.js";
 import { ModLibrary } from "./mod-library.js";
 import { ModRegistry } from "./mod-registry.js";
@@ -11,7 +13,7 @@ import { ModSets } from "./mod-sets.js";
 import { migrateModSets } from "./mod-migration.js";
 import { resolveLegacyState } from "./migrate-state.js";
 import { ProcessManager, type SpawnFn } from "./process-manager.js";
-import { BOOT_REFUSAL_FILE, stateDir } from "./state-dir.js";
+import { BOOT_REFUSAL_FILE, stateDir, stateFile } from "./state-dir.js";
 import { SteamCmd } from "./steamcmd.js";
 import { SteamWorkshop } from "./steam-workshop.js";
 import { findOrphanServer, listJavaProcesses } from "./orphan.js";
@@ -88,6 +90,27 @@ const installer = new ModInstaller(cfg, registry, steam, library);
 // daemon that reaches the network directly.
 const workshop = new SteamWorkshop(cfg, (url, init) => fetch(url, init));
 
+const launchOptions = new LaunchOptions(stateFile("launch-options.json"));
+
+// Guarded the same way migrateModSets is below: a corrupt config.json or
+// launch-options.json must not take the whole daemon down - a daemon that
+// cannot read its launch options can still list worlds, manage mods and
+// report status. POST /api/server/start (http.ts) is what refuses loudly of
+// its own accord if launch options are genuinely still broken at that point -
+// it does not fall back to starting with zero options.
+const ownerMigration = await runOwnerMigration(configFile, launchOptions);
+if (ownerMigration.message !== null) {
+  if (ownerMigration.failed) console.error(ownerMigration.message);
+  else console.warn(ownerMigration.message);
+  // Not just console: stdout is discarded under the Scheduled Task this
+  // daemon actually runs as, so the "this is not a silent change" guarantee
+  // the migration exists to make - and the report of it failing to make that
+  // guarantee - only reach an operator via configWarnings, which rides on
+  // StatusPayload: GET /api/status and the websocket "status" broadcast.
+  // NOT /api/config, which serves publicConfig(cfg) and carries no warnings.
+  configWarnings.push(ownerMigration.message);
+}
+
 const orphan = await findOrphanServer(listJavaProcesses, cfg.serverJar);
 if (orphan) {
   pm.markUnmanaged(orphan.pid);
@@ -126,6 +149,7 @@ const app = buildServer({
   sets,
   steam,
   workshop,
+  launchOptions,
 });
 await app.listen({ host: "0.0.0.0", port: cfg.port });
 // A refusal log that outlived the problem it described would send the next

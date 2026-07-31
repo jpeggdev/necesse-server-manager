@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { WorldSettingValue } from "./api";
 import { sameWorld } from "./world-name";
+import { useModalFocus } from "./useModalFocus";
 import type {
   WorldSettingField,
   WorldSettingsResponse,
@@ -99,96 +100,12 @@ export function WorldSettingsDialog({
     };
   }, [load, world, adopt]);
 
-  /**
-   * Keyboard and focus containment, declared BEFORE the effect that restores
-   * focus so that on unmount these listeners are gone before that one moves
-   * focus back - otherwise the focusin guard below would drag focus back into
-   * a dialog that is being removed.
-   *
-   * Both listeners are on the document, not on the dialog element. A handler
-   * bound to the dialog only runs while focus is already inside it, which is
-   * exactly the state that stops being true the moment focus escapes: once it
-   * is out, nothing on the dialog is in the event path any more and it can
-   * never pull it back. Shift+Tab from the element focus opens on used to walk
-   * straight out to the page behind, which made `aria-modal` a claim this
-   * component did not honour.
-   */
-  useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      // Escape cancels - but not mid-save. The request is already with the
-      // daemon, so closing would only hide the outcome of a write that is
-      // still happening to a world zip.
-      if (e.key === "Escape") {
-        if (saving) return;
-        e.preventDefault();
-        onClose();
-        return;
-      }
-      if (e.key !== "Tab") return;
-      const dialog = dialogRef.current;
-      if (dialog === null) return;
-      // Recomputed on every keypress rather than cached: which controls are
-      // focusable changes as the fields load, as Save enables, and as a save
-      // in flight disables the lot.
-      const focusable = focusableIn(dialog);
-      if (focusable.length === 0) {
-        e.preventDefault();
-        dialog.focus();
-        return;
-      }
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      const active = document.activeElement;
-      if (!dialog.contains(active)) {
-        e.preventDefault();
-        (e.shiftKey ? last : first).focus();
-      } else if (e.shiftKey && (active === first || active === dialog)) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && active === last) {
-        e.preventDefault();
-        first.focus();
-      }
-    };
-    // Focus can also be taken by a click or by script, not only by Tab.
-    const onFocusIn = (e: FocusEvent) => {
-      const dialog = dialogRef.current;
-      if (dialog === null || dialog.contains(e.target as Node | null)) return;
-      (focusableIn(dialog)[0] ?? dialog).focus();
-    };
-    document.addEventListener("keydown", onKeyDown, true);
-    document.addEventListener("focusin", onFocusIn);
-    return () => {
-      document.removeEventListener("keydown", onKeyDown, true);
-      document.removeEventListener("focusin", onFocusIn);
-    };
-  }, [onClose, saving]);
-
-  /**
-   * Focus into the dialog on open, back to whatever opened it on close, and
-   * the rest of the page made `inert` in between - a second defence that does
-   * not depend on a key handler seeing the event, and which also stops the
-   * header's Start/Stop and the mod panel being clicked while a modal is up.
-   *
-   * The order inside matters both ways round. The element to restore to is
-   * read BEFORE the background goes inert, because a browser blurs whatever it
-   * was focusing when an ancestor becomes inert, and inert is lifted BEFORE
-   * focus is handed back, because focus cannot land on an inert element.
-   */
-  useEffect(() => {
-    const restore = document.activeElement as HTMLElement | null;
-    const inerted = makeSurroundingsInert(backdropRef.current);
-    const dialog = dialogRef.current;
-    // The first control, falling back to the container while the fields are
-    // still loading and there is nothing else yet. Not the container itself:
-    // it is neither the first focusable nor the last, so Shift+Tab from it
-    // matches no wrap rule and walks straight out of the dialog.
-    (dialog === null ? null : (focusableIn(dialog)[0] ?? dialog))?.focus();
-    return () => {
-      for (const el of inerted) el.removeAttribute("inert");
-      restore?.focus();
-    };
-  }, []);
+  // Escape-to-close, Tab trap, and inert-the-background - shared with
+  // LaunchOptionsDialog rather than duplicated; see useModalFocus for why.
+  // `saving` is the close-blocker: the request is already with the daemon,
+  // so closing mid-save would only hide the outcome of a write still
+  // happening to a world zip.
+  useModalFocus(dialogRef, backdropRef, onClose, saving);
 
   /**
    * Number boxes the USER has emptied. An `input[type=number]` reports an empty
@@ -516,46 +433,6 @@ function isBlankNumber(field: WorldSettingField, text: string): boolean {
  */
 function storedIsUnreadable(field: WorldSettingField): boolean {
   return isBlankNumber(field, field.value);
-}
-
-/**
- * Every element inside the dialog that can take focus right now, in tab order.
- * Read-only inputs belong here (they are focusable, and a value you cannot copy
- * out is a worse dialog); disabled ones do not.
- */
-function focusableIn(root: HTMLElement): HTMLElement[] {
-  return [
-    ...root.querySelectorAll<HTMLElement>(
-      "button:not([disabled]), select:not([disabled]), input:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex='-1'])",
-    ),
-  ];
-}
-
-/**
- * Marks everything that is not the dialog `inert`, by walking up from it and
- * inerting each level's other children. Returns what it touched so the same
- * set, and only that set, is released again.
- *
- * The walk exists because the dialog renders inside the app's own tree rather
- * than in a portal, so "the rest of the page" is not one element - it is the
- * header and the body pane, then whatever sits beside their parent, and so on
- * up. Anything already inert for its own reasons is left alone.
- */
-function makeSurroundingsInert(from: HTMLElement | null): Element[] {
-  const marked: Element[] = [];
-  let node: HTMLElement | null = from;
-  while (node !== null && node !== document.body) {
-    const parent: HTMLElement | null = node.parentElement;
-    if (parent === null) break;
-    for (const sibling of parent.children) {
-      if (sibling !== node && !sibling.hasAttribute("inert")) {
-        sibling.setAttribute("inert", "");
-        marked.push(sibling);
-      }
-    }
-    node = parent;
-  }
-  return marked;
 }
 
 /** Whether the drafted text would leave this field's line as the file already has it. */

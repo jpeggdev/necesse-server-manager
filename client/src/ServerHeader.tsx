@@ -20,6 +20,14 @@ export interface ServerHeaderProps {
    * Absent means the editor is not offered at all.
    */
   onEditWorldSettings?: (world: string) => void;
+  /**
+   * Opens the launch options editor for the name currently in the field.
+   * Absent means the editor is not offered at all. Unlike world settings,
+   * this is never blocked on the server being stopped - the daemon accepts
+   * these writes while a world is running, since the game only reads its
+   * launch options at the next start.
+   */
+  onEditLaunchOptions?: (world: string) => void;
   /** True while a mod/server task is streaming, independent of the server's own run state. */
   busy?: boolean;
   /**
@@ -108,6 +116,27 @@ export function ServerHeader(props: ServerHeaderProps) {
                 ? `There is no world named "${world}" yet`
                 : null;
 
+  /**
+   * Why the launch options editor cannot be opened right now, or null when it
+   * can. Deliberately missing both blockers `settingsBlockedBecause` has: the
+   * daemon accepts these writes while this world is running AND while another
+   * task is in flight, on purpose, because they touch one small JSON file in
+   * the state directory and never the mods folder or a world zip. Blocking the
+   * button on either would contradict the routes it talks to. The button stays
+   * enabled through Start/Stop and through a mod install, and the dialog itself
+   * is what tells the operator the change waits for the next start.
+   */
+  const launchOptionsBlockedBecause =
+    world.trim().length === 0
+      ? "Type the name of the world to edit"
+      : !candidateIsCurrent
+        ? "Waiting to confirm the world name…"
+        : !candidate!.valid
+          ? "Not a valid world name"
+          : !candidate!.exists
+            ? `There is no world named "${world}" yet`
+            : null;
+
   const startTitle = taskBusy
     ? "Another task is already running"
     : world.trim().length === 0
@@ -156,6 +185,16 @@ export function ServerHeader(props: ServerHeaderProps) {
           title={settingsBlockedBecause ?? `Edit ${world}'s world settings`}
         >
           World Settings&hellip;
+        </button>
+      )}
+
+      {props.onEditLaunchOptions !== undefined && (
+        <button
+          onClick={() => props.onEditLaunchOptions?.(world)}
+          disabled={launchOptionsBlockedBecause !== null}
+          title={launchOptionsBlockedBecause ?? `Edit ${world}'s launch options`}
+        >
+          Launch Options&hellip;
         </button>
       )}
 
