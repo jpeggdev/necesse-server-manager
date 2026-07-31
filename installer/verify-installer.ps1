@@ -452,7 +452,7 @@ try {
   Check "no NecesseDaemon-Inbound firewall rule was created" (
     $null -eq (Get-NetFirewallRule -Name 'NecesseDaemon-Inbound' -ErrorAction SilentlyContinue)) ""
 
-  foreach ($f in @("dist\index.js","dist\setup-cli.js","dist\migrate-cli.js","node\node.exe","start-daemon.cmd","setup.cmd","migrate.cmd","register-task.ps1","config.example.json","package.json")) {
+  foreach ($f in @("dist\index.js","dist\setup-cli.js","dist\migrate-cli.js","node\node.exe","start-daemon.cmd","setup.cmd","migrate.cmd","register-task.cmd","register-task.ps1","config.example.json","package.json")) {
     Check "installed: $f" (Test-Path (Join-Path $dest $f)) ""
   }
   Check "node_modules installed" (Test-Path (Join-Path $dest "node_modules\fastify")) ""
