@@ -28,6 +28,8 @@ to the game server or its files directly, only to the daemon.
   managing worlds never touch it. It is needed only to install mods from
   the Workshop and to update the server itself.
 - **Your PC:** Windows, to run the client installer.
+- **64-bit Windows on the server box.** The daemon installer is x64-only
+  and refuses to run on a 32-bit or ARM-without-x64-emulation Windows.
 
 ## Install the daemon
 
@@ -63,12 +65,17 @@ the daemon yourself as a plain folder.
    task can't be registered either in that same run, because registering
    it requires `config.json` to already exist, and nothing in a fresh
    silent install ever creates one. Run `setup.cmd` and then
-   `register-task.ps1` from the install directory yourself afterwards,
+   `register-task.cmd` from the install directory yourself afterwards,
    the same two steps the zip route asks for. `/TASKS=boottask` only does
    something on a *re-run* of the installer over a machine that already
    has a `config.json` (from an earlier manual `setup.cmd`, or an earlier
    install): in that case it will register the boot task during the
    silent run.
+5. A silent **upgrade** of a machine that already has the boot task
+   re-registers it and starts it again, with no `/TASKS` flag needed, so
+   the daemon comes back up on the new files. A machine that never had a
+   boot task still does not get one: without `/TASKS=boottask`, nothing
+   is created that was not already there.
 
 Before it touches anything, the installer checks the daemon's own
 `/api/status` to see whether a game session might be running. If it looks
@@ -78,8 +85,10 @@ asks you to confirm nobody is playing before it continues. If your install
 or upgrade appears to fail for no obvious reason, this is the first thing
 to check: stop the server yourself and run the installer again.
 
-Uninstalling (from "Add or Remove Programs") removes the daemon files, the
-scheduled task and the firewall rule, and **deliberately leaves your
+Uninstalling (from "Add or Remove Programs") removes the daemon files, and
+the scheduled task and firewall rule **if this installer was what created
+them** (if they were already on the machine before you first ran it, they
+are left alone and the uninstaller says so). It **deliberately leaves your
 configuration and mod library alone**, in
 `%PROGRAMDATA%\NecesseServerManager`. Delete that folder yourself if you
 want it gone; it holds the only copy of any mod jar you uploaded by hand.
@@ -124,7 +133,7 @@ firewall rule was already created for you and you can skip this section.
 
 If the client runs on a different PC from the daemon, Windows Firewall on
 the server box has to allow inbound TCP on the daemon's port (`8710` by
-default). `register-task.ps1` below creates that rule for you; if you run
+default). `register-task.cmd` below creates that rule for you; if you run
 the daemon with `start-daemon.cmd` instead, add it yourself, or the client
 will simply never connect and nothing on either side will say why.
 
@@ -133,8 +142,11 @@ will simply never connect and nothing on either side will say why.
 If you used the installer and left the boot-task checkbox ticked, this
 was already done for you and you can skip this section.
 
-Run `register-task.ps1` as Administrator (as Administrator matters: it
-registers a Scheduled Task).
+Run `register-task.cmd`. It asks Windows for Administrator rights and then
+runs `register-task.ps1` for you; accept the prompt. Elevation is not
+optional here, and it used to fail confusingly when it was missing:
+registering a Scheduled Task that runs as SYSTEM throws access-denied
+without it, and the firewall rule fails *silently*.
 
 It registers the daemon as a Task Scheduler task that starts AtStartup,
 running as SYSTEM, with a 30-second delay after boot. AtStartup rather than
@@ -228,13 +240,20 @@ daemon stopped if you need to change something afterward.
 
 If you set `NECESSE_MANAGER_DATA`, **set it as a machine (System)
 environment variable, not a per-user one.** The daemon runs as SYSTEM (see
-"Run it at boot" below), and SYSTEM has no access to your user account's
+"Run it at boot" above), and SYSTEM has no access to your user account's
 environment variables at all, so a per-user setting is silently ignored by
 the daemon and you end up with state in the default `%PROGRAMDATA%`
-location instead. (This is not about the installer running elevated: "Run
-as Administrator" keeps you on the same user account with a
-higher-privilege token, it does not switch accounts, so elevation by
-itself is not the reason to avoid a per-user variable here. SYSTEM is.)
+location instead. (SYSTEM is the main reason, not elevation as such:
+accepting a UAC prompt for your own account keeps you on that account with
+a higher-privilege token and your own environment. But if you elevate by
+typing a *different* administrator account's credentials, you are running
+as that account, and its per-user variables are the ones that apply. A
+machine variable is correct in every case.)
+
+**Point it at a local path.** A mapped network drive is per-logon-session,
+so the drive letter usually does not exist for SYSTEM or for an elevated
+process at all, and both the daemon and the installer's safety check would
+be looking at a path that is not there.
 
 | Key | Meaning |
 |---|---|

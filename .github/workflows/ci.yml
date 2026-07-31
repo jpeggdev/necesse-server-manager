@@ -37,10 +37,23 @@ jobs:
         run: npm run build
         working-directory: daemon
 
+      - name: Test daemon
+        run: npx vitest run
+        working-directory: daemon
+      - name: Test client
+        run: npx vitest run
+        working-directory: client
+
       # Compiling the installer against a real stage is what catches a missing
       # file, a wrong path or a bad define. A syntax-only check would not: the
       # commonest breakage here is [Files] pointing at something that is no
       # longer produced, and that only shows up when the payload is real.
+      #
+      # Deliberately AFTER the tests. This step downloads a Node runtime from
+      # nodejs.org on every push and installs Inno Setup from chocolatey when
+      # the runner has none, so ahead of the tests a nodejs.org or chocolatey
+      # blip blocked all test feedback on a change that had nothing to do with
+      # the installer. Nothing below depends on it.
       - name: Build the daemon installer
         shell: pwsh
         run: |
@@ -61,12 +74,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit $LASTEXITCODE" }
           Get-ChildItem "$env:RUNNER_TEMP\out"
 
-      - name: Test daemon
-        run: npx vitest run
-        working-directory: daemon
-      - name: Test client
-        run: npx vitest run
-        working-directory: client
       - name: Shared types are byte-identical
         shell: pwsh
         run: |

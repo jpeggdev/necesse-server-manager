@@ -205,6 +205,20 @@ that outcome.</p>
 That is a product-neutral choice with a useful side effect: <code>/TASKS=""</code>
 disables both, which is what makes a silent install testable (&sect;9).</p>
 
+<div class="warn">
+<p><strong>Amendment, 2026-07-31 &mdash; "selected by default" is no longer
+true of the shipped artifact.</strong> The <code>boottask</code> entry carries
+<code>Flags: unchecked</code>. <code>CurPageChanged(wpSelectTasks)</code> fires
+under <code>/VERYSILENT</code> even though the page is never shown, so it had to
+stop running under silence for <code>/TASKS</code> to work at all &mdash; which
+handed the unattended decision to this section's defaults, where a default of
+<em>checked</em> would have registered a Scheduled Task and opened port 8710 on
+a machine whose operator had deliberately never created one. Interactive runs
+are unaffected: <code>CurPageChanged</code> still sets both checkboxes
+explicitly from the machine's own state, so what an operator sees is what
+&sect;6 describes. <code>/TASKS=""</code> still disables both.</p>
+</div>
+
 <p>Start Menu shortcuts: Setup, Start daemon, Register boot task, Open state
 folder.</p>
 
@@ -223,6 +237,21 @@ running. If it did not exist, the upgrade does not create one: someone who
 deliberately runs the daemon by hand should not find a boot task appearing
 because they accepted a default on an upgrade screen. The default state of that
 checkbox on an upgrade is therefore read from the machine, not assumed.</p>
+
+<div class="note">
+<p><strong>Amendment, 2026-07-31.</strong> This paragraph is accurate again, but
+it was not for a while: once the <code>[Tasks]</code> default became
+<em>unchecked</em> (see the amendment in &sect;5), a bare
+<code>setup.exe /VERYSILENT</code> upgrade with no <code>/TASKS</code> switch
+stopped the daemon, replaced the files, and never re-registered or restarted it
+&mdash; the daemon stayed down until the next reboot and the installer exited 0.
+The checkbox alone cannot carry this promise under silence, because there is no
+checkbox. The <code>.iss</code> now captures <code>HadBootTask :=
+ScheduledTaskExists()</code> at <code>ssInstall</code>, <em>before</em> anything
+stops the task, and registers when <code>WizardIsTaskSelected('boottask') or
+HadBootTask</code>. Existing task re-registered and left running; no task
+created on a machine that never had one.</p>
+</div>
 
 <div class="note">
 <p><strong>Upgrading from a zip install is documented, not automated.</strong>
