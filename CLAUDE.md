@@ -23,10 +23,13 @@ Run the two packages separately; there is no workspace root.
 kill a live game session. Before `02-deploy.ps1` or `04-restart-daemon.ps1`,
 confirm nobody is playing — `GET /api/status` reporting `stopped` is the check.
 
-`02-deploy.ps1` copies `dist/`, `package.json`, `package-lock.json` and the
-three launchers (`setup.cmd`, `start-daemon.cmd`, `migrate.cmd` — the boot
-refusals name them, so an install without them tells the operator to run a
-file that is not there) and seeds nothing. **Daemon state lives in `%PROGRAMDATA%\NecesseServerManager`,
+`02-deploy.ps1` copies `dist/`, `package.json`, `package-lock.json`, the four
+launchers (`setup.cmd`, `start-daemon.cmd`, `migrate.cmd`, `register-task.cmd`
+— the boot refusals name the first three, and the setup wizard's closing
+message names the fourth, so an install missing any of them tells the
+operator to run a file that is not there) and `scripts/03-register-task.ps1`
+itself, renamed to `register-task.ps1` (see below), and seeds nothing.
+**Daemon state lives in `%PROGRAMDATA%\NecesseServerManager`,
 not beside `dist/`** (overridable with the `NECESSE_MANAGER_DATA` environment
 variable). That includes `config.json`, `mods.json`, `mod-library/`,
 `mod-library.json` and `mod-sets.json` (see `docs/mod-sets-design.md`); the
@@ -61,8 +64,14 @@ PowerShell 5.1's `Set-Content -Encoding UTF8` adds one; use
 `[System.IO.File]::WriteAllText($p, $s, (New-Object System.Text.UTF8Encoding($false)))`.
 `loadConfig` tolerates a BOM now, but nothing else does.
 
-**`03-register-task.ps1` itself is not shipped by `02-deploy.ps1`** — it has to
-already be on SERVER to run there. It reads `deploy.local.ps1` from its own
+**`03-register-task.ps1` is shipped by `02-deploy.ps1`**, renamed to
+`register-task.ps1` at the install root — the same rename
+`installer/stage-daemon.ps1` does for the zip and installer artifacts, so all
+three deploy paths agree on the name `daemon/register-task.cmd` invokes and
+the setup wizard's closing message prints. (It used to have to already be on
+SERVER for `daemon/register-task.cmd` to find it; a source-checkout deploy
+that predates this shipped a `.cmd` that self-elevated, prompted for UAC, and
+then died on the missing file.) It reads `deploy.local.ps1` from its own
 directory the same way `02-deploy.ps1` does on the workstation, but falls back
 if that file is absent: the install directory defaults to wherever the script
 itself is sitting (so an operator who places it inside the install directory,

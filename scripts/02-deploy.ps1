@@ -60,6 +60,14 @@ scp -i $key    "$repo\daemon\migrate.cmd"       "${remote}:$destFwd/"
 scp -i $key    "$repo\daemon\setup.cmd"         "${remote}:$destFwd/"
 scp -i $key    "$repo\daemon\start-daemon.cmd"  "${remote}:$destFwd/"
 scp -i $key    "$repo\daemon\register-task.cmd" "${remote}:$destFwd/"
+# register-task.cmd's line 55 runs "%~dp0register-task.ps1" -- shipping the
+# .cmd without it is the same dead end this whole comment is about, just
+# louder: it self-elevates, prompts for UAC, then dies on the missing file
+# instead of failing before asking. Renamed on the way over for the same
+# reason installer/stage-daemon.ps1 renames it: the setup wizard's closing
+# message and register-task.cmd both name it "register-task.ps1", not
+# "03-register-task.ps1".
+scp -i $key    "$repo\scripts\03-register-task.ps1" "${remote}:$destFwd/register-task.ps1"
 
 # Nothing is seeded into $dest. State (config.json, mods.json, the mod
 # library, mod-sets.json) lives in the daemon's state directory, not beside
