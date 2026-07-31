@@ -1,0 +1,105 @@
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { LaunchOptions } from "../src/launch-options.js";
+
+let root: string;
+let file: string;
+let store: LaunchOptions;
+
+beforeEach(async () => {
+  root = await mkdtemp(join(tmpdir(), "necesse-launch-"));
+  file = join(root, "launch-options.json");
+  store = new LaunchOptions(file);
+});
+
+afterEach(async () => {
+  await rm(root, { recursive: true, force: true });
+});
+
+describe("load", () => {
+  it("treats a missing file as empty rather than an error", async () => {
+    expect(await store.load()).toEqual({ defaults: {}, worlds: {}, updatedAt: null });
+  });
+
+  it("reports a parse failure with the path rather than defaulting", async () => {
+    await writeFile(file, "{ not json", "utf8");
+    await expect(store.load()).rejects.toThrow(file);
+  });
+});
+
+describe("setDefaults", () => {
+  it("stores and reads back", async () => {
+    await store.setDefaults({ owner: "Jeff", slots: 5 });
+    expect(await store.defaults()).toEqual({ owner: "Jeff", slots: 5 });
+  });
+
+  it("merges rather than replacing", async () => {
+    await store.setDefaults({ owner: "Jeff" });
+    await store.setDefaults({ slots: 5 });
+    expect(await store.defaults()).toEqual({ owner: "Jeff", slots: 5 });
+  });
+
+  it("clears an option when given null", async () => {
+    await store.setDefaults({ owner: "Jeff", slots: 5 });
+    await store.setDefaults({ slots: null });
+    expect(await store.defaults()).toEqual({ owner: "Jeff" });
+  });
+});
+
+describe("setForWorld", () => {
+  it("keeps worlds separate", async () => {
+    await store.setForWorld("Tulsa", { motd: "tulsa" });
+    await store.setForWorld("Goober Goof", { motd: "goober" });
+    expect(await store.forWorld("Tulsa")).toEqual({ motd: "tulsa" });
+    expect(await store.forWorld("Goober Goof")).toEqual({ motd: "goober" });
+  });
+
+  // Windows filenames are case-insensitive and listWorlds reads names off disk,
+  // so two casings are one world everywhere else in this daemon.
+  it("treats a world name case-insensitively", async () => {
+    await store.setForWorld("Tulsa", { motd: "tulsa" });
+    expect(await store.forWorld("TULSA")).toEqual({ motd: "tulsa" });
+    await store.setForWorld("  tulsa  ", { slots: 3 });
+    expect(await store.forWorld("Tulsa")).toEqual({ motd: "tulsa", slots: 3 });
+  });
+
+  it("clears a world override when given null, falling back to the default", async () => {
+    await store.setDefaults({ slots: 5 });
+    await store.setForWorld("Tulsa", { slots: 20 });
+    expect(await store.effectiveFor("Tulsa")).toEqual({ slots: 20 });
+    await store.setForWorld("Tulsa", { slots: null });
+    expect(await store.forWorld("Tulsa")).toEqual({});
+    expect(await store.effectiveFor("Tulsa")).toEqual({ slots: 5 });
+  });
+});
+
+describe("effectiveFor", () => {
+  it("is the defaults for a world with no overrides", async () => {
+    await store.setDefaults({ owner: "Jeff" });
+    expect(await store.effectiveFor("Anything")).toEqual({ owner: "Jeff" });
+  });
+
+  it("lets a world override one option without losing the others", async () => {
+    await store.setDefaults({ owner: "Jeff", slots: 5 });
+    await store.setForWorld("Tulsa", { owner: "Eli" });
+    expect(await store.effectiveFor("Tulsa")).toEqual({ owner: "Eli", slots: 5 });
+  });
+});
+
+describe("persistence", () => {
+  it("writes a file a second store can read", async () => {
+    await store.setDefaults({ owner: "Jeff" });
+    await store.setForWorld("Tulsa", { slots: 9 });
+    const reopened = new LaunchOptions(file);
+    expect(await reopened.defaults()).toEqual({ owner: "Jeff" });
+    expect(await reopened.forWorld("Tulsa")).toEqual({ slots: 9 });
+  });
+
+  it("records when it last changed", async () => {
+    await store.setDefaults({ owner: "Jeff" });
+    const written = JSON.parse(await readFile(file, "utf8")) as { updatedAt: string };
+    expect(Date.parse(written.updatedAt)).not.toBeNaN();
+  });
+});
