@@ -17,6 +17,30 @@ import type { LaunchOptionField, LaunchOptionsResponse, LaunchOptionValue } from
  */
 const BLANK_NUMBER = "" as const;
 
+/**
+ * What an int box's raw text should stage in `draft`, or `undefined` meaning
+ * "not a value yet - leave the field exactly as it is."
+ *
+ * A blank box stages `BLANK_NUMBER`. Anything else that is not a FINITE
+ * number - a bare "-" a user is mid-typing toward a legal "-1" for
+ * `worldborder` or `maxsettlers`, or whatever else a real number input hands
+ * back that this project's test environment would have sanitized away before
+ * `onChange` ever saw it - must never reach `draft`. `sameValue`'s
+ * `Number(a) === Number(b)` treats `NaN` as different from everything,
+ * including another `NaN`, so it would always read as "changed," and
+ * `JSON.stringify(NaN)` serializes to `null` on the wire - an unfinished
+ * keystroke would silently clear a saved override with no error and no
+ * indication, which is the exact silent-wrong-state shape requirement (A)'s
+ * partial-diff and (B)'s null-vs-empty-string discipline both exist to rule
+ * out. Ignoring it and waiting for something parseable is the only safe
+ * reading of "not a number yet."
+ */
+export function parseIntBoxValue(raw: string): LaunchOptionValue | undefined {
+  if (raw === "") return BLANK_NUMBER;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 export interface LaunchOptionsDialogProps {
   world: string;
   api: Api;
@@ -355,7 +379,12 @@ function renderControl(
           max={field.max}
           step={1}
           disabled={disabled}
-          onChange={(e) => onChange(e.target.value === "" ? BLANK_NUMBER : Number(e.target.value))}
+          onChange={(e) => {
+            const parsed = parseIntBoxValue(e.target.value);
+            // undefined means "not parseable yet" (e.g. a bare "-" mid-typed
+            // toward "-1") - drop the keystroke rather than stage a NaN.
+            if (parsed !== undefined) onChange(parsed);
+          }}
         />
       );
     case "string":

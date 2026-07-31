@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { LaunchOptionsDialog } from "../src/LaunchOptionsDialog";
+import { LaunchOptionsDialog, parseIntBoxValue } from "../src/LaunchOptionsDialog";
 
 const FIELDS = [
   { name: "owner", type: "string", group: "identity", label: "Owner", help: "One owner." },
@@ -143,6 +143,20 @@ describe("LaunchOptionsDialog", () => {
     expect(slots).toHaveValue(null);
     await userEvent.click(screen.getByRole("button", { name: /save/i }));
     await waitFor(() => expect(api.saveLaunchOptions).toHaveBeenCalledWith("Tulsa", { slots: null }));
+  });
+
+  // Drives the handler directly with a non-finite value rather than trying
+  // to simulate the keystroke sequence: jsdom's <input type="number"> may
+  // sanitize an in-progress "-" before onChange ever sees it, but a real
+  // browser is not guaranteed to, and it is the handler's own reaction to
+  // that value - not whether jsdom can be made to produce it - that matters.
+  it("does not stage a non-finite number as a value or a clear", () => {
+    expect(parseIntBoxValue("-")).toBeUndefined();
+    expect(parseIntBoxValue("NaN")).toBeUndefined();
+    // The two values this function DOES commit to, so the guard above is
+    // shown to be an addition rather than a stand-in that swallows everything.
+    expect(parseIntBoxValue("")).toBe("");
+    expect(parseIntBoxValue("-1")).toBe(-1);
   });
 
   it("shows the daemon's refusal without rewording it", async () => {
