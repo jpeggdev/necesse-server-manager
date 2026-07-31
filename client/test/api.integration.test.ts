@@ -409,3 +409,140 @@ describe("access token over the real transport", () => {
     expect(status).toBe(101);
   });
 });
+
+/**
+ * A raw PUT with no body at all - not through `makeApi`, because
+ * `saveLaunchOptions` always JSON.stringifies a payload and so can never
+ * produce this shape itself. `addContentTypeParser` in http.ts treats an
+ * empty JSON body as absent for bodyless POSTs (stop/kill/update-all), and
+ * the daemon suite proves that generic behaviour via `inject()` - but nothing
+ * before this file has sent a real bodyless PUT over a real socket, and PUT
+ * is the one verb the launch-options routes accept. A client, curl script, or
+ * second GUI that sets the JSON content-type on a no-op save must not 400.
+ */
+const rawPut = (url: string, headers: Record<string, string>): Promise<{ status: number; body: string }> =>
+  new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const req = httpRequest(
+      { host: u.hostname, port: u.port, path: `${u.pathname}${u.search}`, method: "PUT", headers },
+      (res) => {
+        let data = "";
+        res.on("data", (chunk: Buffer) => (data += chunk));
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, body: data }));
+      },
+    );
+    req.on("error", reject);
+    req.end();
+  });
+
+/*
+ * Launch options across the real seam.
+ *
+ * Routed here out of the Task 5/6 reviews as things their own tests
+ * structurally could not see: `null` vs `""` surviving the wire distinctly,
+ * the PUT content-type over a real socket, `encodeURIComponent(world)`
+ * round-tripping through the daemon's echoed `world`, verbatim 400 text over
+ * a real socket, and PUT-echo agreeing with a fresh GET.
+ */
+describe("launch options across the real seam", () => {
+  it("stores a default and reads it back as effective for a world", async () => {
+    const api = makeApi(baseUrl, TOKEN);
+    await api.saveLaunchOptions(null, { owner: "Jeff" });
+    const res = await api.launchOptions("Tulsa");
+    expect(res.effective.owner).toBe("Jeff");
+    expect(res.overrides).toEqual({});
+  });
+
+  it("lets a world override a default", async () => {
+    const api = makeApi(baseUrl, TOKEN);
+    await api.saveLaunchOptions(null, { owner: "Jeff" });
+    await api.saveLaunchOptions("Tulsa", { owner: "Eli" });
+    const res = await api.launchOptions("Tulsa");
+    expect(res.effective.owner).toBe("Eli");
+    expect(res.defaults.owner).toBe("Jeff");
+  });
+
+  it("clears an override with an explicit null", async () => {
+    const api = makeApi(baseUrl, TOKEN);
+    await api.saveLaunchOptions(null, { slots: 5 });
+    await api.saveLaunchOptions("Tulsa", { slots: 20 });
+    await api.saveLaunchOptions("Tulsa", { slots: null });
+    expect((await api.launchOptions("Tulsa")).effective).toEqual({ slots: 5 });
+  });
+
+  // The most important item on the routed list: the client sends `null` to
+  // clear an option and "" to store an empty flag value, and the two must
+  // never collapse into each other on the way through JSON, Fastify
+  // validation, and `applyChanges`. A falsy-check regression (`if (!value)`
+  // instead of `if (value === null)`) would delete "" as if it were a clear.
+  it("keeps an explicit empty string distinct from a clearing null", async () => {
+    const api = makeApi(baseUrl, TOKEN);
+    await api.saveLaunchOptions(null, { owner: "Jeff" });
+
+    const emptied = await api.saveLaunchOptions("Tulsa", { owner: "" });
+    expect(emptied.overrides).toEqual({ owner: "" });
+    expect(emptied.effective.owner).toBe("");
+
+    const cleared = await api.saveLaunchOptions("Tulsa", { owner: null });
+    expect(cleared.overrides).toEqual({});
+    expect(cleared.effective.owner).toBe("Jeff");
+  });
+
+  it("refuses an out-of-range value with the daemon's own message", async () => {
+    await expect(makeApi(baseUrl, TOKEN).saveLaunchOptions("Tulsa", { slots: 999 })).rejects.toThrow(
+      /1 and 250/,
+    );
+  });
+
+  it("refuses a daemon-owned argument over the wire", async () => {
+    await expect(
+      makeApi(baseUrl, TOKEN).saveLaunchOptions("Tulsa", { datadir: "C:\\evil" } as never),
+    ).rejects.toThrow(/not a known/i);
+  });
+
+  it("serves a field list with no daemon-owned argument in it", async () => {
+    const names = (await makeApi(baseUrl, TOKEN).launchOptions()).fields.map((f) => f.name);
+    for (const forbidden of ["datadir", "world", "nogui"]) {
+      expect(names).not.toContain(forbidden);
+    }
+  });
+
+  // The client builds the URL with encodeURIComponent(world); the daemon
+  // decodes the :world param and echoes it back as `world` in the response;
+  // LaunchOptionsDialog compares that echo against the world it asked about
+  // to know its read has landed. A plain name like "Tulsa" never exercises
+  // that encode/decode step - this name needs it (space, &, %, and a non-ASCII
+  // character all force real percent-encoding).
+  it("round-trips a world name that needs percent-encoding", async () => {
+    const world = "Owner's World & Café 100%";
+    const api = makeApi(baseUrl, TOKEN);
+
+    const put = await api.saveLaunchOptions(world, { owner: "Jeff" });
+    expect(put.world).toBe(world);
+
+    const fresh = await api.launchOptions(world);
+    expect(fresh.world).toBe(world);
+    expect(fresh.effective.owner).toBe("Jeff");
+  });
+
+  // What a PUT hands back must be exactly what a subsequent GET reports, or
+  // the dialog shows one thing right after saving and a different thing on
+  // reload.
+  it("agrees with a fresh GET after a PUT", async () => {
+    const api = makeApi(baseUrl, TOKEN);
+    const put = await api.saveLaunchOptions("Tulsa", { owner: "Jeff", slots: 10 });
+    const fresh = await api.launchOptions("Tulsa");
+    expect(fresh).toEqual(put);
+  });
+
+  it("accepts an empty-body PUT the way it accepts an empty-body POST", async () => {
+    const res = await rawPut(`${baseUrl}/api/launch-options`, {
+      authorization: `Bearer ${TOKEN}`,
+      "content-type": "application/json",
+    });
+    expect(res.status).toBe(200);
+    const body = JSON.parse(res.body) as { ok: boolean; world: string | null };
+    expect(body.ok).toBe(true);
+    expect(body.world).toBeNull();
+  });
+});
