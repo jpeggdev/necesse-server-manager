@@ -1,4 +1,5 @@
 import { readStoredConfig } from "./config.js";
+import { checkLaunchOption } from "./launch-options-schema.js";
 import type { LaunchOptions } from "./launch-options.js";
 
 /**
@@ -42,6 +43,29 @@ export async function migrateOwners(
   }
 
   const chosen = names[0];
+
+  // The same check the HTTP routes apply, CALLED rather than copied so the two
+  // can never drift apart. config.json is hand-edited on the server box, so a
+  // name arriving here is boundary input exactly as a client's PUT is - and
+  // this is the one path into the store that does not already go through a
+  // route. Without it a legacy `owners` entry like `Jeff -settings C:/x.cfg`
+  // would be seeded here and then emitted onto the game's command line, which
+  // is precisely what that validation exists to prevent.
+  const bad = checkLaunchOption("owner", chosen);
+  if (bad !== null) {
+    // Not seeded, not thrown, and deliberately NOT marked migrated: the
+    // migration did not happen, so it must stay pending. That makes the
+    // warning repeat at every boot until the operator either fixes the array
+    // in config.json or sets a valid owner from the client - and the latter
+    // trips the "already has an owner" branch above, which marks it migrated
+    // and stops the warning. Unresolved stays visible; resolved goes quiet.
+    return (
+      `config.json's owners array starts with ${JSON.stringify(chosen)}, which cannot be used ` +
+      `as the default launch owner: ${bad} No owner was migrated, so every world will start ` +
+      `without -owner until you set a valid one from the client's launch options.`
+    );
+  }
+
   await store.setDefaults({ owner: chosen });
   await store.markOwnersMigrated();
   if (names.length === 1) {
@@ -60,9 +84,14 @@ export interface OwnerMigrationOutcome {
   /** null when there was nothing to do - no message to log or publish. */
   message: string | null;
   /**
-   * True when `message` describes a failure rather than a completed (or
-   * skipped) migration. The caller uses this to choose console.warn versus
-   * console.error; either way `message` still belongs in configWarnings.
+   * True when the migration could not be attempted at all - `config.json` or
+   * `launch-options.json` could not be read or parsed. It does NOT cover a
+   * migration that ran and declined to seed a value it refused (an owner name
+   * the game would re-parse as a flag): that is a completed run reporting a
+   * decision, and it reports through `message` like every other outcome. The
+   * caller uses this only to choose console.warn versus console.error; either
+   * way `message` still belongs in configWarnings, which is the channel that
+   * actually reaches an operator.
    */
   failed: boolean;
 }

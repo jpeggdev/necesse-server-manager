@@ -105,8 +105,9 @@ if (ownerMigration.message !== null) {
   // Not just console: stdout is discarded under the Scheduled Task this
   // daemon actually runs as, so the "this is not a silent change" guarantee
   // the migration exists to make - and the report of it failing to make that
-  // guarantee - only reach an operator via configWarnings, which GET
-  // /api/config already publishes.
+  // guarantee - only reach an operator via configWarnings, which rides on
+  // StatusPayload: GET /api/status and the websocket "status" broadcast.
+  // NOT /api/config, which serves publicConfig(cfg) and carries no warnings.
   configWarnings.push(ownerMigration.message);
 }
 

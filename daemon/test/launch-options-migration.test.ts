@@ -102,6 +102,47 @@ describe("migrateOwners", () => {
     expect(msg).toContain('"Jeff"');
   });
 
+  /*
+   * The one path into the store that does not go through an HTTP route. The
+   * game joins its whole command line into one string before parsing it, so an
+   * owner name carrying a word that starts with `-` empties `-owner` and sets
+   * a real option instead. config.json is hand-edited on the server box, so
+   * this is boundary input, and the migration has to apply the same check the
+   * routes do or it becomes the way that value reaches the command line.
+   */
+  it("refuses an owner name the game would re-parse as a flag, and seeds nothing", async () => {
+    const msg = await migrateOwners(["Jeff -settings C:/evil.cfg", "Eli"], store);
+    expect(await store.defaults()).toEqual({});
+    expect(msg).not.toBeNull();
+    // Names the value, so the operator knows which entry to fix...
+    expect(msg).toContain("-settings C:/evil.cfg");
+    // ...carries the checker's own reason rather than a paraphrase...
+    expect(msg).toMatch(/read back as another flag/i);
+    // ...and says what the server does in the meantime.
+    expect(msg).toMatch(/without -owner/);
+  });
+
+  it("leaves a refused migration pending rather than recording it as done", async () => {
+    // It did not happen, so it must not be marked. The warning then repeats
+    // every boot until the operator fixes it - and setting a valid owner from
+    // the client trips the "already has an owner" branch, which marks it and
+    // stops the warning.
+    await migrateOwners(["-dev"], store);
+    expect(await store.ownersMigrated()).toBe(false);
+
+    await store.setDefaults({ owner: "Jeff" });
+    expect(await migrateOwners(["-dev"], store)).toBeNull();
+    expect(await store.ownersMigrated()).toBe(true);
+  });
+
+  it("still migrates a valid name that merely contains a hyphen", async () => {
+    // The rule is about a word STARTING with - or +, so an over-broad check
+    // would refuse ordinary names and this would go red.
+    const msg = await migrateOwners(["Jean-Luc"], store);
+    expect(await store.defaults()).toEqual({ owner: "Jean-Luc" });
+    expect(msg).toContain("Jean-Luc");
+  });
+
   it("says nothing about a collapse when there was only one owner", async () => {
     const msg = await migrateOwners(["Jeff"], store);
     expect(await store.defaults()).toEqual({ owner: "Jeff" });
@@ -118,6 +159,22 @@ describe("runOwnerMigration", () => {
     expect(outcome.failed).toBe(false);
     expect(outcome.message).toContain("Jeff");
     expect(await store.defaults()).toEqual({ owner: "Jeff" });
+  });
+
+  // The refusal has to survive the boot wrapper to be worth anything: index.ts
+  // pushes `message` onto configWarnings, which rides on StatusPayload and so
+  // reaches the operator through GET /api/status and the websocket "status"
+  // broadcast. A refusal that only existed inside migrateOwners would leave the
+  // operator with no owner and no reason, on a daemon whose stdout goes nowhere.
+  it("carries a refused owner name out to the boot outcome, without failing the boot", async () => {
+    await writeFile(configFile(), JSON.stringify({ owners: ["-dev"] }), "utf8");
+    const outcome = await runOwnerMigration(configFile(), store);
+    expect(outcome.message).not.toBeNull();
+    expect(outcome.message).toContain("-dev");
+    // Not `failed`: the migration ran fine and declined a value, which is a
+    // different thing from being unable to read config.json at all.
+    expect(outcome.failed).toBe(false);
+    expect(await store.defaults()).toEqual({});
   });
 
   // Pins the fix: a failed migration must reach configWarnings exactly like a
