@@ -80,6 +80,17 @@ by the old one while the health check at the end still talks to that old one.
 Inline `powershell -Command "..."` through ssh gets pipe-split by the remote
 cmd.exe before powershell ever sees it.
 
+**The daemon ships as two release artifacts:** a zip (unchanged, needs Node
+22+ already on the box) and `installer/necesse-daemon.iss`, an Inno Setup
+installer that bundles its own Node. `installer/fetch-node.ps1` downloads and
+SHA-256-verifies it into the staged payload at `node\node.exe`; `daemon/setup.cmd`,
+`daemon/start-daemon.cmd`, `daemon/migrate.cmd` and `scripts/03-register-task.ps1`
+(shipped as `register-task.ps1`, see below) all prefer `<install dir>\node\node.exe`
+over whatever `node.exe` is on `PATH` when it exists, and fall back to `PATH`
+otherwise, which is what lets the zip and the installer share one set of
+shims. The pinned Node version lives in `installer/node-version.txt`
+(currently `22.20.0`); that file is the one place to change it.
+
 ## Access token
 
 Every HTTP route and the WebSocket upgrade require an access token, sent as an

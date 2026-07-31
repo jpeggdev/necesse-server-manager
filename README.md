@@ -19,16 +19,81 @@ to the game server or its files directly, only to the daemon.
 ## Requirements
 
 - **The server box:** Windows, with a Necesse dedicated server already
-  installed (`Server.jar` and a Java runtime somewhere on disk), and
-  [Node.js](https://nodejs.org/) 22 or newer. The daemon does not install
-  the game server for you; the setup wizard asks where an existing install
-  lives.
+  installed (`Server.jar` and a Java runtime somewhere on disk). The
+  daemon does not install the game server for you; the setup wizard asks
+  where an existing install lives. [Node.js](https://nodejs.org/) 22 or
+  newer is required only if you install the daemon from the zip; the
+  installer brings its own.
 - **steamcmd** on the server box is optional. Starting, stopping and
   managing worlds never touch it. It is needed only to install mods from
   the Workshop and to update the server itself.
 - **Your PC:** Windows, to run the client installer.
 
 ## Install the daemon
+
+There are two ways to install the daemon. The installer is recommended
+unless you already have Node 22+ on the server box and would rather manage
+the daemon yourself as a plain folder.
+
+### Installer (recommended)
+
+1. Download `necesse-daemon-vX.Y.Z-setup.exe` from the project's Releases
+   page and run it **as Administrator** (the scheduled task and the
+   firewall rule both need elevation).
+2. **SmartScreen will warn** because the installer is unsigned: click
+   "More info", then "Run anyway".
+3. On a fresh install, the wizard page offers two checkboxes: "Run the
+   setup wizard now" and "Start the daemon automatically at boot, and
+   open its firewall port". Leave both ticked unless you have a reason
+   not to.
+   - The setup wizard runs in its own console window; answer its prompts
+     the same way you would for `setup.cmd` (see the zip instructions
+     below), and copy down the **access token** it prints at the end.
+   - If you leave the boot-task box ticked, the installer registers the
+     Scheduled Task and opens the firewall port for you; you do not need
+     to do anything from "Open the port" or "Run it at boot" below.
+   - Both boxes are skipped automatically on an upgrade: the wizard never
+     runs a second time once `config.json` already exists, and the boot
+     task's checkbox instead reflects whatever the machine already has
+     (ticked if a task is already registered, unticked if it isn't).
+4. If you install silently (`necesse-daemon-vX.Y.Z-setup.exe /VERYSILENT`),
+   **the wizard is never launched and the boot task is never registered**
+   unless you pass `/TASKS="runsetup,boottask"` on the command line. A
+   fully silent install with no `/TASKS` leaves you a daemon with no
+   `config.json`, nothing scheduled, and nothing listening; run
+   `setup.cmd` and `register-task.ps1` from the install directory
+   yourself afterwards. This is deliberate: nobody is present to answer
+   the wizard's console prompts, so an unattended run cannot start one.
+
+Before it touches anything, the installer checks the daemon's own
+`/api/status` to see whether a game session might be running. If it looks
+live (or the check cannot tell), a silent install or upgrade **aborts
+outright** rather than risk killing an unsaved session; an interactive one
+asks you to confirm nobody is playing before it continues. If your install
+or upgrade appears to fail for no obvious reason, this is the first thing
+to check: stop the server yourself and run the installer again.
+
+Uninstalling (from "Add or Remove Programs") removes the daemon files, the
+scheduled task and the firewall rule, and **deliberately leaves your
+configuration and mod library alone**, in
+`%PROGRAMDATA%\NecesseServerManager`. Delete that folder yourself if you
+want it gone; it holds the only copy of any mod jar you uploaded by hand.
+There is no "also remove my data" option.
+
+Upgrading (running a newer installer over an existing install) keeps your
+existing `config.json` and access token and does not re-run the wizard.
+
+**If you previously used the zip and your `config.json` sits beside
+`dist\`** (an install that predates the `%PROGRAMDATA%` split), run
+`migrate.cmd` in that old folder first. The installer creates a fresh
+install directory of its own and has no way to find your old one, so
+skipping this step leaves you with an apparently empty daemon.
+
+### Zip
+
+This route needs [Node.js](https://nodejs.org/) 22 or newer already
+installed on the server box; the installer above bundles its own Node and
+does not need this.
 
 1. Download `necesse-daemon-vX.Y.Z.zip` from the project's Releases page
    and unzip it anywhere on the server box (it does not need to be beside
@@ -48,6 +113,9 @@ anyone who can reach the port controls the server. `setup.cmd` is what
 writes the real config.
 
 ## Open the port
+
+If you used the installer and left the boot-task checkbox ticked, the
+firewall rule was already created for you and you can skip this section.
 
 If the client runs on a different PC from the daemon, Windows Firewall on
 the server box has to allow inbound TCP on the daemon's port (`8710` by
@@ -144,6 +212,13 @@ can read the token. Because of that:
 (or wherever the `NECESSE_MANAGER_DATA` environment variable points, if
 you have set one). `setup.cmd` writes it for you; hand-edit it with the
 daemon stopped if you need to change something afterward.
+
+If you set `NECESSE_MANAGER_DATA`, **set it as a machine (System)
+environment variable, not a per-user one.** A user-scoped variable is not
+visible to the installer running elevated under a different account, nor
+to the daemon running as SYSTEM (see "Run it at boot" below), so a
+per-user setting is silently ignored by both and you end up with state in
+the default `%PROGRAMDATA%` location instead.
 
 | Key | Meaning |
 |---|---|
