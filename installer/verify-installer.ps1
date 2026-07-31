@@ -123,6 +123,116 @@ function Stop-SetupProcesses {
   Start-Sleep -Milliseconds 1000
 }
 
+# ------------------------------------------------------------ the fake daemon
+#
+# FINDING I6. Every other case in this script takes preflight.ps1's "nothing
+# listening" branch, so the session-preflight gate was asserted only negatively
+# ("the log does NOT say aborting") -- which deleting the whole
+# RunSessionPreflight() call from CurStepChanged would have left green, on the
+# single most consequential branch in the .iss. The cases at the bottom of this
+# script stand up something that actually answers /api/status so the gate can be
+# asserted positively, and then compile a copy with the call removed to prove
+# those assertions can go red.
+#
+# A raw TcpListener rather than HttpListener: HttpListener needs a URL ACL
+# reservation (or elevation) for an arbitrary port, and this script's whole
+# point is to run unelevated on a workstation. Both loopback families are bound
+# because preflight.ps1 asks for "localhost" and Windows resolves that to ::1
+# first -- an IPv4-only stand-in would be answered by nothing and the case would
+# pass for the wrong reason.
+$psExe        = (Get-Process -Id $PID).Path
+$fakeScript   = Join-Path $work "fake-daemon.ps1"
+$fakeBodyFile = Join-Path $work "fake-daemon-body.json"
+$fakeStopFile = Join-Path $work "fake-daemon.stop"
+$script:fakeProc = $null
+
+$fakeDaemonSource = @'
+param([int]$Port, [string]$BodyFile, [string]$StopFile)
+$ErrorActionPreference = "Stop"
+$body = [System.Text.Encoding]::ASCII.GetBytes((Get-Content $BodyFile -Raw))
+$head = [System.Text.Encoding]::ASCII.GetBytes(
+  "HTTP/1.1 200 OK`r`nContent-Type: application/json`r`nContent-Length: $($body.Length)`r`nConnection: close`r`n`r`n")
+
+$listeners = @()
+foreach ($addr in @([System.Net.IPAddress]::Loopback, [System.Net.IPAddress]::IPv6Loopback)) {
+  try {
+    $l = [System.Net.Sockets.TcpListener]::new($addr, $Port)
+    $l.Start()
+    $listeners += $l
+    Write-Host "listening on $addr`:$Port"
+  } catch {
+    Write-Host "could not listen on $addr`:$Port - $($_.Exception.Message)"
+  }
+}
+if ($listeners.Count -eq 0) { throw "fake daemon could not bind port $Port on either loopback family." }
+
+$deadline = (Get-Date).AddMinutes(10)
+while (((Get-Date) -lt $deadline) -and (-not (Test-Path $StopFile))) {
+  $served = $false
+  foreach ($l in $listeners) {
+    if (-not $l.Pending()) { continue }
+    $served = $true
+    $client = $l.AcceptTcpClient()
+    try {
+      $s = $client.GetStream()
+      $s.ReadTimeout = 2000
+      $buf = New-Object byte[] 8192
+      try { $null = $s.Read($buf, 0, $buf.Length) } catch { }
+      $s.Write($head, 0, $head.Length)
+      $s.Write($body, 0, $body.Length)
+      $s.Flush()
+    } catch {
+      Write-Host "serve failed: $($_.Exception.Message)"
+    }
+    $client.Close()
+  }
+  if (-not $served) { Start-Sleep -Milliseconds 50 }
+}
+foreach ($l in $listeners) { $l.Stop() }
+Write-Host "fake daemon stopped"
+'@
+
+function Get-FreePort {
+  $probe = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+  $probe.Start()
+  $port = $probe.LocalEndpoint.Port
+  $probe.Stop()
+  return $port
+}
+
+# Returns whether the thing actually answers, probed exactly the way
+# preflight.ps1 will probe it. That return value is asserted as a control on
+# every case below: a stand-in nobody could reach would make "the install was
+# aborted" fail for a reason that has nothing to do with the gate.
+function Start-FakeDaemon([int]$Port) {
+  Set-Content -Path $fakeScript -Value $fakeDaemonSource -Encoding UTF8
+  Remove-Item -Force $fakeStopFile -ErrorAction SilentlyContinue
+  $script:fakeProc = Start-Process -FilePath $psExe -PassThru -WindowStyle Hidden `
+    -RedirectStandardOutput (Join-Path $work "fake-daemon.out") `
+    -RedirectStandardError  (Join-Path $work "fake-daemon.err") `
+    -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $fakeScript,
+                    '-Port', "$Port", '-BodyFile', $fakeBodyFile, '-StopFile', $fakeStopFile)
+  $ready = $false
+  $by = (Get-Date).AddSeconds(30)
+  while ((Get-Date) -lt $by) {
+    try {
+      $probe = Invoke-RestMethod "http://localhost:$Port/api/status" -TimeoutSec 5
+      if ($probe) { $ready = $true; break }
+    } catch { Start-Sleep -Milliseconds 250 }
+  }
+  return $ready
+}
+
+function Stop-FakeDaemon {
+  if (Test-Path $work) { Set-Content -Path $fakeStopFile -Value "stop" -ErrorAction SilentlyContinue }
+  if ($script:fakeProc) {
+    if (-not $script:fakeProc.WaitForExit(10000)) {
+      Stop-Process -Id $script:fakeProc.Id -Force -ErrorAction SilentlyContinue
+    }
+    $script:fakeProc = $null
+  }
+}
+
 # Every root Inno might have written to: an admin install registers under
 # HKLM, a lowest-privilege one under HKCU, so a cleanup that checks only one
 # leaves a dangling Add/Remove Programs entry behind on this machine.
@@ -142,6 +252,7 @@ $startMenuGroups = @(
 # group and a scratch install directory on the machine precisely because
 # cleanup sat at the end of the happy path.
 function Invoke-Cleanup {
+  Stop-FakeDaemon
   Stop-SetupProcesses
   foreach ($k in Get-ArpEntries) { Remove-Item -Recurse -Force $k -ErrorAction SilentlyContinue }
   foreach ($g in $startMenuGroups) { Remove-Item -Recurse -Force $g -ErrorAction SilentlyContinue }
@@ -192,12 +303,22 @@ function Get-StateManifest($root) {
 # ({code:StateDirConst}), which means the harness no longer has to hide it --
 # and the installer honouring the override is now something this script can
 # assert instead of something it papers over.
-function Build-Setup([string]$OutDir, [string]$Version, [string]$StageDir = $stage) {
+function Build-Setup([string]$OutDir, [string]$Version, [string]$StageDir = $stage, [switch]$RemovePreflightCall) {
   $text = Get-Content (Join-Path $repo "installer\necesse-daemon.iss") -Raw
   if (-not $isElevated) {
     $from = "PrivilegesRequired=admin"
     if (-not $text.Contains($from)) { throw "harness patch target not found in necesse-daemon.iss: $from" }
     $text = $text.Replace($from, "PrivilegesRequired=lowest")
+  }
+  # FINDING I6: the substitution build. Deletes the call to
+  # RunSessionPreflight() from CurStepChanged and nothing else, so the cases
+  # below can show that removing the gate really does turn their assertions
+  # red. Throwaway, exactly like the PrivilegesRequired patch above -- the
+  # committed .iss is never modified.
+  if ($RemovePreflightCall) {
+    $callSite = "if RunSessionPreflight() then"
+    if (-not $text.Contains($callSite)) { throw "substitution patch target not found in necesse-daemon.iss: $callSite" }
+    $text = $text.Replace($callSite, "if True then // RunSessionPreflight() removed for the substitution proof")
   }
   [System.IO.File]::WriteAllText($issHarness, $text, (New-Object System.Text.UTF8Encoding($false)))
   try {
@@ -309,6 +430,12 @@ try {
   # an unattended install outright when a game session may be live. Reaching
   # the installed files at all means it returned 0, but say so explicitly -- an
   # abort here would be the gate working, not a harness bug.
+  #
+  # This is the NEGATIVE half only, and on its own it was vacuous: this case
+  # takes the "nothing listening" branch, so it stayed green with the whole
+  # RunSessionPreflight() call deleted. The positive half, with something that
+  # actually answers /api/status, is at the bottom of this script, along with a
+  # substitution build that proves it can go red.
   $installLogText = if (Test-Path $installLog) { Get-Content $installLog -Raw } else { "" }
   Check "session preflight passed (install was not aborted)" ($installLogText -notmatch 'aborting unattended install') ""
 
@@ -559,6 +686,118 @@ try {
   }
   Check "regression case uninstalled cleanly" ((Get-ArpEntries).Count -eq 0) "$((Get-ArpEntries) -join ', ')"
   Check "regression case left its state directory intact" (Test-Path (Join-Path $stateG "config.json")) ""
+
+  # ------------------------------------------ FINDING I6: the preflight gate
+  # The gate that decides whether an install is allowed to stop a daemon that
+  # may be mid-session was, until now, asserted only by the ABSENCE of
+  # "aborting unattended install" from a log produced on the "nothing
+  # listening" branch. Deleting RunSessionPreflight() outright left all 64
+  # checks green. These three cases assert it positively and then prove they
+  # can fail.
+  #
+  # A tiny payload of its own: what is under test is a decision taken at
+  # ssInstall, before a single file is copied, so nothing downstream of it
+  # matters -- and "dist was never created" is the assertion that says the
+  # abort happened before the copy, which needs a dist in the payload to be
+  # meaningful. register-task.ps1/.cmd are inert stubs so that even a total
+  # regression cannot register anything on this machine.
+  Write-Host ""
+  Write-Host "--- session preflight: a live daemon must abort an unattended install ---"
+  $stageP = Join-Path $work "stage-p"
+  $outP   = Join-Path $work "out-p"
+  New-Item -ItemType Directory -Force $stageP, $outP, (Join-Path $stageP "dist") | Out-Null
+  Set-Content -Path (Join-Path $stageP "dist\index.js") -Value "console.log('stub');" -NoNewline
+  Set-Content -Path (Join-Path $stageP "setup.cmd") -Value "@echo off`r`nexit /b 0"
+  Set-Content -Path (Join-Path $stageP "start-daemon.cmd") -Value "@echo off`r`nexit /b 0"
+  Set-Content -Path (Join-Path $stageP "register-task.cmd") -Value "@echo off`r`nexit /b 0"
+  Set-Content -Path (Join-Path $stageP "register-task.ps1") -Value "exit 0"
+
+  $setupP    = Build-Setup -OutDir $outP -Version $version -StageDir $stageP
+  $setupPsub = Build-Setup -OutDir $outP -Version "$version-nopreflight" -StageDir $stageP -RemovePreflightCall
+  Check "substitution build compiled (RunSessionPreflight call removed)" (Test-Path $setupPsub) ""
+
+  # Emits nothing itself; results come back on these $script: variables, because
+  # a stray Write-Output inside a PowerShell function silently joins its return
+  # value.
+  $script:pfReady = $false
+  $script:pfDone  = $false
+  $script:pfExit  = -1
+  $script:pfLog   = ""
+  function Invoke-PreflightCase([string]$SetupExe, [string]$Body, [string]$Dest, [string]$StatePath, [string]$LogPath) {
+    New-Item -ItemType Directory -Force $StatePath | Out-Null
+    $port = Get-FreePort
+    # The port comes from config.json, which is what preflight.ps1 reads, so an
+    # ephemeral port keeps this off 8710 and away from anything real.
+    Set-Content -Path (Join-Path $StatePath "config.json") -Value "{`"port`":$port,`"authToken`":`"`"}" -NoNewline
+    Set-Content -Path $fakeBodyFile -Value $Body -NoNewline
+    $env:NECESSE_MANAGER_DATA = $StatePath
+    $script:pfReady = Start-FakeDaemon $port
+    $proc = Start-Process -FilePath $SetupExe -PassThru -ArgumentList @(
+      "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$Dest", "/TASKS=""""", "/LOG=$LogPath")
+    $script:pfDone = Wait-SetupIdle 120000
+    if ($script:pfDone) {
+      $proc.WaitForExit(15000) | Out-Null
+      $proc.Refresh()
+      $script:pfExit = $proc.ExitCode
+    } else { Stop-SetupProcesses }
+    Stop-FakeDaemon
+    if (Test-Path $LogPath) { $script:pfLog = Get-Content $LogPath -Raw } else { $script:pfLog = "" }
+  }
+
+  $liveBody = '{"state":"running","world":"PreflightWorld","activeTasks":[],"configWarnings":[]}'
+  $taskBody = '{"state":"stopped","world":null,"activeTasks":["mod-install-1"],"configWarnings":[]}'
+
+  $destP1 = Join-Path $work "app-p1"
+  Invoke-PreflightCase $setupP $liveBody $destP1 (Join-Path $work "state-p1") (Join-Path $work "preflight-live.log")
+  Check "control: the stand-in daemon actually answered /api/status" $script:pfReady ""
+  Check "install against a live session finished instead of hanging" $script:pfDone "exit=$($script:pfExit)"
+  Check "FINDING I6: a running game session ABORTS the unattended install" (
+    $script:pfLog -match 'aborting unattended install') ""
+  # Anti-vacuity: proves the abort was caused by what the stand-in reported and
+  # not by some unrelated failure that also happens to write that line.
+  Check "control: the abort quotes the running world the stand-in reported" (
+    $script:pfLog -match 'WORLD=PreflightWorld') ""
+  Check "FINDING I6: it aborted BEFORE copying anything - {app}\dist was never created" (
+    -not (Test-Path (Join-Path $destP1 "dist"))) ""
+  Check "FINDING I6: the aborted install registered nothing in Add/Remove Programs" (
+    (Get-ArpEntries).Count -eq 0) "$((Get-ArpEntries) -join ', ')"
+
+  $destP2 = Join-Path $work "app-p2"
+  Invoke-PreflightCase $setupP $taskBody $destP2 (Join-Path $work "state-p2") (Join-Path $work "preflight-tasks.log")
+  Check "control: the stand-in daemon answered (activeTasks case)" $script:pfReady ""
+  Check "install against an in-flight task finished instead of hanging" $script:pfDone "exit=$($script:pfExit)"
+  # FINDING I5. state is 'stopped' here: on the old code this returned 0 and the
+  # install went ahead and force-killed a node that could be mid-writeFile in
+  # mod-library.ts.
+  Check "FINDING I5: state=stopped but a non-empty activeTasks ABORTS the install" (
+    $script:pfLog -match 'aborting unattended install') ""
+  Check "control: the abort names the in-flight task, not just the state" (
+    $script:pfLog -match 'TASKS=1') ""
+  Check "FINDING I5: it aborted BEFORE copying anything - {app}\dist was never created" (
+    -not (Test-Path (Join-Path $destP2 "dist"))) ""
+
+  # The substitution proof. Same stand-in, same live body, same switches -- the
+  # only difference is a build whose CurStepChanged no longer calls
+  # RunSessionPreflight(). Both assertions above MUST invert here, or they were
+  # never testing the gate.
+  Write-Host ""
+  Write-Host "--- substitution proof: the same case against a build with no preflight call ---"
+  $destP3 = Join-Path $work "app-p3"
+  Invoke-PreflightCase $setupPsub $liveBody $destP3 (Join-Path $work "state-p3") (Join-Path $work "preflight-sub.log")
+  Check "control: the stand-in daemon answered (substitution case)" $script:pfReady ""
+  Check "substitution proof: with the call removed, the install is NOT aborted" (
+    $script:pfLog -notmatch 'aborting unattended install') ""
+  Check "substitution proof: and it installs straight over the live session - dist IS created" (
+    Test-Path (Join-Path $destP3 "dist\index.js")) ""
+
+  $uninsP = Join-Path $destP3 "unins000.exe"
+  if (Test-Path $uninsP) {
+    Start-Process -FilePath $uninsP -PassThru -ArgumentList @("/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART") | Out-Null
+    Wait-SetupIdle 120000 | Out-Null
+  }
+  Check "substitution-proof install uninstalled cleanly" ((Get-ArpEntries).Count -eq 0) "$((Get-ArpEntries) -join ', ')"
+  Check "no NecesseDaemon scheduled task exists after the preflight cases" (
+    $null -eq (Get-ScheduledTask -TaskName 'NecesseDaemon' -ErrorAction SilentlyContinue)) ""
 
   # -------------------------------------------------------------- real state
   Write-Host ""
