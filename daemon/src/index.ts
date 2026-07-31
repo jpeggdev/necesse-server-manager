@@ -95,9 +95,9 @@ const launchOptions = new LaunchOptions(stateFile("launch-options.json"));
 // Guarded the same way migrateModSets is below: a corrupt config.json or
 // launch-options.json must not take the whole daemon down - a daemon that
 // cannot read its launch options can still list worlds, manage mods and
-// report status. (Task 5's brief requires its start route to refuse loudly
-// of its own accord if launch options are genuinely broken at that point -
-// that is intent recorded there, not yet true of this codebase.)
+// report status. POST /api/server/start (http.ts) is what refuses loudly of
+// its own accord if launch options are genuinely still broken at that point -
+// it does not fall back to starting with zero options.
 const ownerMigration = await runOwnerMigration(configFile, launchOptions);
 if (ownerMigration.message !== null) {
   if (ownerMigration.failed) console.error(ownerMigration.message);

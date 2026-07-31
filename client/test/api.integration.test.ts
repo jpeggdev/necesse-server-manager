@@ -16,6 +16,7 @@ import { ModInstaller } from "../../daemon/src/mod-installer.js";
 import { ModRegistry } from "../../daemon/src/mod-registry.js";
 import { ModLibrary } from "../../daemon/src/mod-library.js";
 import { ModSets } from "../../daemon/src/mod-sets.js";
+import { LaunchOptions } from "../../daemon/src/launch-options.js";
 import { SteamCmd } from "../../daemon/src/steamcmd.js";
 import { SteamWorkshop } from "../../daemon/src/steam-workshop.js";
 import { makeTestConfig } from "../../daemon/test/fixtures/test-config.js";
@@ -131,7 +132,19 @@ beforeEach(async () => {
   const workshop = new SteamWorkshop(cfg, () =>
     Promise.reject(new Error("no network in tests")),
   );
-  app = buildServer({ cfg, configFile, configWarnings: [], pm, installer, library, sets, steam, workshop });
+  const launchOptions = new LaunchOptions(join(root, "launch-options.json"));
+  app = buildServer({
+    cfg,
+    configFile,
+    configWarnings: [],
+    pm,
+    installer,
+    library,
+    sets,
+    steam,
+    workshop,
+    launchOptions,
+  });
   baseUrl = await app.listen({ port: 0, host: "127.0.0.1" });
 });
 

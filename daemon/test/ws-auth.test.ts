@@ -10,6 +10,7 @@ import { ModInstaller } from "../src/mod-installer.js";
 import { ModRegistry } from "../src/mod-registry.js";
 import { ModLibrary } from "../src/mod-library.js";
 import { ModSets } from "../src/mod-sets.js";
+import { LaunchOptions } from "../src/launch-options.js";
 import { SteamCmd } from "../src/steamcmd.js";
 import { SteamWorkshop } from "../src/steam-workshop.js";
 import { makeTestConfig } from "./fixtures/test-config.js";
@@ -37,7 +38,19 @@ beforeEach(async () => {
   const installer = new ModInstaller(cfg, registry, steam, library);
   const net = makeFakeFetch();
   const workshop = new SteamWorkshop(cfg, net.fetch);
-  app = buildServer({ cfg, configFile, configWarnings: [], pm, installer, library, sets, steam, workshop });
+  const launchOptions = new LaunchOptions(join(root, "launch-options.json"));
+  app = buildServer({
+    cfg,
+    configFile,
+    configWarnings: [],
+    pm,
+    installer,
+    library,
+    sets,
+    steam,
+    workshop,
+    launchOptions,
+  });
   // app.inject() cannot perform a real HTTP Upgrade, so this suite is the one
   // place that stands the daemon up on a real socket - see the module doc
   // comment below for why that is load-bearing rather than a nicety.
