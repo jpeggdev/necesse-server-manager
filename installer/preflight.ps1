@@ -18,13 +18,25 @@ $TaskName = 'NecesseDaemon'
 # would make this check read the wrong config.json on any box using the
 # override, report "nothing running" and wave a live session through -
 # fail-open on the one gate this design depends on.
+#
+# Both paths are composed with [System.IO.Path]::Combine rather than Join-Path.
+# Join-Path goes through the PowerShell provider stack and resolves the PSDrive,
+# so a state directory on a drive this session cannot see threw
+# DriveNotFoundException -- terminating under $ErrorActionPreference = "Stop",
+# i.e. exit 1, which is not one of the 0/2/3 codes this script's contract with
+# necesse-daemon.iss is written in, and the operator got a raw stack trace. The
+# realistic trigger is a mapped network drive: drive letters are per-logon
+# -session, so they are routinely invisible to an elevated or SYSTEM token,
+# which is exactly the arrangement the README recommends for this variable.
+# Combine is a pure string operation with no provider behind it, and Test-Path
+# on an unreachable path returns False rather than throwing.
 $stateDir = $env:NECESSE_MANAGER_DATA
 if (-not $stateDir -or $stateDir.Trim().Length -eq 0) {
   $stateDir = $null
-  if ($env:PROGRAMDATA) { $stateDir = Join-Path $env:PROGRAMDATA "NecesseServerManager" }
+  if ($env:PROGRAMDATA) { $stateDir = [System.IO.Path]::Combine($env:PROGRAMDATA, "NecesseServerManager") }
 }
 $configFile = $null
-if ($stateDir) { $configFile = Join-Path $stateDir "config.json" }
+if ($stateDir) { $configFile = [System.IO.Path]::Combine($stateDir, "config.json") }
 
 function Read-DaemonConfig {
   if (-not $configFile) { return $null }
@@ -53,7 +65,13 @@ if ($Mode -eq 'Check') {
   }
   $cfg = Read-DaemonConfig
   if ($null -eq $cfg) {
-    Write-Output "STATE=none (no config.json at $configFile)"
+    # NO_CONFIG is a marker necesse-daemon.iss greps for, not decoration: no
+    # config.json anywhere the daemon would look means no daemon of ours is on
+    # this machine, so the caller skips the Stop pass entirely. Stop mode's
+    # last resort is to force-kill whatever node.exe owns the port, and with no
+    # config that port is the 8710 default -- on a dev box running an unrelated
+    # Node service there, a fresh install used to kill it.
+    Write-Output "STATE=none NO_CONFIG (no config.json at $configFile)"
     exit 0
   }
   if ($cfg -is [string]) {
@@ -89,14 +107,28 @@ if ($Mode -eq 'Check') {
     exit 3
   }
 
-  if ($status.state -eq 'stopped') {
+  # activeTasks, not just state. StatusPayload in daemon/src/types.ts carries it
+  # in this very response and its doc comment calls it the single source of
+  # truth for whether anything is in flight; CLAUDE.md records the matching
+  # project rule that mod mutations and server updates are refused while a task
+  # is running. Branching on state alone waved through "server stopped, mod
+  # install or updateAll in progress" -- and the Stop pass below force-kills the
+  # node process, which mod-library.ts's plain `await writeFile` (no
+  # temp-and-rename) can be sitting inside, leaving a truncated jar and a
+  # mod-library.json that disagrees with the folder. That is the one directory
+  # this whole design promises not to damage. A server update killed the same
+  # way orphans steamcmd mid-validate.
+  $activeTasks = @()
+  if ($status.activeTasks) { $activeTasks = @($status.activeTasks) }
+
+  if (($status.state -eq 'stopped') -and ($activeTasks.Count -eq 0)) {
     Write-Output "STATE=stopped"
     exit 0
   }
 
   $world = $status.world
   if (-not $world) { $world = '(none)' }
-  Write-Output "STATE=$($status.state) WORLD=$world"
+  Write-Output "STATE=$($status.state) WORLD=$world TASKS=$($activeTasks.Count) [$($activeTasks -join ', ')]"
   exit 2
 }
 
