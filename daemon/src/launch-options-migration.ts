@@ -1,3 +1,4 @@
+import { readStoredConfig } from "./config.js";
 import type { LaunchOptions } from "./launch-options.js";
 
 /**
@@ -36,4 +37,49 @@ export async function migrateOwners(
     `The default owner is now "${chosen}", which takes effect at the next world start. ` +
     `Set a different owner per world from the client if you want one.`
   );
+}
+
+/** What running the owner migration at boot produced, for `index.ts` to log and publish. */
+export interface OwnerMigrationOutcome {
+  /** null when there was nothing to do - no message to log or publish. */
+  message: string | null;
+  /**
+   * True when `message` describes a failure rather than a completed (or
+   * skipped) migration. The caller uses this to choose console.warn versus
+   * console.error; either way `message` still belongs in configWarnings.
+   */
+  failed: boolean;
+}
+
+/**
+ * Runs the owner migration and turns whatever happens - success, nothing to
+ * do, or failure - into exactly one outcome for `index.ts` to act on.
+ *
+ * Split out of `index.ts` so the failure path is unit-testable: that script
+ * is a top-level module with side effects at import and has no test coverage
+ * of any kind. A read or parse failure here (a corrupt `config.json` or
+ * `launch-options.json`) must not take the whole daemon down - see
+ * `migrateOwners`'s doc comment - but it also must not go unreported the way
+ * a bare console.error would under the Scheduled Task this daemon runs as,
+ * whose stdout nobody reads. The failure message is not a paraphrase: it
+ * carries the config path and `(e as Error).message` verbatim, same as every
+ * other error in this codebase.
+ */
+export async function runOwnerMigration(
+  configFile: string,
+  store: LaunchOptions,
+): Promise<OwnerMigrationOutcome> {
+  try {
+    const stored = await readStoredConfig(configFile);
+    const message = await migrateOwners((stored as { owners?: unknown }).owners, store);
+    return { message, failed: false };
+  } catch (e) {
+    return {
+      message:
+        `Owner migration failed (config: ${configFile}): ${(e as Error).message}. The default ` +
+        `launch owner was not seeded, so every world will start without -owner until one is set ` +
+        `from the client.`,
+      failed: true,
+    };
+  }
 }

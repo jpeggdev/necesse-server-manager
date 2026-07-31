@@ -2,10 +2,10 @@ import { spawn as nodeSpawn } from "node:child_process";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { readStoredConfig, resolveBootConfig } from "./config.js";
+import { resolveBootConfig } from "./config.js";
 import { buildServer } from "./http.js";
 import { LaunchOptions } from "./launch-options.js";
-import { migrateOwners } from "./launch-options-migration.js";
+import { runOwnerMigration } from "./launch-options-migration.js";
 import { ModInstaller } from "./mod-installer.js";
 import { ModLibrary } from "./mod-library.js";
 import { ModRegistry } from "./mod-registry.js";
@@ -92,26 +92,22 @@ const workshop = new SteamWorkshop(cfg, (url, init) => fetch(url, init));
 
 const launchOptions = new LaunchOptions(stateFile("launch-options.json"));
 
-// `stored` is the raw parsed config.json, so a retired key is still visible
-// here even though DaemonConfig no longer declares it. Guarded the same way
-// migrateModSets is below: a corrupt launch-options.json must not take the
-// whole daemon down - a daemon that cannot read its launch options can still
-// list worlds, manage mods and report status, and Task 5's start route will
-// refuse loudly on its own if launch options are genuinely broken.
-let ownerMigration: string | null = null;
-try {
-  const stored = await readStoredConfig(configFile);
-  ownerMigration = await migrateOwners((stored as { owners?: unknown }).owners, launchOptions);
-} catch (e) {
-  console.error(`Owner migration failed: ${(e as Error).message}`);
-}
-if (ownerMigration !== null) {
-  console.warn(ownerMigration);
-  // Not just console.warn: stdout is discarded under the Scheduled Task this
+// Guarded the same way migrateModSets is below: a corrupt config.json or
+// launch-options.json must not take the whole daemon down - a daemon that
+// cannot read its launch options can still list worlds, manage mods and
+// report status. (Task 5's brief requires its start route to refuse loudly
+// of its own accord if launch options are genuinely broken at that point -
+// that is intent recorded there, not yet true of this codebase.)
+const ownerMigration = await runOwnerMigration(configFile, launchOptions);
+if (ownerMigration.message !== null) {
+  if (ownerMigration.failed) console.error(ownerMigration.message);
+  else console.warn(ownerMigration.message);
+  // Not just console: stdout is discarded under the Scheduled Task this
   // daemon actually runs as, so the "this is not a silent change" guarantee
-  // the migration exists to make only reaches an operator via configWarnings,
-  // which GET /api/config already publishes.
-  configWarnings.push(ownerMigration);
+  // the migration exists to make - and the report of it failing to make that
+  // guarantee - only reach an operator via configWarnings, which GET
+  // /api/config already publishes.
+  configWarnings.push(ownerMigration.message);
 }
 
 const orphan = await findOrphanServer(listJavaProcesses, cfg.serverJar);
