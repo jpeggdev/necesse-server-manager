@@ -88,3 +88,10 @@ jobs:
 
             Upgrading from an install that kept its state beside dist/: run
             migrate.cmd in that old folder once, before installing.
+
+            Upgrading from an installer built before commit 284c909: uninstalling
+            it will leave the scheduled task and the firewall rule in place. The
+            flag the uninstaller now checks to tell whether it created them did
+            not exist in those builds, so it cannot tell they are ours to remove.
+            Delete the NecesseDaemon scheduled task and the NecesseDaemon-Inbound
+            firewall rule yourself if you no longer want them.
