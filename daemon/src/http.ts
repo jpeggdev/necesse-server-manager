@@ -677,7 +677,7 @@ export function buildServer(deps: Deps): FastifyInstance {
       releaseTask(reservation);
     }
     try {
-      pm.start(world);
+      pm.start(world, {});
     } catch (e) {
       return reply.code(409).send({ ok: false, error: (e as Error).message });
     }

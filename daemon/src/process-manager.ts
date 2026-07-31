@@ -1,8 +1,15 @@
 import { EventEmitter } from "node:events";
 import { parseReady, isStopped, stripAnsi } from "./log-lines.js";
-import type { ConsoleLine, DaemonConfig, ServerState, ServerStatus } from "./types.js";
+import type { ConsoleLine, DaemonConfig, LaunchOptionValue, ServerState, ServerStatus } from "./types.js";
 
 const BACKLOG_LIMIT = 2000;
+
+/**
+ * Arguments this daemon owns. Never emitted from caller-supplied options, even
+ * if something manages to put one there: the schema does not expose them, so
+ * their presence would mean a bug or a hand-edited file.
+ */
+const DAEMON_OWNED_ARGS: ReadonlySet<string> = new Set(["nogui", "datadir", "world"]);
 
 export interface ChildLike {
   pid?: number;
@@ -100,27 +107,37 @@ export class ProcessManager extends EventEmitter {
   }
 
   /**
-   * `-datadir` comes first among the game's own arguments, immediately after
-   * `-nogui` and ahead of `-world`. Everything after it is interpreted relative
-   * to it - the world named by `-world` is a save inside that directory, and the
-   * mods the server loads come from its `mods` subfolder - so a reader (and any
-   * left-to-right argument handling in the game) sees the directory established
-   * before the things that live in it are named. It is also the argument that
-   * makes this launch independent of which Windows account the daemon runs as,
-   * which is worth having in the first position an operator reads in the log.
+   * The full command line for a launch.
+   *
+   * `-nogui`, `-datadir` and `-world` are the daemon's own. Two things keep
+   * them that way, deliberately: the loop skips any supplied entry with one of
+   * those names, and they are written LAST so that even if the filter were
+   * removed the game's parser - which keeps the last occurrence of a repeated
+   * flag - would still resolve to the daemon's value. -datadir is the one that
+   * matters most: without the right value the game derives its saves and mods
+   * from the running account, and as SYSTEM that is a profile folder holding
+   * neither, which the server reports as a completely successful start.
+   *
+   * Booleans stringify to "true"/"false", which is correct for every boolean
+   * option including zipsaves and unloadsettlements - those treat anything that
+   * is not "1" or "true" as false.
    */
-  buildArgs(world: string): string[] {
-    const owners = this.cfg.owners.flatMap((o) => ["-owner", o]);
+  buildArgs(world: string, options: Record<string, LaunchOptionValue>): string[] {
+    const supplied: string[] = [];
+    for (const [name, value] of Object.entries(options)) {
+      if (DAEMON_OWNED_ARGS.has(name)) continue;
+      supplied.push(`-${name}`, String(value));
+    }
     return [
       ...this.cfg.jvmArgs,
       "-jar",
       this.cfg.serverJar,
+      ...supplied,
       "-nogui",
       "-datadir",
       this.cfg.dataDir,
       "-world",
       world,
-      ...owners,
     ];
   }
 
@@ -158,7 +175,7 @@ export class ProcessManager extends EventEmitter {
     return null;
   }
 
-  start(world: string): void {
+  start(world: string, options: Record<string, LaunchOptionValue>): void {
     const refusal = this.startRefusal();
     if (refusal !== null) throw new Error(refusal);
     this.world = world;
@@ -169,7 +186,7 @@ export class ProcessManager extends EventEmitter {
     this.pending = { out: "", err: "" };
     this.startedAt = new Date().toISOString();
 
-    const child = this.spawnFn(this.cfg.javaExe, this.buildArgs(world), { cwd: this.cfg.serverRoot });
+    const child = this.spawnFn(this.cfg.javaExe, this.buildArgs(world, options), { cwd: this.cfg.serverRoot });
     this.child = child;
     this.setState("starting");
 
