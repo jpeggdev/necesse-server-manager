@@ -10,6 +10,27 @@ export interface LaunchOptionsFile {
   /** Keyed by normalised world name, exactly as mod sets are. */
   worlds: Record<string, Record<string, LaunchOptionValue>>;
   updatedAt: string | null;
+  /**
+   * When `config.json`'s retired `owners` array was migrated, or null if it
+   * never has been. A durable marker rather than an inference from current
+   * state: see `markOwnersMigrated`.
+   */
+  ownersMigratedAt: string | null;
+}
+
+/**
+ * World keys are caller-supplied, and `__proto__` is a legal Windows filename.
+ * On an ordinary object `worlds["__proto__"] = {...}` runs the inherited
+ * setter and replaces the PROTOTYPE instead of storing anything, so the write
+ * is echoed back to the client as saved, nothing is persisted, and the next
+ * read finds nothing - the silent-success shape this whole feature exists to
+ * remove. Reading it back before anything is stored is just as bad: the
+ * inherited value is Object.prototype, which is not nullish, so `?? {}` never
+ * fires and the route answers with that object. A null-prototype record has
+ * neither the setter nor anything to inherit.
+ */
+function emptyWorlds(): Record<string, Record<string, LaunchOptionValue>> {
+  return Object.create(null) as Record<string, Record<string, LaunchOptionValue>>;
 }
 
 /**
@@ -62,14 +83,17 @@ export class LaunchOptions {
       if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
         throw new Error(`Failed to read launch options at ${this.file}: ${(e as Error).message}`);
       }
-      return { defaults: {}, worlds: {}, updatedAt: null };
+      return { defaults: {}, worlds: emptyWorlds(), updatedAt: null, ownersMigratedAt: null };
     }
     try {
       const parsed = JSON.parse(raw) as Partial<LaunchOptionsFile>;
       return {
         defaults: parsed.defaults ?? {},
-        worlds: parsed.worlds ?? {},
+        // JSON.parse defines `__proto__` as a real own property, but assigning
+        // one onto a plain object would not, so the copy target is null-proto.
+        worlds: Object.assign(emptyWorlds(), parsed.worlds),
         updatedAt: parsed.updatedAt ?? null,
+        ownersMigratedAt: parsed.ownersMigratedAt ?? null,
       };
     } catch (e) {
       throw new Error(`Failed to parse launch options at ${this.file}: ${(e as Error).message}`);
@@ -110,6 +134,34 @@ export class LaunchOptions {
       all.worlds[key] = applyChanges(all.worlds[key] ?? {}, changes);
       await this.write(all);
       return all.worlds[key];
+    });
+  }
+
+  /** True once the `owners` migration has recorded that it ran. */
+  async ownersMigrated(): Promise<boolean> {
+    return (await this.load()).ownersMigratedAt !== null;
+  }
+
+  /**
+   * Records that the `owners` migration has run, so it can never run twice.
+   *
+   * The guard used to be "a default owner exists", which is a fact about
+   * current state rather than about history: an operator who deliberately
+   * cleared the default owner got it re-seeded from the stale `owners` array
+   * at the next daemon start, silently, because `owners` round-trips in
+   * `config.json` forever and nothing there is ever removed on write.
+   *
+   * Writing the marker is a second write rather than part of the seed. A crash
+   * between the two leaves the owner seeded and the marker absent, which the
+   * next boot reads as "a default owner is already set" and marks migrated
+   * without touching it - the same end state, reached one boot later.
+   */
+  async markOwnersMigrated(): Promise<void> {
+    return this.enqueue(async () => {
+      const all = await this.load();
+      if (all.ownersMigratedAt !== null) return;
+      all.ownersMigratedAt = new Date().toISOString();
+      await this.write(all);
     });
   }
 

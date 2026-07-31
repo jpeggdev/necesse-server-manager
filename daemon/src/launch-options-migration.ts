@@ -12,22 +12,38 @@ import type { LaunchOptions } from "./launch-options.js";
  * fix this feature exists to deliver, and the returned message is what stops it
  * being another silent change.
  *
- * Runs once: a default owner already present means the migration has happened
- * (or the operator has chosen one), and nothing is touched.
+ * Runs at most once, and the guard is a durable marker in
+ * `launch-options.json` rather than a look at current state. `owners` is never
+ * removed from `config.json` - `loadConfig`/`saveConfig` round-trip it - so
+ * inferring "already migrated" from "a default owner exists" meant an operator
+ * who deliberately cleared the default owner had it silently re-seeded from
+ * that stale array at the next daemon start. An install that already has a
+ * default owner (because it migrated before the marker existed, or because
+ * someone chose one) is recorded as migrated and left alone.
  */
 export async function migrateOwners(
   storedOwners: unknown,
   store: LaunchOptions,
 ): Promise<string | null> {
   if (!Array.isArray(storedOwners)) return null;
-  const names = storedOwners.filter((o): o is string => typeof o === "string" && o.trim().length > 0);
+  // Trimmed, not just filtered on the trimmed form: storing the original would
+  // put the leading or trailing whitespace on the game's command line.
+  const names = storedOwners
+    .filter((o): o is string => typeof o === "string" && o.trim().length > 0)
+    .map((o) => o.trim());
   if (names.length === 0) return null;
 
+  if (await store.ownersMigrated()) return null;
+
   const existing = await store.defaults();
-  if (typeof existing.owner === "string") return null;
+  if (typeof existing.owner === "string") {
+    await store.markOwnersMigrated();
+    return null;
+  }
 
   const chosen = names[0];
   await store.setDefaults({ owner: chosen });
+  await store.markOwnersMigrated();
   if (names.length === 1) {
     return `Moved the configured owner "${chosen}" from config.json into the default launch options.`;
   }

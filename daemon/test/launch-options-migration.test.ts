@@ -57,6 +57,51 @@ describe("migrateOwners", () => {
     expect(await store.defaults()).toEqual({});
   });
 
+  // The migration source is config.json's `owners`, which loadConfig and
+  // saveConfig round-trip forever: it is still there at every later boot, so
+  // the guard has to be about history, not about what is set right now.
+  it("does not re-seed an owner the operator deliberately cleared", async () => {
+    await migrateOwners(["Jeff", "Eli"], store);
+    expect(await store.defaults()).toEqual({ owner: "Jeff" });
+
+    // The operator clears it from the client, then the daemon restarts.
+    await store.setDefaults({ owner: null });
+    expect(await migrateOwners(["Jeff", "Eli"], store)).toBeNull();
+    expect(await store.defaults()).toEqual({});
+
+    // And again, because "runs once" has to hold for every later boot too.
+    expect(await migrateOwners(["Jeff", "Eli"], store)).toBeNull();
+    expect(await store.defaults()).toEqual({});
+  });
+
+  it("records that it ran, durably", async () => {
+    await migrateOwners(["Jeff"], store);
+    expect(await store.ownersMigrated()).toBe(true);
+  });
+
+  // The upgrade path for an install that migrated before the marker existed,
+  // or whose operator had already chosen an owner: it must be recorded as
+  // migrated, or clearing the owner would still re-seed it one boot later.
+  it("records an install that already has an owner as migrated, without touching it", async () => {
+    await store.setDefaults({ owner: "Someone" });
+    expect(await migrateOwners(["Jeff"], store)).toBeNull();
+    expect(await store.defaults()).toEqual({ owner: "Someone" });
+    expect(await store.ownersMigrated()).toBe(true);
+
+    await store.setDefaults({ owner: null });
+    expect(await migrateOwners(["Jeff"], store)).toBeNull();
+    expect(await store.defaults()).toEqual({});
+  });
+
+  it("stores the owner name trimmed, not as written", async () => {
+    // The filter already tests `trim()`, so an entry padded with whitespace
+    // passed it and was stored with the padding, which then reaches the game's
+    // command line as part of the name.
+    const msg = await migrateOwners(["  Jeff  "], store);
+    expect(await store.defaults()).toEqual({ owner: "Jeff" });
+    expect(msg).toContain('"Jeff"');
+  });
+
   it("says nothing about a collapse when there was only one owner", async () => {
     const msg = await migrateOwners(["Jeff"], store);
     expect(await store.defaults()).toEqual({ owner: "Jeff" });

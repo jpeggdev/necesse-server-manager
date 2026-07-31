@@ -20,7 +20,12 @@ afterEach(async () => {
 
 describe("load", () => {
   it("treats a missing file as empty rather than an error", async () => {
-    expect(await store.load()).toEqual({ defaults: {}, worlds: {}, updatedAt: null });
+    expect(await store.load()).toEqual({
+      defaults: {},
+      worlds: {},
+      updatedAt: null,
+      ownersMigratedAt: null,
+    });
   });
 
   it("reports a parse failure with the path rather than defaulting", async () => {
@@ -48,6 +53,60 @@ describe("setDefaults", () => {
   });
 });
 
+/*
+ * The branch's central invariant: `null` clears an option, and EVERY other
+ * value is a stored override. The three values below are the ones a falsy
+ * check silently gets wrong - `if (!value) delete` passes every other test in
+ * this file, in http.test.ts and in the daemon suite, because nothing else
+ * stores a falsy value and then reads it back. Each pair asserts the stored
+ * override AND the different result a clear would produce, so neither half can
+ * pass on its own.
+ */
+describe("falsy values are overrides, not clears", () => {
+  it("stores false rather than treating it as a clear", async () => {
+    await store.setDefaults({ pausewhenempty: true });
+    await store.setForWorld("Tulsa", { pausewhenempty: false });
+    expect(await store.forWorld("Tulsa")).toEqual({ pausewhenempty: false });
+    // A clear would fall through to the default, which is the opposite value.
+    expect(await store.effectiveFor("Tulsa")).toEqual({ pausewhenempty: false });
+    await store.setForWorld("Tulsa", { pausewhenempty: null });
+    expect(await store.forWorld("Tulsa")).toEqual({});
+    expect(await store.effectiveFor("Tulsa")).toEqual({ pausewhenempty: true });
+  });
+
+  it("stores 0 rather than treating it as a clear", async () => {
+    // 0 is a real value for itemslife (0 means dropped items last forever),
+    // worldborder, maxsettlements and maxsettlers - not an absent one.
+    await store.setDefaults({ itemslife: 30 });
+    await store.setForWorld("Tulsa", { itemslife: 0 });
+    expect(await store.forWorld("Tulsa")).toEqual({ itemslife: 0 });
+    expect(await store.effectiveFor("Tulsa")).toEqual({ itemslife: 0 });
+    await store.setForWorld("Tulsa", { itemslife: null });
+    expect(await store.effectiveFor("Tulsa")).toEqual({ itemslife: 30 });
+  });
+
+  it("stores an empty string rather than treating it as a clear", async () => {
+    await store.setDefaults({ motd: "hello" });
+    await store.setForWorld("Tulsa", { motd: "" });
+    expect(await store.forWorld("Tulsa")).toEqual({ motd: "" });
+    expect(await store.effectiveFor("Tulsa")).toEqual({ motd: "" });
+    await store.setForWorld("Tulsa", { motd: null });
+    expect(await store.effectiveFor("Tulsa")).toEqual({ motd: "hello" });
+  });
+
+  it("keeps a falsy override across a reload, not just in the write's return", async () => {
+    // The setters return the record they just built, so a store that dropped
+    // falsy values only on the way to disk would still pass the tests above.
+    await store.setForWorld("Tulsa", { pausewhenempty: false, itemslife: 0, motd: "" });
+    const reopened = new LaunchOptions(file);
+    expect(await reopened.forWorld("Tulsa")).toEqual({
+      pausewhenempty: false,
+      itemslife: 0,
+      motd: "",
+    });
+  });
+});
+
 describe("setForWorld", () => {
   it("keeps worlds separate", async () => {
     await store.setForWorld("Tulsa", { motd: "tulsa" });
@@ -72,6 +131,40 @@ describe("setForWorld", () => {
     await store.setForWorld("Tulsa", { slots: null });
     expect(await store.forWorld("Tulsa")).toEqual({});
     expect(await store.effectiveFor("Tulsa")).toEqual({ slots: 5 });
+  });
+});
+
+/*
+ * `__proto__` is a legal Windows filename, so it is a possible world name, and
+ * `normaliseWorld` only lowercases so it survives to the key unchanged. On a
+ * plain object `worlds["__proto__"] = {...}` runs Object.prototype's setter
+ * and replaces the prototype instead of storing anything, and reading it back
+ * returns Object.prototype instead of the caller's record. The save is echoed
+ * to the client as succeeded while nothing is written - the silent-success
+ * shape this whole feature exists to remove.
+ */
+describe("a world named __proto__", () => {
+  it("stores its overrides and reads them back", async () => {
+    await store.setForWorld("__proto__", { motd: "kept" });
+    expect(await store.forWorld("__proto__")).toEqual({ motd: "kept" });
+
+    // Reopened, because the in-memory record and the file are two separate
+    // claims: a prototype assignment is not serialized by JSON.stringify at
+    // all, so only a reload proves the save actually landed on disk.
+    const reopened = new LaunchOptions(file);
+    expect(await reopened.forWorld("__proto__")).toEqual({ motd: "kept" });
+    expect(await reopened.effectiveFor("__proto__")).toEqual({ motd: "kept" });
+  });
+
+  it("hands back an empty record before anything is stored, not Object.prototype", async () => {
+    // `worlds["__proto__"] ?? {}` on a plain object never reaches the `{}`:
+    // the inherited value is Object.prototype itself, which is not nullish, so
+    // the route answers with that object. `toEqual({})` cannot see this -
+    // Object.prototype has no enumerable own properties - so identity is what
+    // this asserts.
+    const overrides = await store.forWorld("__proto__");
+    expect(overrides).not.toBe(Object.prototype);
+    expect(overrides).toEqual({});
   });
 });
 
@@ -124,24 +217,75 @@ describe("persistence", () => {
     expect(Date.parse(written.updatedAt)).not.toBeNaN();
   });
 
+  /*
+   * The named failure mode: `load()`'s missing-file branch returning a SHARED
+   * empty value instead of building a fresh one. Hoisting
+   * `{ defaults: {}, worlds: {}, ... }` to a module constant is an obvious
+   * tidy-up and it compiles, but every setter mutates whatever `load()` hands
+   * back, so the first write against a missing file would scribble on that
+   * constant and every other store over a missing file - a different install's
+   * state directory, or the next test - would read it back as its own.
+   */
   it("does not share state between instances over non-existent files", async () => {
-    // Pin the invariant: two stores over different files that do not exist
-    // must not share their internal defaults or worlds state. This test is
-    // independent of test ordering and directly asserts the invariant.
     const root2 = await mkdtemp(join(tmpdir(), "necesse-launch-"));
-    const file2 = join(root2, "launch-options.json");
-    const store2 = new LaunchOptions(file2);
+    const store2 = new LaunchOptions(join(root2, "launch-options.json"));
 
     try {
-      // First store writes a world override.
+      await store.setDefaults({ owner: "Jeff" });
       await store.setForWorld("Tulsa", { motd: "store1" });
 
-      // Second store over a different, non-existent file must be empty.
       expect(await store2.defaults()).toEqual({});
       expect(await store2.forWorld("Tulsa")).toEqual({});
-      expect(await store2.load()).toEqual({ defaults: {}, worlds: {}, updatedAt: null });
+      expect(await store2.load()).toEqual({
+        defaults: {},
+        worlds: {},
+        updatedAt: null,
+        ownersMigratedAt: null,
+      });
+
+      // The two loads must not even be the same objects: a shared constant
+      // that nothing had mutated yet would still pass every assertion above,
+      // and would break on the first write after this test.
+      const a = await store2.load();
+      const b = await store2.load();
+      expect(a).not.toBe(b);
+      expect(a.worlds).not.toBe(b.worlds);
+      expect(a.defaults).not.toBe(b.defaults);
     } finally {
       await rm(root2, { recursive: true, force: true });
     }
+  });
+});
+
+/*
+ * The re-run guard for the config.json `owners` migration. It used to be "a
+ * default owner exists", which is a fact about current state: clearing the
+ * owner on purpose re-seeded it from the stale array at the next boot, because
+ * `owners` is never removed from config.json. The marker is durable instead.
+ */
+describe("owners migration marker", () => {
+  it("is absent until something records it", async () => {
+    expect(await store.ownersMigrated()).toBe(false);
+    await store.setDefaults({ owner: "Jeff" });
+    expect(await store.ownersMigrated()).toBe(false);
+  });
+
+  it("survives a reload and is not disturbed by later writes", async () => {
+    await store.markOwnersMigrated();
+    expect(await store.ownersMigrated()).toBe(true);
+
+    await store.setDefaults({ owner: "Jeff" });
+    await store.setForWorld("Tulsa", { slots: 5 });
+    const reopened = new LaunchOptions(file);
+    expect(await reopened.ownersMigrated()).toBe(true);
+    expect(await reopened.defaults()).toEqual({ owner: "Jeff" });
+  });
+
+  it("keeps the first timestamp when marked again", async () => {
+    await store.markOwnersMigrated();
+    const first = (await store.load()).ownersMigratedAt;
+    expect(Date.parse(first as string)).not.toBeNaN();
+    await store.markOwnersMigrated();
+    expect((await store.load()).ownersMigratedAt).toBe(first);
   });
 });
