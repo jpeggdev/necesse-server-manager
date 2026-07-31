@@ -6,6 +6,7 @@ import { ErrorBanner } from "./ErrorBanner";
 import { Splitter } from "./Splitter";
 import { WorldSettingsDialog } from "./WorldSettingsDialog";
 import { LaunchOptionsDialog } from "./LaunchOptionsDialog";
+import { sameWorld } from "./world-name";
 import { ConnectionSettings } from "./ConnectionSettings";
 import { useDaemon } from "./useDaemon";
 import { DaemonError, STOP_TIMEOUT_STATUS, type WorldSettingValue } from "./api";
@@ -424,7 +425,18 @@ function ConnectedApp({
           key={launchOptionsWorld}
           world={launchOptionsWorld}
           api={api}
-          serverRunningThisWorld={status.state === "running" && status.world === launchOptionsWorld}
+          // `running` alone misses `starting`, where the process is already
+          // spawned with its command line - a save made then still has to
+          // wait for the NEXT start, same as `running`. And `status.world`
+          // has to be compared with `sameWorld`, not `===`: world lookup is
+          // case-insensitive everywhere else in this client, and the header's
+          // free-text box is exactly where a case-only retype would slip past
+          // a strict comparison and silently suppress the notice.
+          serverRunningThisWorld={
+            (status.state === "running" || status.state === "starting") &&
+            status.world !== null &&
+            sameWorld(status.world, launchOptionsWorld)
+          }
           onClose={() => setLaunchOptionsWorld(null)}
         />
       )}

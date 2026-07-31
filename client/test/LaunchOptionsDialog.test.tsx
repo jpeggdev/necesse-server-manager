@@ -36,10 +36,27 @@ describe("LaunchOptionsDialog", () => {
     expect(screen.getByLabelText(/player slots/i)).toHaveValue(5);
   });
 
-  it("marks a value that comes from the defaults as inherited", async () => {
-    render(<LaunchOptionsDialog world="Tulsa" api={makeApi() as never} serverRunningThisWorld={false} onClose={() => {}} />);
+  it("marks only the fields without an override as inherited", async () => {
+    // Mixed fixture on purpose: owner and pausewhenempty have no override,
+    // slots does. A hard-coded `inherited={true}` would report 3 inherited
+    // fields and would also render slots' Revert button (only "inherited"
+    // fields ever showed it), so this fails either way if the flag is wired
+    // wrong - unlike a fixture where every field is inherited, which a
+    // hard-coded `true` satisfies by accident.
+    const api = makeApi({
+      launchOptions: vi.fn().mockResolvedValue({
+        ok: true,
+        world: "Tulsa",
+        defaults: { owner: "Jeff", slots: 5, pausewhenempty: false },
+        overrides: { slots: 20 },
+        effective: { owner: "Jeff", slots: 20, pausewhenempty: false },
+        fields: FIELDS,
+      }),
+    });
+    render(<LaunchOptionsDialog world="Tulsa" api={api as never} serverRunningThisWorld={false} onClose={() => {}} />);
     await screen.findByLabelText(/owner/i);
-    expect(screen.getAllByText(/inherited/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/inherited/i)).toHaveLength(2);
+    expect(screen.getByRole("button", { name: /revert.*player slots/i })).toBeInTheDocument();
   });
 
   it("saves only what changed", async () => {
@@ -50,6 +67,40 @@ describe("LaunchOptionsDialog", () => {
     await userEvent.type(slots, "20");
     await userEvent.click(screen.getByRole("button", { name: /save/i }));
     await waitFor(() => expect(api.saveLaunchOptions).toHaveBeenCalledWith("Tulsa", { slots: 20 }));
+  });
+
+  it("names what it actually wrote in the post-save confirmation", async () => {
+    // `adopt(r)` rebases the form onto the response before this renders, so
+    // computing the message from the live `changes` diff (which is `{}` by
+    // then) would always say nothing was written, even on a real success.
+    const api = makeApi();
+    render(<LaunchOptionsDialog world="Tulsa" api={api as never} serverRunningThisWorld={false} onClose={() => {}} />);
+    const slots = await screen.findByLabelText(/player slots/i);
+    await userEvent.clear(slots);
+    await userEvent.type(slots, "20");
+    await userEvent.click(screen.getByRole("button", { name: /save/i }));
+    expect(await screen.findByText(/saved slots/i)).toBeInTheDocument();
+    expect(screen.queryByText(/nothing had changed/i)).toBeNull();
+  });
+
+  it("sends an empty string, not null, when a text field is cleared", async () => {
+    const api = makeApi();
+    render(<LaunchOptionsDialog world="Tulsa" api={api as never} serverRunningThisWorld={false} onClose={() => {}} />);
+    const owner = await screen.findByLabelText(/owner/i);
+    await userEvent.clear(owner);
+    await userEvent.click(screen.getByRole("button", { name: /save/i }));
+    await waitFor(() => expect(api.saveLaunchOptions).toHaveBeenCalledWith("Tulsa", { owner: "" }));
+  });
+
+  it("disables save again once an edited field is edited back to its loaded value", async () => {
+    const api = makeApi();
+    render(<LaunchOptionsDialog world="Tulsa" api={api as never} serverRunningThisWorld={false} onClose={() => {}} />);
+    const owner = await screen.findByLabelText(/owner/i);
+    await userEvent.type(owner, "X");
+    expect(screen.getByRole("button", { name: /save/i })).toBeEnabled();
+    await userEvent.type(owner, "{backspace}");
+    expect(screen.getByRole("button", { name: /save/i })).toBeDisabled();
+    expect(api.saveLaunchOptions).not.toHaveBeenCalled();
   });
 
   it("clears an override with revert, sending null", async () => {
@@ -70,6 +121,30 @@ describe("LaunchOptionsDialog", () => {
     await waitFor(() => expect(api.saveLaunchOptions).toHaveBeenCalledWith("Tulsa", { slots: null }));
   });
 
+  it("sends null, not 0, when an overridden number box is simply emptied", async () => {
+    // 0 is a LEGAL value for several int fields (itemslife, worldborder,
+    // maxsettlements, maxsettlers), so coercing a blank box to 0 would write
+    // a real, permanent override rather than clearing one - the same
+    // null-vs-empty confusion requirement (B) exists to prevent, reached from
+    // the empty-input side instead of the empty-string side.
+    const api = makeApi({
+      launchOptions: vi.fn().mockResolvedValue({
+        ok: true,
+        world: "Tulsa",
+        defaults: { slots: 5 },
+        overrides: { slots: 20 },
+        effective: { slots: 20 },
+        fields: FIELDS,
+      }),
+    });
+    render(<LaunchOptionsDialog world="Tulsa" api={api as never} serverRunningThisWorld={false} onClose={() => {}} />);
+    const slots = await screen.findByLabelText(/player slots/i);
+    await userEvent.clear(slots);
+    expect(slots).toHaveValue(null);
+    await userEvent.click(screen.getByRole("button", { name: /save/i }));
+    await waitFor(() => expect(api.saveLaunchOptions).toHaveBeenCalledWith("Tulsa", { slots: null }));
+  });
+
   it("shows the daemon's refusal without rewording it", async () => {
     const api = makeApi({
       saveLaunchOptions: vi.fn().mockRejectedValue(new Error('"slots" must be between 1 and 250')),
@@ -82,8 +157,18 @@ describe("LaunchOptionsDialog", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(/between 1 and 250/);
   });
 
-  it("says changes apply at the next start when the server is running this world", async () => {
-    render(<LaunchOptionsDialog world="Tulsa" api={makeApi() as never} serverRunningThisWorld onClose={() => {}} />);
+  it("shows the next-start notice only while serverRunningThisWorld is true", async () => {
+    // Pins the TRIGGER, not just the message: a hard-coded `{true && (...)}`
+    // in place of the `serverRunningThisWorld` gate would still pass a test
+    // that only ever rendered with the prop true.
+    const api = makeApi();
+    const { rerender } = render(
+      <LaunchOptionsDialog world="Tulsa" api={api as never} serverRunningThisWorld={false} onClose={() => {}} />,
+    );
+    await screen.findByLabelText(/owner/i);
+    expect(screen.queryByRole("status")).toBeNull();
+
+    rerender(<LaunchOptionsDialog world="Tulsa" api={api as never} serverRunningThisWorld onClose={() => {}} />);
     expect(await screen.findByRole("status")).toHaveTextContent(/next start/i);
   });
 

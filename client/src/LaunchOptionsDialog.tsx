@@ -1,7 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Api } from "./api";
 import { sameWorld } from "./world-name";
+import { useModalFocus } from "./useModalFocus";
 import type { LaunchOptionField, LaunchOptionsResponse, LaunchOptionValue } from "./types";
+
+/**
+ * The sentinel a blank number box holds in `draft`, distinct from any real
+ * `LaunchOptionValue`. An `input[type=number]` reports an empty string both
+ * for a box the user cleared and for one typed nonsense into, and there is no
+ * legal number to substitute for that: `0` is a real, valid override for
+ * `itemslife`, `worldborder`, `maxsettlements` and `maxsettlers`, so silently
+ * writing it would detach the field from its default exactly as requirement
+ * (A) exists to prevent - arrived at from the empty-input direction (B)
+ * warns about. `changes` below treats this sentinel as a clear, the same as
+ * clicking Revert.
+ */
+const BLANK_NUMBER = "" as const;
 
 export interface LaunchOptionsDialogProps {
   world: string;
@@ -44,6 +58,14 @@ export function LaunchOptionsDialog({ world, api, serverRunningThisWorld, onClos
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  /**
+   * Which fields the LAST save actually wrote, captured before `adopt`
+   * rebases `draft` onto the response and makes `changes` recompute to `{}`.
+   * The confirmation message reads from this, not from `changes`, which by
+   * the time it renders always describes zero pending changes whether the
+   * save wrote five fields or was never clicked at all.
+   */
+  const [lastSavedNames, setLastSavedNames] = useState<string[]>([]);
 
   const dialogRef = useRef<HTMLDivElement>(null);
   const backdropRef = useRef<HTMLDivElement>(null);
@@ -62,6 +84,7 @@ export function LaunchOptionsDialog({ world, api, serverRunningThisWorld, onClos
     setLoadError(null);
     setSaveError(null);
     setSaved(false);
+    setLastSavedNames([]);
     api
       .launchOptions(world)
       .then((r) => {
@@ -81,60 +104,9 @@ export function LaunchOptionsDialog({ world, api, serverRunningThisWorld, onClos
     };
   }, [api, world, adopt]);
 
-  useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        if (saving) return;
-        e.preventDefault();
-        onClose();
-        return;
-      }
-      if (e.key !== "Tab") return;
-      const dialog = dialogRef.current;
-      if (dialog === null) return;
-      const focusable = focusableIn(dialog);
-      if (focusable.length === 0) {
-        e.preventDefault();
-        dialog.focus();
-        return;
-      }
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      const active = document.activeElement;
-      if (!dialog.contains(active)) {
-        e.preventDefault();
-        (e.shiftKey ? last : first).focus();
-      } else if (e.shiftKey && (active === first || active === dialog)) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && active === last) {
-        e.preventDefault();
-        first.focus();
-      }
-    };
-    const onFocusIn = (e: FocusEvent) => {
-      const dialog = dialogRef.current;
-      if (dialog === null || dialog.contains(e.target as Node | null)) return;
-      (focusableIn(dialog)[0] ?? dialog).focus();
-    };
-    document.addEventListener("keydown", onKeyDown, true);
-    document.addEventListener("focusin", onFocusIn);
-    return () => {
-      document.removeEventListener("keydown", onKeyDown, true);
-      document.removeEventListener("focusin", onFocusIn);
-    };
-  }, [onClose, saving]);
-
-  useEffect(() => {
-    const restore = document.activeElement as HTMLElement | null;
-    const inerted = makeSurroundingsInert(backdropRef.current);
-    const dialog = dialogRef.current;
-    (dialog === null ? null : (focusableIn(dialog)[0] ?? dialog))?.focus();
-    return () => {
-      for (const el of inerted) el.removeAttribute("inert");
-      restore?.focus();
-    };
-  }, []);
+  // Escape-to-close, Tab trap, and inert-the-background - shared with
+  // WorldSettingsDialog rather than duplicated; see useModalFocus for why.
+  useModalFocus(dialogRef, backdropRef, onClose, saving);
 
   /**
    * Exactly the fields whose staged state differs from what was loaded, in
@@ -152,9 +124,17 @@ export function LaunchOptionsDialog({ world, api, serverRunningThisWorld, onClos
         if (wasOverridden) out[f.name] = null;
         continue;
       }
-      const initial = initialValue(f, loaded);
       const current = draft[f.name];
-      if (current === undefined || sameValue(f, initial, current)) continue;
+      if (current === undefined) continue;
+      // A number box the user emptied has no legal value to send - see
+      // BLANK_NUMBER. Treated exactly like Revert: clears a real override,
+      // contributes nothing when there was none to clear.
+      if (f.type === "int" && current === BLANK_NUMBER) {
+        if (wasOverridden) out[f.name] = null;
+        continue;
+      }
+      const initial = initialValue(f, loaded);
+      if (sameValue(f, initial, current)) continue;
       out[f.name] = current;
     }
     return out;
@@ -190,10 +170,15 @@ export function LaunchOptionsDialog({ world, api, serverRunningThisWorld, onClos
   const onSave = () => {
     setSaving(true);
     setSaveError(null);
+    // Captured before the request, not read from `changes` in the .then -
+    // `adopt(r)` rebases `draft` onto the response, which recomputes
+    // `changes` to `{}` before the confirmation ever renders.
+    const namesBeingSaved = changedNames;
     api
       .saveLaunchOptions(world, changes)
       .then((r) => {
         adopt(r);
+        setLastSavedNames(namesBeingSaved);
         setSaved(true);
       })
       .catch((e: Error) => setSaveError(e.message))
@@ -255,10 +240,6 @@ export function LaunchOptionsDialog({ world, api, serverRunningThisWorld, onClos
                         cleared.has(f.name) ||
                         !Object.prototype.hasOwnProperty.call(loaded.overrides, f.name)
                       }
-                      overridden={
-                        !cleared.has(f.name) &&
-                        Object.prototype.hasOwnProperty.call(loaded.overrides, f.name)
-                      }
                       disabled={saving}
                       onChange={(v) => setField(f.name, v)}
                       onRevert={() => revertField(f)}
@@ -276,9 +257,9 @@ export function LaunchOptionsDialog({ world, api, serverRunningThisWorld, onClos
 
           {saved && saveError === null && (
             <p className="hint hint-ok">
-              {changedNames.length === 0
+              {lastSavedNames.length === 0
                 ? "Nothing had changed, so nothing was written."
-                : `Saved ${changedNames.join(", ")}.`}
+                : `Saved ${lastSavedNames.join(", ")}.`}
             </p>
           )}
         </div>
@@ -309,16 +290,18 @@ export function LaunchOptionsDialog({ world, api, serverRunningThisWorld, onClos
 interface FieldRowProps {
   field: LaunchOptionField;
   value: LaunchOptionValue;
-  /** Not overridden for this world (or staged to become that way on save). */
+  /**
+   * Not overridden for this world (or staged to become that way on save).
+   * The only source of truth for whether the Revert control shows too: the
+   * two states are exact opposites, so one prop is enough for both.
+   */
   inherited: boolean;
-  /** Overridden right now, so a Revert control is offered. */
-  overridden: boolean;
   disabled: boolean;
   onChange: (value: LaunchOptionValue) => void;
   onRevert: () => void;
 }
 
-function FieldRow({ field, value, inherited, overridden, disabled, onChange, onRevert }: FieldRowProps) {
+function FieldRow({ field, value, inherited, disabled, onChange, onRevert }: FieldRowProps) {
   const id = `lo-${field.name}`;
   return (
     <div className="lo-row">
@@ -330,12 +313,10 @@ function FieldRow({ field, value, inherited, overridden, disabled, onChange, onR
           "Inherited from defaults."
         ) : (
           <>
-            Overridden for {"this world"}.{" "}
-            {overridden && (
-              <button type="button" onClick={onRevert} disabled={disabled}>
-                Revert {field.label} to default
-              </button>
-            )}
+            Overridden for this world.{" "}
+            <button type="button" onClick={onRevert} disabled={disabled}>
+              Revert {field.label} to default
+            </button>
           </>
         )}
       </p>
@@ -366,12 +347,15 @@ function renderControl(
         <input
           id={id}
           type="number"
-          value={typeof value === "number" ? value : Number(value)}
+          // A blank box shows blank, not a coerced 0 - see BLANK_NUMBER. This
+          // is also what keeps a clear-then-type sequence from starting on a
+          // phantom leading "0" digit.
+          value={value === BLANK_NUMBER ? "" : typeof value === "number" ? value : Number(value)}
           min={field.min}
           max={field.max}
           step={1}
           disabled={disabled}
-          onChange={(e) => onChange(e.target.value === "" ? 0 : Number(e.target.value))}
+          onChange={(e) => onChange(e.target.value === "" ? BLANK_NUMBER : Number(e.target.value))}
         />
       );
     case "string":
@@ -432,29 +416,4 @@ function defaultValue(field: LaunchOptionField, r: LaunchOptionsResponse): Launc
 function sameValue(field: LaunchOptionField, a: LaunchOptionValue, b: LaunchOptionValue): boolean {
   if (field.type === "int") return Number(a) === Number(b);
   return a === b;
-}
-
-function focusableIn(root: HTMLElement): HTMLElement[] {
-  return [
-    ...root.querySelectorAll<HTMLElement>(
-      "button:not([disabled]), select:not([disabled]), input:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex='-1'])",
-    ),
-  ];
-}
-
-function makeSurroundingsInert(from: HTMLElement | null): Element[] {
-  const marked: Element[] = [];
-  let node: HTMLElement | null = from;
-  while (node !== null && node !== document.body) {
-    const parent: HTMLElement | null = node.parentElement;
-    if (parent === null) break;
-    for (const sibling of parent.children) {
-      if (sibling !== node && !sibling.hasAttribute("inert")) {
-        sibling.setAttribute("inert", "");
-        marked.push(sibling);
-      }
-    }
-    node = parent;
-  }
-  return marked;
 }
