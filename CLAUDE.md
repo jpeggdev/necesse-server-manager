@@ -88,8 +88,19 @@ SHA-256-verifies it into the staged payload at `node\node.exe`; `daemon/setup.cm
 (shipped as `register-task.ps1`, see below) all prefer `<install dir>\node\node.exe`
 over whatever `node.exe` is on `PATH` when it exists, and fall back to `PATH`
 otherwise, which is what lets the zip and the installer share one set of
-shims. The pinned Node version lives in `installer/node-version.txt`
-(currently `22.20.0`); that file is the one place to change it.
+shims. `daemon/register-task.cmd` ships alongside them and is what the Start
+Menu shortcut points at: it self-elevates before running `register-task.ps1`,
+because the SYSTEM-principal scheduled task and the firewall rule both need
+admin and an unelevated run failed the second one *silently*.
+
+The pinned Node version lives in `installer/node-version.txt` (currently
+`22.23.2`); that file is the one place to change it. **Part of the release
+checklist: check `node-version.txt` against the latest 22.x** at
+`https://nodejs.org/dist/index.json` and bump it if it has moved. The bundled
+runtime is private to the install, so a user cannot patch it themselves: a
+stale pin is a Node CVE nobody on the other end can do anything about. Nothing
+enforces this automatically; `installer/verify-installer.ps1` only checks that
+the *staged* runtime matches whatever the file says.
 
 ## Access token
 
