@@ -57,13 +57,18 @@ the daemon yourself as a plain folder.
      task's checkbox instead reflects whatever the machine already has
      (ticked if a task is already registered, unticked if it isn't).
 4. If you install silently (`necesse-daemon-vX.Y.Z-setup.exe /VERYSILENT`),
-   **the wizard is never launched and the boot task is never registered**
-   unless you pass `/TASKS="runsetup,boottask"` on the command line. A
-   fully silent install with no `/TASKS` leaves you a daemon with no
-   `config.json`, nothing scheduled, and nothing listening; run
-   `setup.cmd` and `register-task.ps1` from the install directory
-   yourself afterwards. This is deliberate: nobody is present to answer
-   the wizard's console prompts, so an unattended run cannot start one.
+   **the setup wizard can never run, no `/TASKS` flag included.** It needs
+   a console to prompt on, and a silent run has none, so on a genuinely
+   fresh machine you are left with a daemon and no `config.json`. The boot
+   task can't be registered either in that same run, because registering
+   it requires `config.json` to already exist, and nothing in a fresh
+   silent install ever creates one. Run `setup.cmd` and then
+   `register-task.ps1` from the install directory yourself afterwards,
+   the same two steps the zip route asks for. `/TASKS=boottask` only does
+   something on a *re-run* of the installer over a machine that already
+   has a `config.json` (from an earlier manual `setup.cmd`, or an earlier
+   install): in that case it will register the boot task during the
+   silent run.
 
 Before it touches anything, the installer checks the daemon's own
 `/api/status` to see whether a game session might be running. If it looks
@@ -125,6 +130,9 @@ will simply never connect and nothing on either side will say why.
 
 ## Run it at boot (optional)
 
+If you used the installer and left the boot-task checkbox ticked, this
+was already done for you and you can skip this section.
+
 Run `register-task.ps1` as Administrator (as Administrator matters: it
 registers a Scheduled Task).
 
@@ -177,6 +185,11 @@ everything.
 
 ## Upgrading
 
+This section covers the zip route. If you installed with the installer,
+upgrading means running the newer version's installer over the existing
+install; see "Install the daemon" above for what that keeps and what it
+does not touch.
+
 The daemon's state (`config.json`, the mod library, and every per-world
 mod set) lives in `%PROGRAMDATA%\NecesseServerManager`, not inside the
 folder you unzipped the release into. That is what makes upgrading simple:
@@ -214,11 +227,14 @@ you have set one). `setup.cmd` writes it for you; hand-edit it with the
 daemon stopped if you need to change something afterward.
 
 If you set `NECESSE_MANAGER_DATA`, **set it as a machine (System)
-environment variable, not a per-user one.** A user-scoped variable is not
-visible to the installer running elevated under a different account, nor
-to the daemon running as SYSTEM (see "Run it at boot" below), so a
-per-user setting is silently ignored by both and you end up with state in
-the default `%PROGRAMDATA%` location instead.
+environment variable, not a per-user one.** The daemon runs as SYSTEM (see
+"Run it at boot" below), and SYSTEM has no access to your user account's
+environment variables at all, so a per-user setting is silently ignored by
+the daemon and you end up with state in the default `%PROGRAMDATA%`
+location instead. (This is not about the installer running elevated: "Run
+as Administrator" keeps you on the same user account with a
+higher-privilege token, it does not switch accounts, so elevation by
+itself is not the reason to avoid a per-user variable here. SYSTEM is.)
 
 | Key | Meaning |
 |---|---|
