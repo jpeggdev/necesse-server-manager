@@ -62,6 +62,54 @@ describe("ServerHeader", () => {
     expect(headerProps.onStart).toHaveBeenCalledWith("Brand New World");
   });
 
+  /*
+   * The launch-options routes are deliberately NOT gated on `requireStopped`
+   * or `requireNoActiveTask` (see the comment above them in daemon/src/http.ts):
+   * they write one small JSON file in the state directory, never the mods
+   * folder and never a world zip. The button has to agree with the routes it
+   * talks to, or the UI refuses what the daemon would accept.
+   */
+  describe("Launch Options button", () => {
+    const openable = () => ({
+      worlds: { ...worlds, lastWorld: "Tulsa" },
+      candidate: { name: "Tulsa", valid: true, exists: true },
+      onEditLaunchOptions: vi.fn(),
+      onEditWorldSettings: vi.fn(),
+    });
+
+    it("stays usable while another task is running", async () => {
+      const props = setup({ ...openable(), busy: true });
+      const button = screen.getByRole("button", { name: /launch options/i });
+      expect(button).toBeEnabled();
+      await userEvent.click(button);
+      expect(props.onEditLaunchOptions).toHaveBeenCalledWith("Tulsa");
+      // The paired negative: World Settings rewrites a world zip, so it must
+      // still be blocked by the same `busy`. Without this the test would also
+      // pass for a header that had stopped blocking anything at all.
+      expect(screen.getByRole("button", { name: /world settings/i })).toBeDisabled();
+    });
+
+    it("stays usable while the server is running", async () => {
+      const props = setup({ ...openable(), status: running });
+      const button = screen.getByRole("button", { name: /launch options/i });
+      expect(button).toBeEnabled();
+      await userEvent.click(button);
+      expect(props.onEditLaunchOptions).toHaveBeenCalledWith("Tulsa");
+      expect(screen.getByRole("button", { name: /world settings/i })).toBeDisabled();
+    });
+
+    it("is still blocked when there is no world to edit", () => {
+      // The blockers that remain are about the world name, not about daemon
+      // state: without this, dropping every blocker would pass the two above.
+      setup({
+        ...openable(),
+        worlds: { ...worlds, lastWorld: "Nope" },
+        candidate: { name: "Nope", valid: true, exists: false },
+      });
+      expect(screen.getByRole("button", { name: /launch options/i })).toBeDisabled();
+    });
+  });
+
   it("warns that an unknown name will create a world", () => {
     setup({
       worlds: { ...worlds, lastWorld: "Brand New" },

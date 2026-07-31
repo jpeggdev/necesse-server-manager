@@ -375,6 +375,9 @@ function renderControl(
           // is also what keeps a clear-then-type sequence from starting on a
           // phantom leading "0" digit.
           value={value === BLANK_NUMBER ? "" : typeof value === "number" ? value : Number(value)}
+          // Says outright that nothing is set here, rather than leaving a blank
+          // box that could equally be a value the operator just deleted.
+          placeholder="Not set"
           min={field.min}
           max={field.max}
           step={1}
@@ -426,20 +429,32 @@ function groupFields(fields: readonly LaunchOptionField[]): [string, LaunchOptio
 
 /**
  * What a field shows on load: the effective (default + override) value the
- * daemon reported, or a type-appropriate empty value for a field neither the
- * defaults nor this world's overrides mention at all.
+ * daemon reported, or an empty value for a field neither the defaults nor this
+ * world's overrides mention at all.
+ *
+ * An unset int shows BLANK_NUMBER, not `0`. `0` is a number the operator did
+ * not choose, and for `slots` (minimum 1) and `unloadlevels` (minimum 2) it is
+ * not even a value the daemon would accept, so it rendered as "Player slots: 0,
+ * inherited from defaults" - a stated value, below its own stated minimum,
+ * where nothing is set at all. `changes` already treats BLANK_NUMBER on a field
+ * with no override as no change, so showing it stages nothing.
  */
 function initialValue(field: LaunchOptionField, r: LaunchOptionsResponse): LaunchOptionValue {
   const v = r.effective[field.name];
   if (v !== undefined) return v;
-  return field.type === "boolean" ? false : field.type === "int" ? 0 : "";
+  return unsetValue(field);
 }
 
 /** What Revert stages the field back to: the daemon-wide default. */
 function defaultValue(field: LaunchOptionField, r: LaunchOptionsResponse): LaunchOptionValue {
   const v = r.defaults[field.name];
   if (v !== undefined) return v;
-  return field.type === "boolean" ? false : field.type === "int" ? 0 : "";
+  return unsetValue(field);
+}
+
+/** What a field with no effective value and no default shows. */
+function unsetValue(field: LaunchOptionField): LaunchOptionValue {
+  return field.type === "boolean" ? false : field.type === "int" ? BLANK_NUMBER : "";
 }
 
 function sameValue(field: LaunchOptionField, a: LaunchOptionValue, b: LaunchOptionValue): boolean {

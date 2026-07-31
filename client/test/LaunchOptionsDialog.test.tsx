@@ -59,6 +59,50 @@ describe("LaunchOptionsDialog", () => {
     expect(screen.getByRole("button", { name: /revert.*player slots/i })).toBeInTheDocument();
   });
 
+  it("shows a number field nobody has set as unset, not as 0", async () => {
+    // 0 is below `slots`' own declared minimum of 1 and nobody chose it, so
+    // rendering it read as a real setting: "Player slots: 0, inherited from
+    // defaults". A field with no override and no default has no value to show.
+    const api = makeApi({
+      launchOptions: vi.fn().mockResolvedValue({
+        ok: true,
+        world: "Tulsa",
+        defaults: { owner: "Jeff" },
+        overrides: {},
+        effective: { owner: "Jeff" },
+        fields: FIELDS,
+      }),
+    });
+    render(<LaunchOptionsDialog world="Tulsa" api={api as never} serverRunningThisWorld={false} onClose={() => {}} />);
+    const slots = await screen.findByLabelText(/player slots/i);
+    expect(slots).toHaveValue(null);
+    expect(slots).toHaveAttribute("placeholder", "Not set");
+
+    // And the invented value must not be saveable either: with nothing typed
+    // there is nothing to write, so Save stays disabled.
+    expect(screen.getByRole("button", { name: /^save$/i })).toBeDisabled();
+  });
+
+  it("does not send a value for an unset number field the user never touched", async () => {
+    // The stronger half of the above: even after editing a different field,
+    // the untouched unset number must contribute nothing to the payload.
+    const api = makeApi({
+      launchOptions: vi.fn().mockResolvedValue({
+        ok: true,
+        world: "Tulsa",
+        defaults: {},
+        overrides: {},
+        effective: {},
+        fields: FIELDS,
+      }),
+    });
+    render(<LaunchOptionsDialog world="Tulsa" api={api as never} serverRunningThisWorld={false} onClose={() => {}} />);
+    const owner = await screen.findByLabelText(/owner/i);
+    await userEvent.type(owner, "Eli");
+    await userEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    await waitFor(() => expect(api.saveLaunchOptions).toHaveBeenCalledWith("Tulsa", { owner: "Eli" }));
+  });
+
   it("saves only what changed", async () => {
     const api = makeApi();
     render(<LaunchOptionsDialog world="Tulsa" api={api as never} serverRunningThisWorld={false} onClose={() => {}} />);

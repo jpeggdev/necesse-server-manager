@@ -118,14 +118,16 @@ export function ServerHeader(props: ServerHeaderProps) {
 
   /**
    * Why the launch options editor cannot be opened right now, or null when it
-   * can. Deliberately missing the "must be stopped" blocker `settingsBlockedBecause`
-   * has: the daemon accepts these writes while this world is running, on
-   * purpose, so the button stays enabled through Start/Stop and the dialog
-   * itself is what tells the operator the change waits for the next start.
+   * can. Deliberately missing both blockers `settingsBlockedBecause` has: the
+   * daemon accepts these writes while this world is running AND while another
+   * task is in flight, on purpose, because they touch one small JSON file in
+   * the state directory and never the mods folder or a world zip. Blocking the
+   * button on either would contradict the routes it talks to. The button stays
+   * enabled through Start/Stop and through a mod install, and the dialog itself
+   * is what tells the operator the change waits for the next start.
    */
-  const launchOptionsBlockedBecause = taskBusy
-    ? "Another task is already running"
-    : world.trim().length === 0
+  const launchOptionsBlockedBecause =
+    world.trim().length === 0
       ? "Type the name of the world to edit"
       : !candidateIsCurrent
         ? "Waiting to confirm the world name…"
