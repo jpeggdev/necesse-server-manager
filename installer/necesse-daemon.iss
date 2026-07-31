@@ -72,9 +72,20 @@ Name: "boottask"; Description: "Start the daemon automatically at boot, and open
 const
   TaskName = 'NecesseDaemon';
 
+// FINDING I fix: matches daemon/src/state-dir.ts's precedence exactly -
+// NECESSE_MANAGER_DATA overrides %PROGRAMDATA%\NecesseServerManager when set.
+// Hardcoding %PROGRAMDATA% here made ConfigExists() (which gates task
+// registration and the checkbox defaults) look at the wrong directory on any
+// box using the override.
 function StateDir(): String;
+var
+  DataDirOverride: String;
 begin
-  Result := ExpandConstant('{commonappdata}\NecesseServerManager');
+  DataDirOverride := GetEnv('NECESSE_MANAGER_DATA');
+  if Trim(DataDirOverride) <> '' then
+    Result := DataDirOverride
+  else
+    Result := ExpandConstant('{commonappdata}\NecesseServerManager');
 end;
 
 function ConfigExists(): Boolean;
@@ -132,12 +143,23 @@ end;
 // killed by StopDaemonTask below cannot be saved - the daemon installs no
 // signal handler - so this has to run first and be able to refuse.
 //
-// Exit code 2 (a session may be live) defaults to IDNO: SuppressibleMsgBox
-// returns that Default without showing anything under /SILENT or
-// /VERYSILENT, so an unattended upgrade fails closed instead of being the
-// thing that eats a save. Exit code 3 (cannot determine) only warns, because
-// there is no stronger offline signal to act on and it must not block an
-// install outright.
+// FINDING A2 fix: this used to lean on SuppressibleMsgBox's Default to fail
+// closed under silence. Measured directly (a throwaway probe installer,
+// same shape as this procedure, run under plain /VERYSILENT with no
+// /SUPPRESSMSGBOXES): SuppressibleMsgBox does NOT return Default in that
+// case - it returns the affirmative button regardless, logged as IDYES. Only
+// /SUPPRESSMSGBOXES makes it honour Default, and Task 4's harness happens to
+// pass that flag, so the harness would stay green while plain /SILENT was
+// unprotected. Silence is now decided here, explicitly, with WizardSilent,
+// before any dialog exists to get the wrong answer from - an unattended run
+// always aborts on a non-zero check rather than proceeding on an outcome
+// nobody actually confirmed. The same probe technique confirmed Abort here
+// works: aborted with exit code 3, ssPostInstall and ssDone never reached.
+//
+// FINDING I fold-in: a check that could not determine anything (including a
+// 401 - the daemon IS answering, just not to this token, which proves
+// something is live on that port) is treated the same as "may be live", not
+// as safe to proceed. Interactively this asks; under silence it aborts.
 procedure RunSessionPreflight();
 var
   Output: String;
@@ -145,23 +167,30 @@ var
   CheckCode: Integer;
 begin
   CheckCode := RunPreflight('Check', Output);
-  if CheckCode = 2 then
+  if CheckCode = 0 then Exit;
+
+  if WizardSilent then
   begin
-    Response := SuppressibleMsgBox(
+    Log('RunSessionPreflight: aborting unattended install/upgrade, CheckCode=' + IntToStr(CheckCode) + ': ' + Output);
+    Abort;
+  end;
+
+  if CheckCode = 2 then
+    Response := MsgBox(
       'A game session may still be running:' + #13#10#13#10 + Output + #13#10#13#10 +
       'Continuing will stop the daemon, which has no way to ask it to save first. ' +
       'Confirm nobody is playing before continuing.' + #13#10#13#10 +
       'Continue anyway?',
-      mbConfirmation, MB_YESNO, IDNO);
-    if Response <> IDYES then Abort;
-  end
-  else if CheckCode <> 0 then
-  begin
-    SuppressibleMsgBox(
+      mbConfirmation, MB_YESNO)
+  else
+    Response := MsgBox(
       'Could not determine whether a game session is running:' + #13#10#13#10 + Output + #13#10#13#10 +
-      'Continuing anyway. If a session is live, stop it yourself before this install goes further.',
-      mbError, MB_OK, IDOK);
-  end;
+      'A rejected or unreachable check does not prove nothing is running. Stop the daemon yourself first if you are not sure, ' +
+      'or cancel and run this installer again without a silent switch so you can decide interactively.' + #13#10#13#10 +
+      'Continue anyway?',
+      mbError, MB_YESNO);
+
+  if Response <> IDYES then Abort;
 end;
 
 // Stopping is not optional on an upgrade: node.exe cannot be overwritten
@@ -261,85 +290,232 @@ begin
   end;
 end;
 
-// FINDING D fix, uninstall side: ExtractTemporaryFile only works during
-// install (it extracts from the setup's own [Files] payload, which the
-// uninstaller does not carry), so preflight.ps1 itself is not reachable here.
-// This mirrors its Stop mode - task-state poll, then port poll, then end
-// whatever node.exe still owns the port - as a self-contained script instead.
+// FINDING D fix, uninstall side, extended by FINDING A3/I this round:
+// ExtractTemporaryFile only works during install (it extracts from the
+// setup's own [Files] payload, which the uninstaller does not carry - no
+// mention of uninstall use in Inno's own docs for the function, and the
+// uninstaller genuinely has no access to that payload), so preflight.ps1
+// itself is not reachable here. This is a self-contained equivalent that
+// combines both of preflight.ps1's modes into one script, gated by -Force:
+// without it, checks /api/status first and refuses (exit 2 live / exit 3
+// cannot-determine) before touching anything; with it, skips straight to the
+// task-state poll, port poll, and ending whatever node.exe still owns the
+// port. Verified directly against a fake HTTP listener standing in for the
+// daemon (see task-3-report.md) - all four exit codes (0/1/2/3) and the
+// -Force bypass behaved as designed.
 //
-// Deliberately does not repeat FINDING A's live-session check: that gate was
-// scoped to install/upgrade in this round, and the unconditional schtasks
-// /end this replaces had no such gate either, so this is not a new gap this
-// round introduced. Recorded as a residual risk in task-3-report.md - an
-// uninstall during a live session is exactly as destructive as an upgrade
-// during one, and deserves the same gate in a future round.
-function UninstallStopScript(): String;
+// FINDING I: resolves NECESSE_MANAGER_DATA the same way preflight.ps1 does,
+// for the same reason - hardcoding %PROGRAMDATA% here would read the wrong
+// config.json and fail open on an overridden box.
+function UninstallPreflightScript(): String;
 var
   Q: String;
 begin
   Q := #39;
   Result :=
-    '$port = 8710' + #13#10 +
-    '$cfgFile = Join-Path $env:PROGRAMDATA ' + Q + 'NecesseServerManager\config.json' + Q + #13#10 +
-    'if (Test-Path $cfgFile) {' + #13#10 +
-    '  try {' + #13#10 +
-    '    $c = ((Get-Content $cfgFile -Raw) -replace "^\uFEFF", "") | ConvertFrom-Json' + #13#10 +
-    '    if ($c.port) { $port = [int]$c.port }' + #13#10 +
-    '  } catch {}' + #13#10 +
+    '[CmdletBinding()]' + #13#10 +
+    'param([switch]$Force)' + #13#10 +
+    '$stateDir = $env:NECESSE_MANAGER_DATA' + #13#10 +
+    'if (-not $stateDir -or $stateDir.Trim().Length -eq 0) {' + #13#10 +
+    '  $stateDir = $null' + #13#10 +
+    '  if ($env:PROGRAMDATA) { $stateDir = Join-Path $env:PROGRAMDATA ' + Q + 'NecesseServerManager' + Q + ' }' + #13#10 +
     '}' + #13#10 +
-    '$deadline = (Get-Date).AddSeconds(20)' + #13#10 +
-    'while ((Get-Date) -lt $deadline) {' + #13#10 +
-    '  $t = Get-ScheduledTask -TaskName ' + Q + 'NecesseDaemon' + Q + ' -ErrorAction SilentlyContinue' + #13#10 +
-    '  if (-not $t -or $t.State -ne ' + Q + 'Running' + Q + ') { break }' + #13#10 +
-    '  Start-Sleep -Milliseconds 500' + #13#10 +
+    '$port = 8710' + #13#10 +
+    '$authToken = $null' + #13#10 +
+    'if ($stateDir) {' + #13#10 +
+    '  $cfgFile = Join-Path $stateDir ' + Q + 'config.json' + Q + #13#10 +
+    '  if (Test-Path $cfgFile) {' + #13#10 +
+    '    try {' + #13#10 +
+    '      $c = ((Get-Content $cfgFile -Raw) -replace "^\uFEFF", "") | ConvertFrom-Json' + #13#10 +
+    '      if ($c.port) { $port = [int]$c.port }' + #13#10 +
+    '      $authToken = $c.authToken' + #13#10 +
+    '    } catch {}' + #13#10 +
+    '  }' + #13#10 +
+    '}' + #13#10 +
+    'if (-not $Force) {' + #13#10 +
+    '  $headers = @{}' + #13#10 +
+    '  if ($authToken) { $headers[' + Q + 'Authorization' + Q + '] = "Bearer $authToken" }' + #13#10 +
+    '  try {' + #13#10 +
+    '    $status = Invoke-RestMethod "http://localhost:$port/api/status" -Headers $headers -TimeoutSec 10' + #13#10 +
+    '    if ($status.state -ne ' + Q + 'stopped' + Q + ') {' + #13#10 +
+    '      $world = $status.world' + #13#10 +
+    '      if (-not $world) { $world = ' + Q + '(none)' + Q + ' }' + #13#10 +
+    '      Write-Output "STATE=$($status.state) WORLD=$world"' + #13#10 +
+    '      exit 2' + #13#10 +
+    '    }' + #13#10 +
+    '  } catch {' + #13#10 +
+    '    $refused = $false' + #13#10 +
+    '    $ex = $_.Exception' + #13#10 +
+    '    while ($ex) {' + #13#10 +
+    '      if ($ex.Message -match ' + Q + 'actively refused' + Q + ' -or $ex.Message -match ' + Q + 'No connection could be made' + Q + ' -or $ex.GetType().Name -eq ' + Q + 'SocketException' + Q + ') {' + #13#10 +
+    '        $refused = $true' + #13#10 +
+    '        break' + #13#10 +
+    '      }' + #13#10 +
+    '      $ex = $ex.InnerException' + #13#10 +
+    '    }' + #13#10 +
+    '    if (-not $refused) {' + #13#10 +
+    '      Write-Output "CANNOT_DETERMINE: GET http://localhost:$port/api/status failed: $($_.Exception.Message)"' + #13#10 +
+    '      exit 3' + #13#10 +
+    '    }' + #13#10 +
+    '  }' + #13#10 +
+    '}' + #13#10 +
+    '$task = Get-ScheduledTask -TaskName ' + Q + 'NecesseDaemon' + Q + ' -ErrorAction SilentlyContinue' + #13#10 +
+    'if ($task -and $task.State -eq ' + Q + 'Running' + Q + ') {' + #13#10 +
+    '  Stop-ScheduledTask -TaskName ' + Q + 'NecesseDaemon' + Q + ' -ErrorAction SilentlyContinue' + #13#10 +
+    '  $deadline = (Get-Date).AddSeconds(20)' + #13#10 +
+    '  while ((Get-Date) -lt $deadline) {' + #13#10 +
+    '    $t = Get-ScheduledTask -TaskName ' + Q + 'NecesseDaemon' + Q + ' -ErrorAction SilentlyContinue' + #13#10 +
+    '    if (-not $t -or $t.State -ne ' + Q + 'Running' + Q + ') { break }' + #13#10 +
+    '    Start-Sleep -Milliseconds 500' + #13#10 +
+    '  }' + #13#10 +
     '}' + #13#10 +
     '$portDeadline = (Get-Date).AddSeconds(15)' + #13#10 +
+    '$conn = $null' + #13#10 +
     'while ((Get-Date) -lt $portDeadline) {' + #13#10 +
     '  $conn = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue' + #13#10 +
     '  if (-not $conn) { break }' + #13#10 +
     '  Start-Sleep -Milliseconds 500' + #13#10 +
     '}' + #13#10 +
-    '$conn = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue' + #13#10 +
     'if ($conn) {' + #13#10 +
     '  foreach ($c in @($conn)) {' + #13#10 +
     '    $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue' + #13#10 +
     '    if ($p -and $p.ProcessName -eq ' + Q + 'node' + Q + ') { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }' + #13#10 +
     '  }' + #13#10 +
-    '}';
+    '  Start-Sleep -Milliseconds 500' + #13#10 +
+    '  $conn = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue' + #13#10 +
+    '}' + #13#10 +
+    'if ($conn) {' + #13#10 +
+    '  Write-Output "STILL_LISTENING: port $port is still held after stop attempts."' + #13#10 +
+    '  exit 1' + #13#10 +
+    '}' + #13#10 +
+    'Write-Output "STOPPED: port $port is free."' + #13#10 +
+    'exit 0';
 end;
 
-procedure StopUntaskedDaemonForUninstall();
+// Mirrors RunPreflight (install side): writes the script fresh each call
+// (SaveStringToFile works in both Setup and Uninstall, unlike
+// ExtractTemporaryFile), captures output via the same OS-level redirection,
+// same AnsiString-to-String conversion for LoadStringFromFile.
+function RunUninstallPreflight(const ExtraArgs: String; var OutputText: String): Integer;
 var
-  Code: Integer;
-  ScriptPath: String;
+  ResultCode: Integer;
+  ScriptPath, OutFile: String;
+  RawOutput: AnsiString;
 begin
-  ScriptPath := ExpandConstant('{tmp}') + '\uninstall-stop.ps1';
-  SaveStringToFile(ScriptPath, UninstallStopScript(), False);
-  Exec('powershell.exe', '-NoProfile -ExecutionPolicy Bypass -File "' + ScriptPath + '"', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  ScriptPath := ExpandConstant('{tmp}') + '\uninstall-preflight.ps1';
+  SaveStringToFile(ScriptPath, UninstallPreflightScript(), False);
+  OutFile := ExpandConstant('{tmp}') + '\uninstall-preflight-out.txt';
+  if FileExists(OutFile) then DeleteFile(OutFile);
+  if Exec(ExpandConstant('{cmd}'),
+          '/c powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + ScriptPath + '" ' + ExtraArgs +
+          ' > "' + OutFile + '" 2>&1',
+          '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    if FileExists(OutFile) then
+    begin
+      LoadStringFromFile(OutFile, RawOutput);
+      OutputText := RawOutput;
+    end
+    else OutputText := '';
+    Result := ResultCode;
+  end
+  else
+  begin
+    OutputText := 'uninstall preflight script could not be launched.';
+    Result := 3;
+  end;
+end;
+
+// FINDING A3 fix: the uninstall-side equivalent of RunSessionPreflight, using
+// UninstallSilent instead of WizardSilent - they are separate, context-
+// specific functions (WizardSilent is not meaningful here). Same contract:
+// silence aborts outright on a non-zero code, interactive asks and aborts on
+// anything but Yes.
+function ConfirmUninstallProceed(CheckCode: Integer; const Output: String): Boolean;
+var
+  Response: Integer;
+begin
+  if CheckCode = 0 then
+  begin
+    Result := True;
+    Exit;
+  end;
+
+  if UninstallSilent then
+  begin
+    Log('ConfirmUninstallProceed: aborting unattended uninstall, CheckCode=' + IntToStr(CheckCode) + ': ' + Output);
+    Result := False;
+    Exit;
+  end;
+
+  if CheckCode = 2 then
+    Response := MsgBox(
+      'A game session may still be running:' + #13#10#13#10 + Output + #13#10#13#10 +
+      'Continuing will stop the daemon, which has no way to ask it to save first. ' +
+      'Confirm nobody is playing before continuing.' + #13#10#13#10 +
+      'Continue with uninstall anyway?',
+      mbConfirmation, MB_YESNO)
+  else
+    Response := MsgBox(
+      'Could not determine whether a game session is running:' + #13#10#13#10 + Output + #13#10#13#10 +
+      'A rejected or unreachable check does not prove nothing is running. Stop the daemon yourself first if you are not sure, ' +
+      'or cancel and run this uninstaller again without a silent switch so you can decide interactively.' + #13#10#13#10 +
+      'Continue with uninstall anyway?',
+      mbError, MB_YESNO);
+
+  Result := (Response = IDYES);
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   Code: Integer;
+  Output: String;
+  StopCode: Integer;
 begin
   if CurUninstallStep = usUninstall then
   begin
-    Exec('schtasks.exe', '/end /tn "' + TaskName + '"', '', SW_HIDE, ewWaitUntilTerminated, Code);
-    StopUntaskedDaemonForUninstall();
+    StopCode := RunUninstallPreflight('', Output);
+    if StopCode <> 0 then
+    begin
+      if (StopCode = 2) or (StopCode = 3) then
+      begin
+        if not ConfirmUninstallProceed(StopCode, Output) then Abort;
+        // The check-only run above refused before touching anything, so the
+        // operator's (or an interactive-only, since silence already aborted)
+        // confirmation has to be followed by an actual, forced stop.
+        StopCode := RunUninstallPreflight('-Force', Output);
+      end;
 
-    // FINDING B/G fix: report failures instead of discarding Code - these are
-    // the two calls that leave residue (a stale task, an open inbound port)
-    // if they silently fail.
-    if not (Exec('schtasks.exe', '/delete /tn "' + TaskName + '" /f', '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0)) then
-      SuppressibleMsgBox('Could not delete the scheduled task ' + TaskName + '. If it still exists, remove it manually from Task Scheduler.',
-        mbError, MB_OK, IDOK);
+      if StopCode = 1 then
+        SuppressibleMsgBox(
+          'The existing daemon may still be running:' + #13#10#13#10 + Output + #13#10#13#10 +
+          'Files may fail to delete next. If so, stop it manually and re-run the uninstaller.',
+          mbError, MB_OK, IDOK);
+    end;
+
+    // FINDING H fix: schtasks /delete on a missing task, and
+    // Remove-NetFirewallRule on a missing rule, both exit non-zero even with
+    // -ErrorAction SilentlyContinue (verified on this box: -ErrorAction
+    // suppresses the message, not the exit code) - so an install where "boot
+    // task" was never selected popped two false-failure dialogs on uninstall.
+    // Both checks are now existence-gated so a failure dialog means an actual
+    // failure.
+    if ScheduledTaskExists() then
+    begin
+      if not (Exec('schtasks.exe', '/delete /tn "' + TaskName + '" /f', '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0)) then
+        SuppressibleMsgBox('Could not delete the scheduled task ' + TaskName + '. If it still exists, remove it manually from Task Scheduler.',
+          mbError, MB_OK, IDOK);
+    end;
 
     // FINDING B fix: netsh's "delete rule name=" matches DisplayName, not the
     // Name register-task.ps1 actually creates the rule with
     // (NecesseDaemon-Inbound), so it never matched anything and the port
     // stayed open forever after uninstall. Remove-NetFirewallRule matches by
-    // Name.
-    if not (Exec('powershell.exe', '-NoProfile -Command "Remove-NetFirewallRule -Name ' + TaskName + '-Inbound -ErrorAction SilentlyContinue"',
+    // Name. The existence check is inside the same command (not a separate
+    // Exec) so "not found" cannot itself report as a failure.
+    if not (Exec('powershell.exe',
+                 '-NoProfile -Command "if (Get-NetFirewallRule -Name ' + TaskName + '-Inbound -ErrorAction SilentlyContinue) ' +
+                 '{ Remove-NetFirewallRule -Name ' + TaskName + '-Inbound -ErrorAction Stop }"',
                  '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0)) then
       SuppressibleMsgBox('Could not remove the firewall rule ' + TaskName + '-Inbound. If it still exists, remove it manually from Windows Defender Firewall.',
         mbError, MB_OK, IDOK);

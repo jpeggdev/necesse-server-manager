@@ -12,9 +12,22 @@ $ErrorActionPreference = "Stop"
 # malformed file" contract, because a hand-edited config.json is a realistic
 # state here too, not a hypothetical one.
 $TaskName = 'NecesseDaemon'
-$configFile = Join-Path $env:PROGRAMDATA "NecesseServerManager\config.json"
+
+# Same precedence as daemon/src/state-dir.ts: NECESSE_MANAGER_DATA overrides
+# %PROGRAMDATA%\NecesseServerManager when set. Hardcoding %PROGRAMDATA% here
+# would make this check read the wrong config.json on any box using the
+# override, report "nothing running" and wave a live session through -
+# fail-open on the one gate this design depends on.
+$stateDir = $env:NECESSE_MANAGER_DATA
+if (-not $stateDir -or $stateDir.Trim().Length -eq 0) {
+  $stateDir = $null
+  if ($env:PROGRAMDATA) { $stateDir = Join-Path $env:PROGRAMDATA "NecesseServerManager" }
+}
+$configFile = $null
+if ($stateDir) { $configFile = Join-Path $stateDir "config.json" }
 
 function Read-DaemonConfig {
+  if (-not $configFile) { return $null }
   if (-not (Test-Path $configFile)) { return $null }
   try {
     return ((Get-Content $configFile -Raw) -replace "^\uFEFF", "") | ConvertFrom-Json
@@ -31,6 +44,13 @@ function Get-DaemonPort($cfg) {
 if ($Mode -eq 'Check') {
   # Exit codes are the installer's contract (necesse-daemon.iss branches on
   # them): 0 = safe to proceed, 2 = a session may be live, 3 = could not tell.
+  if (-not $stateDir) {
+    # Neither override nor %PROGRAMDATA% resolved - this is "we do not know
+    # where to look", not "we looked and found nothing". Reporting it as safe
+    # would be the exact fail-open this check exists to prevent.
+    Write-Output "CANNOT_DETERMINE: neither NECESSE_MANAGER_DATA nor PROGRAMDATA is set."
+    exit 3
+  }
   $cfg = Read-DaemonConfig
   if ($null -eq $cfg) {
     Write-Output "STATE=none (no config.json at $configFile)"
