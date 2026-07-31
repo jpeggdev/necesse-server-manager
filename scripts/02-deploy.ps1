@@ -52,12 +52,14 @@ scp -i $key    "$repo\daemon\package-lock.json" "${remote}:$destFwd/"
 # The launchers ship too. Without them the daemon's own boot refusal ("Run
 # migrate.cmd from the install folder") names a file that is not on the server,
 # and neither is setup.cmd, which is what the refusal for a missing config.json
-# names. A release zip carries all three; a deploy that did not was the only
-# way to end up with an install where the printed instructions cannot be
-# followed.
+# names, and neither is register-task.cmd, which is what the setup wizard's
+# closing message names. A release zip carries all four; a deploy that did not
+# was the only way to end up with an install where the printed instructions
+# cannot be followed.
 scp -i $key    "$repo\daemon\migrate.cmd"       "${remote}:$destFwd/"
 scp -i $key    "$repo\daemon\setup.cmd"         "${remote}:$destFwd/"
 scp -i $key    "$repo\daemon\start-daemon.cmd"  "${remote}:$destFwd/"
+scp -i $key    "$repo\daemon\register-task.cmd" "${remote}:$destFwd/"
 
 # Nothing is seeded into $dest. State (config.json, mods.json, the mod
 # library, mod-sets.json) lives in the daemon's state directory, not beside
