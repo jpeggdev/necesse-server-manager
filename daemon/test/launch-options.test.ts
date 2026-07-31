@@ -102,4 +102,25 @@ describe("persistence", () => {
     const written = JSON.parse(await readFile(file, "utf8")) as { updatedAt: string };
     expect(Date.parse(written.updatedAt)).not.toBeNaN();
   });
+
+  it("does not share state between instances over non-existent files", async () => {
+    // Pin the invariant: two stores over different files that do not exist
+    // must not share their internal defaults or worlds state. This test is
+    // independent of test ordering and directly asserts the invariant.
+    const root2 = await mkdtemp(join(tmpdir(), "necesse-launch-"));
+    const file2 = join(root2, "launch-options.json");
+    const store2 = new LaunchOptions(file2);
+
+    try {
+      // First store writes a world override.
+      await store.setForWorld("Tulsa", { motd: "store1" });
+
+      // Second store over a different, non-existent file must be empty.
+      expect(await store2.defaults()).toEqual({});
+      expect(await store2.forWorld("Tulsa")).toEqual({});
+      expect(await store2.load()).toEqual({ defaults: {}, worlds: {}, updatedAt: null });
+    } finally {
+      await rm(root2, { recursive: true, force: true });
+    }
+  });
 });

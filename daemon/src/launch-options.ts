@@ -11,8 +11,6 @@ export interface LaunchOptionsFile {
   updatedAt: string | null;
 }
 
-const EMPTY: LaunchOptionsFile = { defaults: {}, worlds: {}, updatedAt: null };
-
 /**
  * Daemon-wide launch option defaults, plus each world's overrides.
  *
