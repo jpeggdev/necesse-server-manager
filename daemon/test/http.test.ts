@@ -2032,10 +2032,22 @@ describe("access token", () => {
     expect(config.json().authRequired).toBe(false);
   });
 
-  it("rejects a launch-options request with no token", async () => {
-    const res = await app.inject({ method: "GET", url: "/api/launch-options" });
-    expect(res.statusCode).toBe(401);
-    expect(res.json().error).toMatch(/token/i);
+  // Not just "no token 401s" - that alone would pass identically if the route
+  // did not exist at all, since the auth hook 401s any path before routing
+  // gets a chance to 404 it. Asserting the right token actually reaches a real
+  // 200 is what proves the route (and the auth check in front of it) both
+  // exist, rather than just proving the hook itself works.
+  it("rejects a launch-options request with no token, and serves it with the right one", async () => {
+    const noToken = await app.inject({ method: "GET", url: "/api/launch-options" });
+    expect(noToken.statusCode).toBe(401);
+    expect(noToken.json().error).toMatch(/token/i);
+
+    const withToken = await app.inject({
+      method: "GET",
+      url: "/api/launch-options",
+      headers: { authorization: "Bearer s3cret" },
+    });
+    expect(withToken.statusCode).toBe(200);
   });
 });
 
@@ -2052,6 +2064,10 @@ describe("launch options", () => {
   it("never offers a daemon-owned argument as a field", async () => {
     const res = await app.inject({ method: "GET", url: "/api/launch-options" });
     const names = res.json().fields.map((f: { name: string }) => f.name);
+    // Self-supporting: without this an empty field list would trivially
+    // "never offer" a forbidden name too. Asserting real, allowed fields are
+    // present is what makes the negative check below mean something.
+    expect(names).toEqual(expect.arrayContaining(["owner", "slots", "port"]));
     for (const forbidden of ["datadir", "world", "nogui"]) {
       expect(names).not.toContain(forbidden);
     }
@@ -2102,6 +2118,26 @@ describe("launch options", () => {
     expect(after.json().overrides).toEqual({});
   });
 
+  // Without this, an illegal name like a whitespace-only or a colon-bearing
+  // one is accepted and stored under `normaliseWorld`'s trimmed key - which
+  // `POST /api/server/start` (isValidWorldName-gated) can never look up by
+  // that same illegal name - so the write would be saved, echoed back as
+  // saved, and silently never applied. Every sibling `/api/worlds/:name/*`
+  // route already refuses this; these two must match it.
+  it("refuses an invalid world name on both the GET and the PUT", async () => {
+    const getRes = await app.inject({ method: "GET", url: "/api/worlds/bad%3Aname/launch-options" });
+    expect(getRes.statusCode).toBe(400);
+    expect(getRes.json().error).toMatch(/world name/i);
+
+    const putRes = await app.inject({
+      method: "PUT",
+      url: "/api/worlds/bad%3Aname/launch-options",
+      payload: { owner: "Jeff" },
+    });
+    expect(putRes.statusCode).toBe(400);
+    expect(putRes.json().error).toMatch(/world name/i);
+  });
+
   it("refuses an unknown option rather than ignoring it", async () => {
     const res = await app.inject({
       method: "PUT",
@@ -2148,10 +2184,13 @@ describe("launch options", () => {
       payload: { world: "Tulsa" },
     });
     expect(res.statusCode).toBe(200);
-    expect(spawn.calls[0].args).toContain("-owner");
-    expect(spawn.calls[0].args).toContain("Jeff");
-    expect(spawn.calls[0].args).toContain("-slots");
-    expect(spawn.calls[0].args).toContain("12");
+    // Adjacency, not just presence: `-owner` and `Jeff` each showing up
+    // somewhere in argv would also pass for a command line that put every
+    // flag first and every value after, which is not a command line the game
+    // would parse correctly.
+    const argv = spawn.calls[0].args.join(" ");
+    expect(argv).toContain("-owner Jeff");
+    expect(argv).toContain("-slots 12");
   });
 
   // The load-bearing requirement: a broken launch-options.json must fail the

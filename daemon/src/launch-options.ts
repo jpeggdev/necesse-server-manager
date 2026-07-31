@@ -1,6 +1,7 @@
 import { mkdir, readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { writeJsonDurable } from "./durable-write.js";
+import { effectiveOptions } from "./launch-options-schema.js";
 import { normaliseWorld } from "./mod-sets.js";
 import type { LaunchOptionValue } from "./types.js";
 
@@ -22,6 +23,36 @@ export interface LaunchOptionsFile {
  */
 export class LaunchOptions {
   constructor(private file: string) {}
+
+  /**
+   * Serializes `setDefaults`/`setForWorld` against each other.
+   *
+   * Both do a load-mutate-write of the whole file, and awaiting nothing
+   * between the load and the write is exactly what makes two overlapping
+   * calls a lost-update race: the second call's load can complete before the
+   * first call's write lands, so it mutates the pre-write state and its write
+   * silently erases the first call's change. Chaining every write through
+   * this queue - rather than a lock file, which would need its own crash
+   * recovery - makes them run one at a time regardless of how the callers
+   * overlap.
+   *
+   * The two `.then(ok, ok)` handlers on `advance` are what keep the queue
+   * itself always resolved: if `fn` throws, `run` (returned to the caller)
+   * carries that rejection untouched, but `this.queue` must still settle to
+   * fulfilled or every write queued after a failing one would inherit that
+   * rejection forever and never run at all.
+   */
+  private queue: Promise<void> = Promise.resolve();
+
+  private enqueue<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.queue.then(fn, fn);
+    const advance = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.queue = advance;
+    return run;
+  }
 
   async load(): Promise<LaunchOptionsFile> {
     let raw: string;
@@ -55,27 +86,31 @@ export class LaunchOptions {
 
   async effectiveFor(world: string): Promise<Record<string, LaunchOptionValue>> {
     const all = await this.load();
-    return { ...all.defaults, ...(all.worlds[normaliseWorld(world)] ?? {}) };
+    return effectiveOptions(all.defaults, all.worlds[normaliseWorld(world)] ?? {});
   }
 
   async setDefaults(
     changes: Record<string, LaunchOptionValue | null>,
   ): Promise<Record<string, LaunchOptionValue>> {
-    const all = await this.load();
-    all.defaults = applyChanges(all.defaults, changes);
-    await this.write(all);
-    return all.defaults;
+    return this.enqueue(async () => {
+      const all = await this.load();
+      all.defaults = applyChanges(all.defaults, changes);
+      await this.write(all);
+      return all.defaults;
+    });
   }
 
   async setForWorld(
     world: string,
     changes: Record<string, LaunchOptionValue | null>,
   ): Promise<Record<string, LaunchOptionValue>> {
-    const all = await this.load();
-    const key = normaliseWorld(world);
-    all.worlds[key] = applyChanges(all.worlds[key] ?? {}, changes);
-    await this.write(all);
-    return all.worlds[key];
+    return this.enqueue(async () => {
+      const all = await this.load();
+      const key = normaliseWorld(world);
+      all.worlds[key] = applyChanges(all.worlds[key] ?? {}, changes);
+      await this.write(all);
+      return all.worlds[key];
+    });
   }
 
   private async write(all: LaunchOptionsFile): Promise<void> {

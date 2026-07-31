@@ -88,6 +88,27 @@ describe("effectiveFor", () => {
   });
 });
 
+// Both setDefaults and setForWorld do an unserialized-looking load, mutate,
+// write of the whole file - so two overlapping calls racing would otherwise
+// let the second one's load complete before the first one's write lands,
+// silently erasing the first call's change. These pin that the store itself
+// serializes, so two writers never need to know about each other.
+describe("concurrent writes", () => {
+  it("loses neither change when two setDefaults calls overlap", async () => {
+    await Promise.all([store.setDefaults({ owner: "Jeff" }), store.setDefaults({ slots: 10 })]);
+    expect(await store.defaults()).toEqual({ owner: "Jeff", slots: 10 });
+  });
+
+  it("loses neither change when a defaults write and a world write overlap", async () => {
+    await Promise.all([
+      store.setDefaults({ owner: "Jeff" }),
+      store.setForWorld("Tulsa", { slots: 10 }),
+    ]);
+    expect(await store.defaults()).toEqual({ owner: "Jeff" });
+    expect(await store.forWorld("Tulsa")).toEqual({ slots: 10 });
+  });
+});
+
 describe("persistence", () => {
   it("writes a file a second store can read", async () => {
     await store.setDefaults({ owner: "Jeff" });

@@ -8,7 +8,12 @@ import { openWorldSettings, WorldSettingsError } from "./world-settings.js";
 import type { WorldSettingsFile } from "./world-settings-file.js";
 import { knownField, checkChange, isSameValue } from "./world-settings-schema.js";
 import type { LaunchOptions } from "./launch-options.js";
-import { checkLaunchOption, fieldByName, LAUNCH_OPTION_FIELDS } from "./launch-options-schema.js";
+import {
+  checkLaunchOption,
+  effectiveOptions,
+  fieldByName,
+  LAUNCH_OPTION_FIELDS,
+} from "./launch-options-schema.js";
 import type { ModInstaller } from "./mod-installer.js";
 import type { ModLibrary } from "./mod-library.js";
 import type { ModSets } from "./mod-sets.js";
@@ -1123,14 +1128,14 @@ export function buildServer(deps: Deps): FastifyInstance {
 
   /**
    * The four launch-option routes below are deliberately NOT gated on
-   * `requireStopped` or `requireNoActiveTask`. They only write a small JSON
-   * file, never the mods folder or a world zip, so there is nothing here for a
-   * concurrent steamcmd run or reconcile to corrupt. And unlike a world
-   * setting, the game reads its command line exactly once, at process launch -
-   * an edit saved while a session is running cannot partially apply or land in
-   * an inconsistent state; it simply has no effect until that world's next
-   * start. Refusing the write would only make the operator wait for a stop
-   * that buys nothing.
+   * `requireStopped` or `requireNoActiveTask`. They write one small JSON file
+   * in the state directory - never the mods folder and never a world zip - so
+   * there is nothing here for a concurrent steamcmd run or reconcile to
+   * corrupt. And unlike a world setting, the game reads its command line
+   * exactly once, at process launch: an edit saved while a session is running
+   * cannot partially apply or land in an inconsistent state, it simply has no
+   * effect until that world's next start. Forcing a stop to save "the owner
+   * for tomorrow" would buy nothing.
    */
 
   /**
@@ -1184,8 +1189,11 @@ export function buildServer(deps: Deps): FastifyInstance {
     } satisfies LaunchOptionsResponse;
   });
 
-  app.get("/api/worlds/:world/launch-options", async (req) => {
+  app.get("/api/worlds/:world/launch-options", async (req, reply) => {
     const { world } = req.params as { world: string };
+    if (!isValidWorldName(world)) {
+      return reply.code(400).send({ ok: false, error: `Invalid world name: ${JSON.stringify(world)}` });
+    }
     const [defaults, overrides] = await Promise.all([
       launchOptions.defaults(),
       launchOptions.forWorld(world),
@@ -1193,7 +1201,7 @@ export function buildServer(deps: Deps): FastifyInstance {
     return {
       ok: true,
       world,
-      effective: { ...defaults, ...overrides },
+      effective: effectiveOptions(defaults, overrides),
       overrides,
       defaults,
       fields: [...LAUNCH_OPTION_FIELDS],
@@ -1202,6 +1210,9 @@ export function buildServer(deps: Deps): FastifyInstance {
 
   app.put("/api/worlds/:world/launch-options", async (req, reply) => {
     const { world } = req.params as { world: string };
+    if (!isValidWorldName(world)) {
+      return reply.code(400).send({ ok: false, error: `Invalid world name: ${JSON.stringify(world)}` });
+    }
     const changes = (req.body ?? {}) as Record<string, unknown>;
     const bad = checkAll(changes);
     if (bad !== null) return reply.code(400).send({ ok: false, error: bad });
@@ -1213,7 +1224,7 @@ export function buildServer(deps: Deps): FastifyInstance {
     return {
       ok: true,
       world,
-      effective: { ...defaults, ...overrides },
+      effective: effectiveOptions(defaults, overrides),
       overrides,
       defaults,
       fields: [...LAUNCH_OPTION_FIELDS],
