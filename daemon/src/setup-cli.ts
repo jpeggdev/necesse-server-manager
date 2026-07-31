@@ -190,10 +190,11 @@ if (problems.length > 0) {
   );
 } else {
   console.log(
-    `Next: run start-daemon.cmd to run it in this window, or register-task.ps1 (as ` +
-      `Administrator) to have it start automatically at boot - that's register-task.ps1 at the ` +
-      `root of a release download, or scripts\\03-register-task.ps1 if you are running from a ` +
-      `source checkout.`,
+    `Next: run start-daemon.cmd to run it in this window, or register-task.cmd to have it ` +
+      `start automatically at boot - that's register-task.cmd at the root of a release ` +
+      `download or install directory (it asks Windows for the Administrator rights the ` +
+      `scheduled task and the firewall rule both need), or scripts\\03-register-task.ps1 ` +
+      `from an elevated prompt if you are running from a source checkout.`,
   );
 }
 rl.close();

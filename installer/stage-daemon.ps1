@@ -48,6 +48,10 @@ New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
 Copy-Item -Recurse (Join-Path $RepoRoot "daemon\dist") (Join-Path $StageDir "dist")
 Copy-Item (Join-Path $RepoRoot "daemon\package.json"),(Join-Path $RepoRoot "daemon\package-lock.json") $StageDir
 Copy-Item (Join-Path $RepoRoot "daemon\setup.cmd"),(Join-Path $RepoRoot "daemon\start-daemon.cmd"),(Join-Path $RepoRoot "daemon\migrate.cmd") $StageDir
+# register-task.cmd elevates and then runs register-task.ps1, which needs admin
+# for both the SYSTEM-principal scheduled task and the firewall rule. The zip
+# route wants it for the same reason the installer's Start Menu shortcut does.
+Copy-Item (Join-Path $RepoRoot "daemon\register-task.cmd") $StageDir
 # Renamed on purpose: the setup wizard's closing message tells the operator to
 # run "register-task.ps1", and the daemon's own boot refusals name files by
 # their unqualified name. A copy under the numbered source name would make

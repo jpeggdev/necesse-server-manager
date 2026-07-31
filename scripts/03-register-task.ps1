@@ -1,5 +1,21 @@
 $ErrorActionPreference = "Stop"
 
+# FINDING I4 fix: assert elevation up front. Register-ScheduledTask with a
+# SYSTEM ServiceAccount principal needs admin and throws access-denied, and
+# New-NetFirewallRule below carries -ErrorAction SilentlyContinue, so an
+# unelevated run produced no firewall rule at all, silently, and then a raw
+# throw. The Start Menu shortcut that pointed straight at this script (a plain
+# powershell.exe -File, no elevation) hit exactly that, in a console window that
+# closed before it could be read. register-task.cmd self-elevates and pauses;
+# this is the backstop for anyone invoking the .ps1 directly.
+$isElevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+  [Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isElevated) {
+  throw ("This script must run as Administrator: registering a Scheduled Task that runs as SYSTEM, and creating " +
+         "the inbound firewall rule, both require it. Right-click register-task.cmd and choose 'Run as administrator' " +
+         "(or use the 'Register boot task' Start Menu shortcut, which elevates for you).")
+}
+
 # Runs ON SERVER, so it reads deploy.local.ps1 from its own directory there --
 # the same file 02-deploy.ps1 reads on the workstation, just a different copy
 # (02-deploy.ps1 does not ship one; an operator who wants this to override the
@@ -25,9 +41,32 @@ $dir = $InstallDir
 # firewall rule below opens ONE port, and a user who answered anything but 8710
 # in setup.cmd would otherwise get a rule for a port nothing is listening on
 # and a LAN client that cannot connect for a reason nothing reports.
-$configFile = Join-Path $env:PROGRAMDATA "NecesseServerManager\config.json"
+#
+# FINDING I3 fix: the same precedence block necesse-daemon.iss's StateDir(),
+# installer\preflight.ps1 and daemon\src\state-dir.ts all share --
+# NECESSE_MANAGER_DATA overrides %PROGRAMDATA%\NecesseServerManager when set.
+# This line predated the override and was the only reader left hardcoding
+# %PROGRAMDATA%, which the installer made load-bearing: ConfigExists() there
+# reads the override and returns true, so the installer runs this script, which
+# then found no config at %PROGRAMDATA%, fell back to port 8710 (opening a
+# firewall rule for a port nothing listens on if another was chosen), left the
+# token null, and so ended its health check unauthenticated -- a 401, thrown as
+# "config.json was edited since it started" over a registration that had in fact
+# worked. The installer then reported that registering the boot task did not
+# complete.
+#
+# [System.IO.Path]::Combine rather than Join-Path, for the reason spelled out in
+# installer\preflight.ps1: Join-Path resolves the PSDrive and throws
+# DriveNotFoundException on a state directory this session cannot reach.
+$stateDir = $env:NECESSE_MANAGER_DATA
+if (-not $stateDir -or $stateDir.Trim().Length -eq 0) {
+  $stateDir = $null
+  if ($env:PROGRAMDATA) { $stateDir = [System.IO.Path]::Combine($env:PROGRAMDATA, "NecesseServerManager") }
+}
+$configFile = $null
+if ($stateDir) { $configFile = [System.IO.Path]::Combine($stateDir, "config.json") }
 $configuredToken = $null
-if (Test-Path $configFile) {
+if ($configFile -and (Test-Path $configFile)) {
   # -Raw plus an explicit BOM strip: PowerShell 5.1's Set-Content -Encoding UTF8
   # writes one and ConvertFrom-Json rejects it, and hand-editing this file is
   # the documented way to set the Steam key -- which also means a trailing
@@ -180,5 +219,9 @@ try {
   if ($code -eq 401) {
     throw "The task is registered and the daemon is answering on port $DaemonPort, so registration succeeded. It rejected this check's token: this script read authToken from $configFile, and that is not the value the daemon booted with -- config.json was edited since it started, or the daemon is using a different state directory (NECESSE_MANAGER_DATA)."
   }
-  throw "The task is registered, but GET http://localhost:$DaemonPort/api/status failed: $($_.Exception.Message). If the daemon refuses to boot it says why in $env:PROGRAMDATA\NecesseServerManager\boot-refusal.txt."
+  # FINDING I3: same divergence as the config path above -- naming
+  # %PROGRAMDATA% here sent anyone using NECESSE_MANAGER_DATA to a file that
+  # does not exist, on the one line they read when the daemon will not start.
+  $refusalFile = if ($stateDir) { [System.IO.Path]::Combine($stateDir, "boot-refusal.txt") } else { "<state directory could not be resolved>" }
+  throw "The task is registered, but GET http://localhost:$DaemonPort/api/status failed: $($_.Exception.Message). If the daemon refuses to boot it says why in $refusalFile."
 }
