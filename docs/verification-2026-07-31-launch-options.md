@@ -7,7 +7,13 @@ feature works against a real game server. It does not; it proves the daemon
 and client packages are internally consistent with each other and with the
 decompiled source, nothing more.
 
-**Branch** `feat/launch-options`, HEAD at commit time `4cee321`.
+**Branch** `feat/launch-options`. Everything recorded below was run against
+`4cee321`. That was **not** the branch head even when this file was first
+written: the documentation commit `663f587` sits on top of it, and the
+whole-branch review's fix pass sits on top of that. So the numbers in this
+record (532 daemon tests, and the file counts under Step 1) describe `4cee321`
+and nothing later. They are left as measured rather than restated, because
+re-running a suite is not the same evidence as having run it.
 
 ---
 
@@ -59,7 +65,7 @@ MATCH=True
 
 `daemon/src/types.ts` and `client/src/types.ts` hash identically.
 
-### Step 4 — `owners` is gone outside the migration
+### Step 4 — `owners` is gone from the source, outside the migration
 
 ```powershell
 Select-String -Path daemon\src\*.ts,client\src\*.ts,daemon\test\*.ts,client\test\*.ts -Pattern "\bowners\b"
@@ -79,6 +85,15 @@ No other source or test file under either package's `src/` or `test/`
 mentions `owners`. `DaemonConfig` no longer carries the field at all; the
 only place the word survives is the one-time migration reading it out of an
 old `config.json`, and that migration's own test.
+
+**This is a statement about the source tree, not about any `config.json` on
+disk.** `owners` is still present in every real config file that ever had it,
+and stays there: `loadConfig` and `saveConfig` round-trip every stored key they
+do not explicitly derive, so nothing ever removes it. The grep above proves the
+daemon no longer *acts* on the array except in the migration, not that the
+array is gone from the live install. That distinction is why the migration's
+re-run guard is a durable `ownersMigratedAt` marker in `launch-options.json`
+rather than an inference from whether a default owner is currently set.
 
 ---
 

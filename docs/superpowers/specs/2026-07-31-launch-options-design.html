@@ -234,11 +234,21 @@ quietly breaking the assumption that logs sit under the data directory.</p>
 <h2 id="migration">6. Migration</h2>
 
 <p><code>config.json</code>'s <code>owners</code> array becomes
-<code>defaults.owner</code>, taking the <strong>first</strong> entry.
-<code>owners</code> is dropped from the config by the next write, and removed
-from <code>ALLOWED_CONFIG_KEYS</code> in <code>http.ts</code>. No per-world
-overrides are created: every world inherits the default until one is
-deliberately overridden.</p>
+<code>defaults.owner</code>, taking the <strong>first</strong> entry (trimmed).
+It is removed from <code>ALLOWED_CONFIG_KEYS</code> in <code>http.ts</code>, so
+nothing can set it any more. No per-world overrides are created: every world
+inherits the default until one is deliberately overridden.</p>
+
+<p><strong><code>owners</code> is NOT dropped from the config file.</strong>
+<code>loadConfig</code> and <code>saveConfig</code> round-trip every key they do
+not explicitly derive, so the array stays in <code>config.json</code> forever
+and is still readable at every later boot. That is why the migration's re-run
+guard cannot be "a default owner exists": an operator who deliberately cleared
+the owner would have had it re-seeded from the stale array at the next daemon
+start, silently. The guard is a durable <code>ownersMigratedAt</code> marker in
+<code>launch-options.json</code> instead, so the migration runs at most once
+whatever the current state is. An install that already had an owner when the
+marker was introduced is recorded as migrated and left untouched.</p>
 
 <div class="warn">
 <p><strong>This changes behaviour on the existing install, deliberately and by

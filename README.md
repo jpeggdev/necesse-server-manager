@@ -306,6 +306,18 @@ A few things about how they work are easy to miss:
   `-owner` flags overwrite each other and only the last one survives. If you
   need more than one privileged account, that has to be handled some other
   way (in-game permissions), not through this option.
+- **Text options cannot contain a quote, and no word in them can start
+  with `-` or `+`.** The game does not read its command line argument by
+  argument. It joins the whole thing into one string first, then scans that
+  string for flags, so a message of the day like `Welcome - have fun` is read
+  back as the text `Welcome`, an empty message of the day, and a flag called
+  `have`. A value like `-settings C:/somewhere.cfg` would go further and set a
+  real option nobody asked for. The daemon refuses such a value with an error
+  rather than sending a command line that means something other than what you
+  typed. This is a limit of the game itself, so there is no way around it from
+  here: write `Welcome, have fun` instead. A hyphen inside a word is fine
+  (`Jean-Luc`, `co-op night`); it is only a word that starts with one that the
+  game misreads.
 - **Clearing an option and setting it to blank are different.** Setting an
   option to `null` in the client removes it, so the world falls back to the
   daemon-wide default (or the game's own default if there is no default
