@@ -72,6 +72,28 @@ export function fieldByName(name: string): LaunchOptionField | undefined {
 }
 
 /**
+ * Text the game's own parser would read back as something other than text.
+ *
+ * `GameLaunch.parseLaunchOptions` does not walk argv element by element. It
+ * calls `quoteArgs`, which wraps any element containing a space in double
+ * quotes, joins the whole array into ONE string, and scans that string for `-`
+ * and `+` tokens with `[^\s"']+|"([^"]*)"|'([^']*)'`. So an `owner` of
+ * `-settings C:/evil.cfg` arrives as `-owner "-settings C:/evil.cfg"`; the
+ * parser takes the quoted group, sees it starts with `-`, stores `owner` as
+ * EMPTY and continues WITHOUT skipping past the quoted region - then finds the
+ * `-` inside `-settings` and parses it as a real option. One value both empties
+ * the option the operator set and injects a flag this daemon deliberately does
+ * not offer, on a process running as SYSTEM. No quote character is required:
+ * whitespace followed by `-` or `+` is enough.
+ *
+ * Refusing at the boundary is the only honest answer, and the consequence is
+ * real rather than hidden: a message of the day like `Welcome - have fun`
+ * cannot be passed to this game by anything, which is why the message says so.
+ * A loud refusal beats a command line that quietly means something else.
+ */
+const RETOKENISED_BY_THE_GAME = /^[-+]|\s[-+]|["']/;
+
+/**
  * Why this value cannot be stored for this option, or null if it can.
  *
  * An unknown name is refused rather than ignored: silently dropping a key means
@@ -86,6 +108,15 @@ export function checkLaunchOption(name: string, value: unknown): string | null {
   }
   if (field.type === "string") {
     if (typeof value !== "string") return `"${name}" takes text.`;
+    if (RETOKENISED_BY_THE_GAME.test(value)) {
+      return (
+        `"${name}" cannot contain a quote, and no word in it can start with - or +. ` +
+        `The game joins the whole command line into one string before it parses it, so a ` +
+        `value like that is read back as another flag: it would leave "${name}" empty and ` +
+        `set an option nobody asked for. That is a limit of the game's own parser, so text ` +
+        `such as "Welcome - have fun" cannot reach this server by any route.`
+      );
+    }
     return null;
   }
   if (field.type === "boolean") {

@@ -2158,6 +2158,24 @@ describe("launch options", () => {
     expect(res.json().error).toMatch(/not a known/i);
   });
 
+  // The game joins the whole command line into one string before parsing it,
+  // so a text value carrying a word that starts with `-` is re-read as a flag:
+  // `-owner "-settings C:/evil.cfg"` stores owner as empty AND sets `settings`,
+  // which is deliberately not on offer here, on a daemon running as SYSTEM.
+  // The name filter cannot see this at all; only value validation can.
+  it("refuses a text value the game's parser would read as another flag", async () => {
+    const res = await app.inject({
+      method: "PUT",
+      url: "/api/worlds/Tulsa/launch-options",
+      payload: { owner: "-settings C:/evil.cfg" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/read back as another flag/i);
+
+    const after = await app.inject({ method: "GET", url: "/api/worlds/Tulsa/launch-options" });
+    expect(after.json().overrides).toEqual({});
+  });
+
   it("rejects the whole payload when one value is bad", async () => {
     // All-or-nothing: a partial apply would leave the operator looking at a
     // form where some edits took and some did not, with one error to explain it.
@@ -2188,6 +2206,14 @@ describe("launch options", () => {
     // somewhere in argv would also pass for a command line that put every
     // flag first and every value after, which is not a command line the game
     // would parse correctly.
+    //
+    // Accepted as-is for these two values, but do NOT copy the technique for a
+    // free-text value: joining argv on " " and substring-matching cannot tell
+    // ["-motd", "x -owner Eli"] from ["-motd", "x", "-owner", "Eli"], so a
+    // value containing a space would make it assert about a command line that
+    // is not the one being built. Index-based adjacency is the correct form,
+    // as in daemon/test/process-manager.test.ts's buildArgs tests:
+    //   expect(argv[argv.indexOf("-owner") + 1]).toBe("Jeff")
     const argv = spawn.calls[0].args.join(" ");
     expect(argv).toContain("-owner Jeff");
     expect(argv).toContain("-slots 12");

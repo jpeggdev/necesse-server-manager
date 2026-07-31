@@ -72,6 +72,62 @@ describe("checkLaunchOption", () => {
     expect(checkLaunchOption("maxsettlers", -2)).toMatch(/-1 or more/);
   });
 
+  /*
+   * The game joins the whole command line into ONE string (quoteArgs, then
+   * GameUtils.join) before scanning it for `-` and `+` tokens, so a text value
+   * containing a word that starts with `-` is re-parsed as a flag: the option
+   * the operator set is stored empty AND an option that is not on offer here
+   * gets set, on a process running as SYSTEM. These pin the boundary refusal.
+   */
+  describe("text a value the game would re-tokenize", () => {
+    it("refuses the exact -settings injection, naming the option", () => {
+      const bad = checkLaunchOption("owner", "-settings C:/evil.cfg");
+      expect(bad).not.toBeNull();
+      expect(bad).toContain('"owner"');
+      // The consequence is stated, not just the rule: this is the whole reason
+      // refusing is better than emitting the value.
+      expect(bad).toMatch(/read back as another flag/i);
+    });
+
+    it("refuses a flag word anywhere in the value, not just at the start", () => {
+      // No quote character is needed and the value need not start with the
+      // flag: whitespace followed by `-` or `+` is all the parser requires.
+      expect(checkLaunchOption("motd", "Welcome - have fun")).not.toBeNull();
+      expect(checkLaunchOption("motd", "hello -settings C:/evil.cfg")).not.toBeNull();
+      expect(checkLaunchOption("motd", "hello +dev")).not.toBeNull();
+      expect(checkLaunchOption("password", "-dev")).not.toBeNull();
+      expect(checkLaunchOption("ip", "+dev")).not.toBeNull();
+      // \s, not just a literal space - the parser's own pattern uses \s.
+      expect(checkLaunchOption("motd", "line\n-settings x")).not.toBeNull();
+      expect(checkLaunchOption("motd", "tab\t-dev")).not.toBeNull();
+    });
+
+    it("refuses quote characters, which quoteArgs and argsPattern both read", () => {
+      expect(checkLaunchOption("motd", 'say "hi"')).not.toBeNull();
+      expect(checkLaunchOption("motd", "say 'hi'")).not.toBeNull();
+    });
+
+    it("still accepts ordinary text, including a hyphen inside a word", () => {
+      // The rule is about words STARTING with - or +, so refusing these would
+      // be an over-broad filter that made the option unusable.
+      expect(checkLaunchOption("owner", "Jeff")).toBeNull();
+      expect(checkLaunchOption("owner", "Jean-Luc")).toBeNull();
+      expect(checkLaunchOption("motd", "Welcome to the server!")).toBeNull();
+      expect(checkLaunchOption("motd", "2+2 is 4")).toBeNull();
+      expect(checkLaunchOption("motd", "line\\nbreak")).toBeNull();
+      expect(checkLaunchOption("ip", "192.168.1.106")).toBeNull();
+      // "" is a real stored value that clears nothing - see applyChanges.
+      expect(checkLaunchOption("password", "")).toBeNull();
+    });
+
+    it("does not apply the text rule to the other types", () => {
+      // -1 is legal for worldborder, maxsettlements and maxsettlers, and the
+      // rule must not leak across from strings and refuse them.
+      expect(checkLaunchOption("worldborder", -1)).toBeNull();
+      expect(checkLaunchOption("maxsettlers", -1)).toBeNull();
+    });
+  });
+
   it("accepts the exact edges", () => {
     expect(checkLaunchOption("slots", 1)).toBeNull();
     expect(checkLaunchOption("slots", 250)).toBeNull();

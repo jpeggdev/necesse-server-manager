@@ -495,6 +495,64 @@ describe("launch options across the real seam", () => {
     expect(cleared.effective.owner).toBe("Jeff");
   });
 
+  /*
+   * `null` clears, and every other value is a stored override - including the
+   * falsy ones. `""` was already covered above; `false` and `0` were not, and
+   * a falsy-check regression in `applyChanges` collapses all three into a
+   * clear. Each asserts the stored override AND the different answer a clear
+   * would give, over a real socket, so neither half passes on its own.
+   */
+  it("keeps a false boolean distinct from a clearing null", async () => {
+    const api = makeApi(baseUrl, TOKEN);
+    await api.saveLaunchOptions(null, { pausewhenempty: true });
+
+    const off = await api.saveLaunchOptions("Tulsa", { pausewhenempty: false });
+    expect(off.overrides).toEqual({ pausewhenempty: false });
+    expect(off.effective.pausewhenempty).toBe(false);
+
+    // A PUT echo alone would still pass if the daemon reflected the payload
+    // back without storing it. Re-read to prove it landed.
+    const reread = await api.launchOptions("Tulsa");
+    expect(reread.overrides).toEqual({ pausewhenempty: false });
+    expect(reread.effective.pausewhenempty).toBe(false);
+
+    const cleared = await api.saveLaunchOptions("Tulsa", { pausewhenempty: null });
+    expect(cleared.overrides).toEqual({});
+    expect(cleared.effective.pausewhenempty).toBe(true);
+  });
+
+  it("keeps a 0 distinct from a clearing null", async () => {
+    // 0 means "dropped items last forever" for itemslife: a real value, and
+    // the opposite of the 30 it would fall back to if it were treated as a
+    // clear.
+    const api = makeApi(baseUrl, TOKEN);
+    await api.saveLaunchOptions(null, { itemslife: 30 });
+
+    const zero = await api.saveLaunchOptions("Tulsa", { itemslife: 0 });
+    expect(zero.overrides).toEqual({ itemslife: 0 });
+    expect(zero.effective.itemslife).toBe(0);
+
+    const reread = await api.launchOptions("Tulsa");
+    expect(reread.overrides).toEqual({ itemslife: 0 });
+    expect(reread.effective.itemslife).toBe(0);
+
+    const cleared = await api.saveLaunchOptions("Tulsa", { itemslife: null });
+    expect(cleared.overrides).toEqual({});
+    expect(cleared.effective.itemslife).toBe(30);
+  });
+
+  // The game parses its whole command line as one joined string, so a text
+  // value with a word starting with `-` empties the option it was set on and
+  // injects a flag that is not on offer here. Pinned across the real socket
+  // because the client is what sends free text.
+  it("refuses a text value the game's parser would read as another flag", async () => {
+    const api = makeApi(baseUrl, TOKEN);
+    await expect(api.saveLaunchOptions("Tulsa", { owner: "-settings C:/evil.cfg" })).rejects.toThrow(
+      /read back as another flag/i,
+    );
+    expect((await api.launchOptions("Tulsa")).overrides).toEqual({});
+  });
+
   it("refuses an out-of-range value with the daemon's own message", async () => {
     await expect(makeApi(baseUrl, TOKEN).saveLaunchOptions("Tulsa", { slots: 999 })).rejects.toThrow(
       /1 and 250/,
