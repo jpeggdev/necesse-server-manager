@@ -49,7 +49,14 @@ UninstallDisplayName=Necesse Server Manager (daemon)
 ; state folder" shortcut is valid before the daemon has ever run - harmless
 ; either way, since the legacy-state check only treats the directory as
 ; populated when it actually contains something.
-Name: "{commonappdata}\NecesseServerManager"; Flags: uninsneveruninstall
+;
+; FINDING D fix: this used to be the literal constant
+; {commonappdata}\NecesseServerManager, which is resolved by Inno itself and
+; cannot see NECESSE_MANAGER_DATA. On a box using the override that created a
+; stray empty C:\ProgramData\NecesseServerManager which uninsneveruninstall
+; then guaranteed would never be cleaned up again. {code:StateDirConst} routes
+; it through the same resolver every other reader of the state directory uses.
+Name: "{code:StateDirConst}"; Flags: uninsneveruninstall
 
 [Files]
 Source: "{#StageDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
@@ -62,7 +69,9 @@ Source: "{#SourcePath}\preflight.ps1"; DestDir: "{tmp}"; Flags: dontcopy
 Name: "{group}\Setup (configure the daemon)"; Filename: "{app}\setup.cmd"
 Name: "{group}\Start daemon"; Filename: "{app}\start-daemon.cmd"
 Name: "{group}\Register boot task"; Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\register-task.ps1"""
-Name: "{group}\Open state folder"; Filename: "{commonappdata}\NecesseServerManager"
+; FINDING D fix: same reason as [Dirs] above. Hardcoded, this shortcut opened
+; an empty decoy instead of the operator's actual state directory.
+Name: "{group}\Open state folder"; Filename: "{code:StateDirConst}"
 
 [Tasks]
 Name: "runsetup"; Description: "Run the setup wizard now (opens a console window)"
@@ -91,6 +100,46 @@ end;
 function ConfigExists(): Boolean;
 begin
   Result := FileExists(StateDir() + '\config.json');
+end;
+
+// FINDING D fix: the {code:...} form of the above, for [Dirs] and [Icons].
+// Those sections are resolved by Inno's own constant expander, which knows
+// nothing about NECESSE_MANAGER_DATA; this is the only way to make them agree
+// with StateDir(). The Param argument is required by the {code:} calling
+// convention and is unused.
+function StateDirConst(Param: String): String;
+begin
+  Result := StateDir();
+end;
+
+// FINDING C fix: never block an unattended run on a dialog.
+//
+// SuppressibleMsgBox only honours its Default answer when the operator also
+// passed /SUPPRESSMSGBOXES. Measured directly with MB_OK under plain
+// /VERYSILENT: it does not return the Default and it does not return at all -
+// it shows a real modal box, invisible because /VERYSILENT hides the wizard,
+// and waits forever for a click that is never coming. Requiring a second flag
+// to avoid an unbounded hang is not an acceptable contract for anyone
+// scripting this install, so silence is decided here explicitly, the same way
+// RunSessionPreflight already decides it, and the text goes to the log.
+//
+// Install and uninstall need separate procedures because WizardSilent and
+// UninstallSilent are separate context-specific functions; neither is
+// meaningful on the other side.
+procedure NotifyInstall(const Text: String; Kind: TMsgBoxType);
+begin
+  if WizardSilent then
+    Log('Notice (silent, not shown): ' + Text)
+  else
+    MsgBox(Text, Kind, MB_OK);
+end;
+
+procedure NotifyUninstall(const Text: String; Kind: TMsgBoxType);
+begin
+  if UninstallSilent then
+    Log('Notice (silent, not shown): ' + Text)
+  else
+    MsgBox(Text, Kind, MB_OK);
 end;
 
 function ScheduledTaskExists(): Boolean;
@@ -144,17 +193,22 @@ end;
 // signal handler - so this has to run first and be able to refuse.
 //
 // FINDING A2 fix: this used to lean on SuppressibleMsgBox's Default to fail
-// closed under silence. Measured directly (a throwaway probe installer,
-// same shape as this procedure, run under plain /VERYSILENT with no
-// /SUPPRESSMSGBOXES): SuppressibleMsgBox does NOT return Default in that
-// case - it returns the affirmative button regardless, logged as IDYES. Only
-// /SUPPRESSMSGBOXES makes it honour Default, and Task 4's harness happens to
-// pass that flag, so the harness would stay green while plain /SILENT was
-// unprotected. Silence is now decided here, explicitly, with WizardSilent,
-// before any dialog exists to get the wrong answer from - an unattended run
-// always aborts on a non-zero check rather than proceeding on an outcome
-// nobody actually confirmed. The same probe technique confirmed Abort here
-// works: aborted with exit code 3, ssPostInstall and ssDone never reached.
+// closed under silence. Only /SUPPRESSMSGBOXES makes it honour Default, and
+// Task 4's harness happens to pass that flag, so the harness would stay green
+// while plain /SILENT was unprotected. Silence is now decided here,
+// explicitly, with WizardSilent, before any dialog exists to get the wrong
+// answer from - an unattended run always aborts on a non-zero check rather
+// than proceeding on an outcome nobody actually confirmed. A probe installer
+// confirmed Abort here works: aborted with exit code 3, ssPostInstall and
+// ssDone never reached.
+//
+// Correction to an earlier claim in this comment: it said SuppressibleMsgBox
+// returns the affirmative button under plain /VERYSILENT, logged as IDYES.
+// Re-measured with MB_OK - it returns nothing at all. It shows a real modal
+// box that /VERYSILENT merely makes invisible, and blocks forever. That is
+// worse than answering wrongly, and is why NotifyInstall/NotifyUninstall
+// above now suppress every remaining informational box under silence rather
+// than relying on a second command-line flag.
 //
 // FINDING I fold-in: a check that could not determine anything (including a
 // 401 - the daemon IS answering, just not to this token, which proves
@@ -214,21 +268,33 @@ begin
     Exec('schtasks.exe', '/end /tn "' + TaskName + '"', '', SW_HIDE, ewWaitUntilTerminated, Code);
 
   if RunPreflight('Stop', Output) <> 0 then
-    SuppressibleMsgBox(
+    NotifyInstall(
       'The existing daemon may still be running:' + #13#10#13#10 + Output + #13#10#13#10 +
       'If copying files fails next, stop it manually (Task Manager, end any node.exe using the daemon''s port) and re-run this installer.',
-      mbError, MB_OK, IDOK);
+      mbError);
 end;
 
 // The boot-task checkbox defaults to what the machine already has, not to a
 // blanket yes. Someone who deliberately runs the daemon by hand should not
 // acquire a boot task because they accepted a default on an upgrade screen.
 //
-// Not exercised by any automated check: Task 4's silent install passes
-// /TASKS="", which overrides whatever these defaults would have been. Only a
-// real, non-silent run exercises this page.
+// FINDING A fix, and the precedence here is the opposite of what this comment
+// used to claim. CurPageChanged(wpSelectTasks) fires under /VERYSILENT even
+// though the page is never displayed, so these WizardSelectTasks calls ran
+// last and overwrote whatever /TASKS had set. Measured on Inno 6.7.3: with
+// this procedure absent, /TASKS="" deselects both tasks exactly as documented;
+// with it present, every form of /TASKS and /MERGETASKS was silently ignored,
+// including /TASKS=nosuchtask. So a scripted install could not turn the boot
+// task off, and any silent run with a config.json present would execute
+// register-task.ps1 whether or not it was asked to.
+//
+// Bailing out under silence restores the documented behaviour: the command
+// line wins when there is no one to show a checkbox to, and these defaults
+// apply only to the page an operator can actually see.
 procedure CurPageChanged(CurPageID: Integer);
 begin
+  if WizardSilent then Exit;
+
   if CurPageID = wpSelectTasks then
   begin
     if ConfigExists() then
@@ -259,7 +325,21 @@ begin
       // Visible and waited on: the wizard is interactive and cannot be
       // scripted, so there is nothing to do but show it and let the operator
       // answer. Running it hidden would hang forever on the first prompt.
-      Exec(ExpandConstant('{app}\setup.cmd'), '', ExpandConstant('{app}'), SW_SHOW, ewWaitUntilTerminated, Code);
+      //
+      // FINDING B fix, two defects in one line. It was reached under silence
+      // (see CurPageChanged above - /TASKS could not deselect runsetup), where
+      // setup.cmd inherits no console: its first prompt reads an already-closed
+      // stdin and node dies with ERR_USE_AFTER_CLOSE, exit 1, having written no
+      // config.json. And this Exec's result was discarded, so the installer
+      // then reported a completely successful install of a daemon that had
+      // never been configured and could not boot. Offered only interactively
+      // now, and its outcome is no longer assumed.
+      if WizardSilent then
+        Log('ssPostInstall: silent install - not launching the interactive setup wizard. No config.json was created; run setup.cmd afterwards.')
+      else if (not Exec(ExpandConstant('{app}\setup.cmd'), '', ExpandConstant('{app}'), SW_SHOW, ewWaitUntilTerminated, Code)) or (Code <> 0) then
+        NotifyInstall('The daemon was installed, but the setup wizard did not complete (exit ' + IntToStr(Code) + ').' + #13#10#13#10 +
+               'No configuration was created. Run "Setup" from the Start Menu before starting the daemon.',
+               mbError);
     end;
 
     // Ordering is load-bearing. Registering the task before a config exists
@@ -273,19 +353,19 @@ begin
         if not Exec('powershell.exe',
                     '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\register-task.ps1') + '"',
                     ExpandConstant('{app}'), SW_SHOW, ewWaitUntilTerminated, Code) or (Code <> 0) then
-          SuppressibleMsgBox('The daemon was installed, but registering the boot task did not complete.' + #13#10#13#10 +
+          NotifyInstall('The daemon was installed, but registering the boot task did not complete.' + #13#10#13#10 +
                  'You can retry it from the Start Menu (Register boot task). If the daemon refuses to start, it writes the reason to:' + #13#10 +
                  StateDir() + '\boot-refusal.txt',
-                 mbError, MB_OK, IDOK);
+                 mbError);
       end
       else
         // FINDING F fix: reported whether or not "run setup" was even
         // selected - a boot task selected on its own, with no config to back
         // it, must not fail silently just because RanSetup was false.
-        SuppressibleMsgBox('The boot task was not registered because no configuration exists yet at ' +
+        NotifyInstall('The boot task was not registered because no configuration exists yet at ' +
                StateDir() + '\config.json.' + #13#10#13#10 +
                'Run "Setup" from the Start Menu when you are ready, then "Register boot task".',
-               mbInformation, MB_OK, IDOK);
+               mbInformation);
     end;
   end;
 end;
@@ -487,10 +567,10 @@ begin
       end;
 
       if StopCode = 1 then
-        SuppressibleMsgBox(
+        NotifyUninstall(
           'The existing daemon may still be running:' + #13#10#13#10 + Output + #13#10#13#10 +
           'Files may fail to delete next. If so, stop it manually and re-run the uninstaller.',
-          mbError, MB_OK, IDOK);
+          mbError);
     end;
 
     // FINDING H fix: schtasks /delete on a missing task, and
@@ -503,8 +583,8 @@ begin
     if ScheduledTaskExists() then
     begin
       if not (Exec('schtasks.exe', '/delete /tn "' + TaskName + '" /f', '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0)) then
-        SuppressibleMsgBox('Could not delete the scheduled task ' + TaskName + '. If it still exists, remove it manually from Task Scheduler.',
-          mbError, MB_OK, IDOK);
+        NotifyUninstall('Could not delete the scheduled task ' + TaskName + '. If it still exists, remove it manually from Task Scheduler.',
+          mbError);
     end;
 
     // FINDING B fix: netsh's "delete rule name=" matches DisplayName, not the
@@ -517,8 +597,8 @@ begin
                  '-NoProfile -Command "if (Get-NetFirewallRule -Name ' + TaskName + '-Inbound -ErrorAction SilentlyContinue) ' +
                  '{ Remove-NetFirewallRule -Name ' + TaskName + '-Inbound -ErrorAction Stop }"',
                  '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0)) then
-      SuppressibleMsgBox('Could not remove the firewall rule ' + TaskName + '-Inbound. If it still exists, remove it manually from Windows Defender Firewall.',
-        mbError, MB_OK, IDOK);
+      NotifyUninstall('Could not remove the firewall rule ' + TaskName + '-Inbound. If it still exists, remove it manually from Windows Defender Firewall.',
+        mbError);
   end
   else if CurUninstallStep = usPostUninstall then
   begin
@@ -526,13 +606,14 @@ begin
     // mod-library\ is the only copy of every uploaded and hand-placed jar,
     // and uninstall is the screen people click through fastest.
     //
-    // FINDING E fix: SuppressibleMsgBox instead of MsgBox, so a scripted
-    // uninstall (Task 4 runs one) does not hang forever on a dialog nothing
-    // is there to click.
-    SuppressibleMsgBox('The daemon has been removed.' + #13#10#13#10 +
+    // FINDING E fix, completed by FINDING C: SuppressibleMsgBox was not enough.
+    // This box fires on every uninstall, so it hung any /VERYSILENT uninstall
+    // that did not also pass /SUPPRESSMSGBOXES - measured, and it was the last
+    // unconditional blocker on either path. NotifyUninstall logs it instead.
+    NotifyUninstall('The daemon has been removed.' + #13#10#13#10 +
            'Your worlds are untouched. Any configuration and mod library you had are still at:' + #13#10 +
            StateDir() + #13#10#13#10 +
            'Delete that folder yourself if you want it gone - it holds the only copy of any mod jar you uploaded by hand.',
-           mbInformation, MB_OK, IDOK);
+           mbInformation);
   end;
 end;

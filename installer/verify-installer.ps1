@@ -4,12 +4,19 @@ $ErrorActionPreference = "Stop"
 # touches the state directory. Everything happens inside one scratch directory
 # under TEMP with /DIR= pointed at it.
 #
-# It passes /TASKS="" throughout, but do not read that as the safety mechanism:
-# measured on Inno 6.7.3, no form of /TASKS or /MERGETASKS changes what
-# WizardIsTaskSelected reports under /VERYSILENT. What actually keeps a
-# scheduled task and a firewall rule off this machine is installing against an
-# empty state directory, so the boot-task branch finds no config.json and never
-# reaches register-task.ps1 -- asserted explicitly below, not assumed.
+# It passes /TASKS="" throughout, which is now genuinely what keeps a scheduled
+# task and a firewall rule off this machine. That was not true of an earlier
+# revision, and the earlier note here blamed Inno for it, wrongly: /TASKS
+# behaves exactly as documented on 6.7.3. Our own CurPageChanged(wpSelectTasks)
+# fired under /VERYSILENT and its WizardSelectTasks calls ran last, overwriting
+# whatever the command line had set. Fixed in necesse-daemon.iss with an early
+# "if WizardSilent then Exit".
+#
+# Installing against an empty state directory is kept as a second line of
+# defence rather than the only one, so that even a regression in that fix
+# cannot reach register-task.ps1 from here. Both are asserted below, not
+# assumed, and the assertion that no post-install notice fires is paired with a
+# control install that makes one fire on purpose.
 #
 # Run it as: pwsh -NoProfile -File installer\verify-installer.ps1
 
@@ -27,7 +34,6 @@ $state      = Join-Path $work "state"
 $runState   = Join-Path $work "runstate"
 $dest2      = Join-Path $work "app2"
 $state2     = Join-Path $work "state2"
-$dirsAnchor = Join-Path $work "programdata-anchor\NecesseServerManager"
 $issHarness = Join-Path $repo "installer\necesse-daemon.harness.iss"
 $realState  = Join-Path $env:ProgramData "NecesseServerManager"
 # Inno derives the Add/Remove Programs key from AppId in necesse-daemon.iss.
@@ -102,13 +108,25 @@ function Get-SetupProcesses {
       ($path -and $path.StartsWith($work, [System.StringComparison]::OrdinalIgnoreCase))
     })
 }
+# Set by Wait-SetupIdle, read by the callers as a positive control. "The
+# process family went quiet" is trivially true of a matcher that matches
+# nothing, which is exactly the bug the comment above describes -- so every
+# caller also asserts that something was actually seen.
+$script:sawSetupProcess = $false
 function Wait-SetupIdle([int]$TimeoutMs) {
+  $script:sawSetupProcess = $false
+  # Phase 1: wait for the worker to appear. Looking too early and concluding
+  # "idle" is the same failure as never matching at all.
+  $appearBy = (Get-Date).AddMilliseconds(20000)
+  while ((Get-Date) -lt $appearBy) {
+    if ((Get-SetupProcesses).Count -gt 0) { $script:sawSetupProcess = $true; break }
+    Start-Sleep -Milliseconds 200
+  }
+  # Phase 2: wait for it to finish.
   $deadline = (Get-Date).AddMilliseconds($TimeoutMs)
-  # One settle pass first: the launcher can be gone a beat before its
-  # replacement appears, which would read as "already idle".
-  Start-Sleep -Milliseconds 1500
   while ((Get-Date) -lt $deadline) {
     if ((Get-SetupProcesses).Count -eq 0) { return $true }
+    $script:sawSetupProcess = $true
     Start-Sleep -Milliseconds 500
   }
   return $false
@@ -176,27 +194,23 @@ function Get-StateManifest($root) {
 
 # PrivilegesRequired=admin means every install and uninstall pops a UAC consent
 # prompt. Nothing in this session can answer that prompt, and leaving one stuck
-# on the operator's desktop is worse than not testing elevation. Separately,
-# [Dirs] creates {commonappdata}\NecesseServerManager unconditionally -- that
-# is a static Inno constant, not Pascal code, so it cannot see
-# NECESSE_MANAGER_DATA at all, and any compiled run would create the real state
-# directory regardless of the override.
+# on the operator's desktop is worse than not testing elevation, so a
+# non-elevated run compiles a throwaway copy with that one line relaxed. An
+# elevated run (CI provides one) compiles the committed file untouched.
 #
-# Both are patched only into a throwaway copy of the .iss, and only when this
-# script is not already elevated. An elevated run (CI provides one) compiles
-# the committed file untouched. Neither patch is near the two assertions this
-# script exists for: the payload, the Pascal code, the uninstaller and the
-# state-directory logic are byte-identical either way.
+# That is now the ONLY difference. This used to also rewrite the [Dirs] entry,
+# because {commonappdata}\NecesseServerManager is a static Inno constant that
+# cannot see NECESSE_MANAGER_DATA, so any compiled run created the real state
+# directory regardless of the override. That is fixed in the .iss itself
+# ({code:StateDirConst}), which means the harness no longer has to hide it --
+# and the installer honouring the override is now something this script can
+# assert instead of something it papers over.
 function Build-Setup([string]$OutDir, [string]$Version) {
   $text = Get-Content (Join-Path $repo "installer\necesse-daemon.iss") -Raw
   if (-not $isElevated) {
-    foreach ($pair in @(
-      @{ From = "PrivilegesRequired=admin"; To = "PrivilegesRequired=lowest" },
-      @{ From = 'Name: "{commonappdata}\NecesseServerManager"'; To = ('Name: "' + $dirsAnchor + '"') }
-    )) {
-      if (-not $text.Contains($pair.From)) { throw "harness patch target not found in necesse-daemon.iss: $($pair.From)" }
-      $text = $text.Replace($pair.From, $pair.To)
-    }
+    $from = "PrivilegesRequired=admin"
+    if (-not $text.Contains($from)) { throw "harness patch target not found in necesse-daemon.iss: $from" }
+    $text = $text.Replace($from, "PrivilegesRequired=lowest")
   }
   [System.IO.File]::WriteAllText($issHarness, $text, (New-Object System.Text.UTF8Encoding($false)))
   try {
@@ -224,7 +238,11 @@ try {
   $portFree = @(Get-NetTCPConnection -LocalPort 8710 -State Listen -ErrorAction SilentlyContinue).Count -eq 0
   Check "port 8710 is free before starting" $portFree ""
 
-  New-Item -ItemType Directory -Force $work, $out, $state, $runState, $state2 | Out-Null
+  # $state is deliberately NOT created here. The installer's [Dirs] entry is
+  # what should create it, at whatever NECESSE_MANAGER_DATA resolves to -- so
+  # its existence afterwards is the proof that the entry follows the override
+  # instead of hardcoding %PROGRAMDATA%.
+  New-Item -ItemType Directory -Force $work, $out, $runState, $state2 | Out-Null
 
   # Set for the whole process, not just one invocation: Start-Process inherits
   # the parent environment, so this is what keeps the installer, the
@@ -232,19 +250,19 @@ try {
   # instead of the real %PROGRAMDATA%\NecesseServerManager.
   $env:NECESSE_MANAGER_DATA = $state
 
-  # The state directory is deliberately left EMPTY for the install, and only
-  # seeded afterwards for the uninstall. Measured on this box (Inno 6.7.3): the
-  # brief's /TASKS="" does NOT deselect anything -- WizardIsTaskSelected
-  # ('boottask') stays True under /VERYSILENT no matter what is passed, including
-  # /MERGETASKS="!boottask" and even /TASKS=nosuchtask. So the boottask branch in
-  # CurStepChanged runs on every silent install, and the ONLY thing standing
-  # between this harness and a real scheduled task plus a real firewall rule is
-  # ConfigExists() returning False, which sends it down the "nothing to register"
-  # path instead of executing {app}\register-task.ps1.
+  # The state directory is deliberately left EMPTY for the install and only
+  # seeded afterwards, for the uninstall.
   #
-  # That is asserted below rather than assumed, because it is load-bearing: with
-  # a config.json here, an elevated run of this script would register the boot
-  # task on the machine doing the testing.
+  # With CurPageChanged fixed, /TASKS="" now deselects the boot task outright,
+  # so this is no longer the only thing keeping a real Scheduled Task off the
+  # machine -- it is defence in depth. It still earns its place: if that fix
+  # ever regresses, ConfigExists() returning False sends the boot-task branch
+  # to its "nothing to register" notice instead of executing
+  # {app}\register-task.ps1, so a regression costs a failed check here rather
+  # than a boot task and an open firewall port on the machine under test.
+  # An earlier revision of this script seeded config.json before the install
+  # and did execute register-task.ps1; it created nothing only because this
+  # session is not elevated.
   Info "state directory left empty for the install: $state"
 
   # ------------------------------------------------------------------- build
@@ -281,13 +299,23 @@ try {
   # ----------------------------------------------------------------- install
   Write-Host ""
   Write-Host "--- silent install ---"
-  # /TASKS="" deselects both post-install actions, so nothing interactive runs
-  # and no scheduled task or firewall rule is created on this machine.
+  # /TASKS="" deselects both post-install actions. That is now true -- it was
+  # not before necesse-daemon.iss stopped running CurPageChanged under silence,
+  # and the comment that used to sit here asserting it was the belief that made
+  # an earlier revision of this script execute register-task.ps1. It is proved
+  # below by the absence of any post-install notice, paired with a control
+  # install that deliberately selects both tasks and makes those notices fire.
+  #
+  # Not -Wait: Wait-SetupIdle needs the worker to still be alive to observe it,
+  # and its positive control is the whole point of the check that follows.
   $installLog = Join-Path $work "install.log"
-  $p = Start-Process -FilePath $setup -Wait -PassThru -ArgumentList @(
+  $p = Start-Process -FilePath $setup -PassThru -ArgumentList @(
     "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$dest", "/TASKS=""""", "/LOG=$installLog")
   $installIdle = Wait-SetupIdle 180000
   Check "install finished (no setup process left running)" $installIdle ""
+  Check "control: the install wait actually observed a setup process" $script:sawSetupProcess ""
+  $p.WaitForExit(15000) | Out-Null
+  $p.Refresh()
   Check "silent install exit 0" ($p.ExitCode -eq 0) "exit=$($p.ExitCode)"
 
   # The session preflight runs before anything is stopped or copied and aborts
@@ -297,11 +325,14 @@ try {
   $installLogText = if (Test-Path $installLog) { Get-Content $installLog -Raw } else { "" }
   Check "session preflight passed (install was not aborted)" ($installLogText -notmatch 'aborting unattended install') ""
 
-  # The three checks this harness's safety actually rests on. /TASKS="" does not
-  # deselect the boot task (see above), so prove by observation that the branch
-  # which would have created them was never taken, and that neither exists.
-  Check "boot task branch stopped at 'no configuration exists yet' (register-task.ps1 never ran)" (
-    $installLogText -match 'boot task was not registered because no configuration exists yet') ""
+  # /TASKS="" really deselected both tasks: neither post-install branch was
+  # entered, so nothing was shown and nothing was logged as suppressed. The
+  # control install near the end of this script makes both of those notices
+  # fire on purpose, so this check failing open is not possible without that
+  # control failing too.
+  Check "/TASKS=`"`" deselected both tasks (no post-install notice or message box)" (
+    ($installLogText -notmatch 'Message box') -and ($installLogText -notmatch 'Notice \(silent, not shown\)')) ""
+  Check "setup wizard was not launched" ($installLogText -notmatch 'setup wizard did not complete') ""
   Check "no NecesseDaemon scheduled task was created" (
     $null -eq (Get-ScheduledTask -TaskName 'NecesseDaemon' -ErrorAction SilentlyContinue)) ""
   Check "no NecesseDaemon-Inbound firewall rule was created" (
@@ -315,8 +346,14 @@ try {
   # part of the daemon, so finding it in {app} means the flag was lost.
   Check "preflight.ps1 not installed into {app}" (-not (Test-Path (Join-Path $dest "preflight.ps1"))) ""
   Check "Add/Remove Programs entry registered" ((Get-ArpEntries).Count -eq 1) "$((Get-ArpEntries) -join ', ')"
-  if (-not $isElevated) {
-    Check "[Dirs] state folder created (redirected for this harness)" (Test-Path $dirsAnchor) ""
+  # FINDING D: [Dirs] and the "Open state folder" shortcut both resolve through
+  # {code:StateDirConst}, so they follow NECESSE_MANAGER_DATA. The state folder
+  # appearing where the override points -- and nowhere else -- is that fix.
+  Check "[Dirs] created the state folder at NECESSE_MANAGER_DATA, not %PROGRAMDATA%" (Test-Path $state) ""
+  $lnk = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Microsoft\Windows\Start Menu\Programs\Necesse Server Manager\Open state folder.lnk'
+  if (Test-Path $lnk) {
+    $target = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk).TargetPath
+    Check "'Open state folder' shortcut points at the real state directory" ($target -eq $state) "target=$target"
   }
   Check "install wrote nothing into the state directory" ((Get-StateManifest $state).Count -eq 0) ""
 
@@ -382,12 +419,14 @@ try {
   Info "seeded state directory: $($stateBefore.Count) files under $state"
   $unins = Join-Path $dest "unins000.exe"
   Check "uninstaller present" (Test-Path $unins) ""
-  $u = Start-Process -FilePath $unins -Wait -PassThru -ArgumentList @("/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART")
-  # unins000.exe re-execs as _iuXXXX.tmp and returns immediately, so its exit
-  # code is the launcher's, not the uninstall's. Waiting for the family to go
-  # quiet is what makes the assertions below mean anything.
+  $u = Start-Process -FilePath $unins -PassThru -ArgumentList @("/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART")
+  # unins000.exe re-execs as %TEMP%\is-*-uninstall.tmp\_unins.tmp and returns
+  # immediately, so its exit code is the launcher's, not the uninstall's.
+  # Waiting for the family to go quiet is what makes the assertions below mean
+  # anything -- and the positive control is what makes the wait mean anything.
   $uninstallIdle = Wait-SetupIdle 180000
   Check "uninstall finished (no uninstaller process left running)" $uninstallIdle "launcher exit=$($u.ExitCode)"
+  Check "control: the uninstall wait actually observed an uninstaller process" $script:sawSetupProcess ""
   Check "install directory removed" (-not (Test-Path (Join-Path $dest "dist\index.js"))) ""
   Check "Add/Remove Programs entry removed" ((Get-ArpEntries).Count -eq 0) "$((Get-ArpEntries) -join ', ')"
   Check "Start Menu group removed" ((@($startMenuGroups | Where-Object { Test-Path $_ })).Count -eq 0) ""
@@ -399,22 +438,30 @@ try {
   Check "MOD LIBRARY SURVIVED" ((Get-Content (Join-Path $state "mod-library\abc\a.jar") -Raw -ErrorAction SilentlyContinue) -eq "JAR-CONTENT-THAT-MUST-SURVIVE") ""
   Check "STATE DIRECTORY BYTE-IDENTICAL ACROSS THE UNINSTALL" (($stateAfter -join "`n") -eq ($stateBefore -join "`n")) "$($stateBefore.Count) files before, $($stateAfter.Count) after"
 
-  # ------------------------------------------------------------- measurement
-  # Not a Check(): measured and reported, never asserted. The installer's
-  # informational message boxes are SuppressibleMsgBox, which only honours its
-  # Default answer under /SUPPRESSMSGBOXES -- and every run above passes that
-  # flag. That is exactly the shape of harness that certifies the one
-  # configuration where a thing works, so measure the other one.
+  # ------------------------------ measurement, and the control for /TASKS=""
+  # This used to be a pure measurement, because a plain /VERYSILENT run hung
+  # forever on a SuppressibleMsgBox and hanging was merely reported. It is a
+  # Check now: needing a second flag (/SUPPRESSMSGBOXES) to avoid an unbounded
+  # hang is not an acceptable contract, so the .iss suppresses those boxes
+  # under silence itself and completing is a requirement.
+  #
+  # It deliberately selects BOTH tasks, which is the opposite of the main run.
+  # That does three jobs at once: it reaches the informational notice the boot
+  # task branch emits (proving the main run's "no notice" check is reading a
+  # live signal, not a dead one); it reaches the setup-wizard branch (which
+  # must decline to launch an interactive wizard with no console); and it does
+  # both with no /SUPPRESSMSGBOXES, which is where the hang used to be. The
+  # state directory stays empty so the boot task branch still cannot reach
+  # register-task.ps1.
   Write-Host ""
-  Write-Host "--- measurement: silent switches WITHOUT /SUPPRESSMSGBOXES ---"
+  Write-Host "--- control + measurement: BOTH tasks selected, no /SUPPRESSMSGBOXES ---"
   $env:NECESSE_MANAGER_DATA = $state2
   $m1Log = Join-Path $work "measure-install.log"
   $m1 = Start-Process -FilePath $setup -PassThru -ArgumentList @(
-    "/VERYSILENT", "/NORESTART", "/DIR=$dest2", "/TASKS=""""", "/LOG=$m1Log")
-  $m1Done = $m1.WaitForExit(120000)
-  if ($m1Done) { $m1Done = Wait-SetupIdle 15000 }
+    "/VERYSILENT", "/NORESTART", "/DIR=$dest2", "/TASKS=runsetup,boottask", "/LOG=$m1Log")
+  $m1Done = Wait-SetupIdle 120000
+  if ($m1Done) { $m1.WaitForExit(15000) | Out-Null; $m1.Refresh() }
   if ($m1Done) {
-    $m1.Refresh()
     Write-Host "MEASUREMENT install   /VERYSILENT alone: COMPLETED, exit=$($m1.ExitCode)"
   } else {
     Write-Host "MEASUREMENT install   /VERYSILENT alone: DID NOT COMPLETE within 120s - killed"
@@ -424,22 +471,33 @@ try {
     }
     Stop-SetupProcesses
   }
+  Check "install without /SUPPRESSMSGBOXES completes instead of hanging" $m1Done ""
 
-  # The install path above reaches no message box when /TASKS="" is passed. The
-  # one that always fires is on the uninstall side (usPostUninstall, "the
-  # daemon has been removed"), so measure that too or the measurement misses
-  # the case it was added for.
+  $m1Text = if (Test-Path $m1Log) { Get-Content $m1Log -Raw } else { "" }
+  Check "control: with boottask selected, its notice IS emitted" (
+    $m1Text -match 'Notice \(silent, not shown\).*boot task was not registered') ""
+  Check "no real message box was shown even without /SUPPRESSMSGBOXES" ($m1Text -notmatch 'Message box') ""
+  Check "silent install declined to launch the interactive setup wizard" (
+    $m1Text -match 'not launching the interactive setup wizard') ""
+  Check "boottask selected but register-task.ps1 still not reached (no scheduled task)" (
+    $null -eq (Get-ScheduledTask -TaskName 'NecesseDaemon' -ErrorAction SilentlyContinue)) ""
+
+  # The box that fired on every single uninstall (usPostUninstall, "the daemon
+  # has been removed") was the last unconditional blocker on either path, so
+  # the uninstall side gets the same treatment and the same check.
   $unins2 = Join-Path $dest2 "unins000.exe"
   if (Test-Path $unins2) {
     $m2 = Start-Process -FilePath $unins2 -PassThru -ArgumentList @("/VERYSILENT","/NORESTART")
-    $m2.WaitForExit(10000) | Out-Null
-    if (Wait-SetupIdle 120000) { Write-Host "MEASUREMENT uninstall /VERYSILENT alone: COMPLETED" }
+    $m2Done = Wait-SetupIdle 120000
+    if ($m2Done) { Write-Host "MEASUREMENT uninstall /VERYSILENT alone: COMPLETED" }
     else {
       Write-Host "MEASUREMENT uninstall /VERYSILENT alone: DID NOT COMPLETE within 120s - killed"
       Stop-SetupProcesses
     }
+    Check "uninstall without /SUPPRESSMSGBOXES completes instead of hanging" $m2Done ""
+    Check "that uninstall removed its install directory" (-not (Test-Path (Join-Path $dest2 "dist\index.js"))) ""
   } else {
-    Write-Host "MEASUREMENT uninstall /VERYSILENT alone: SKIPPED (no uninstaller; the install above did not get that far)"
+    Check "uninstall without /SUPPRESSMSGBOXES completes instead of hanging" $false "no uninstaller; the install above did not get that far"
   }
 
   # -------------------------------------------------------------- real state
