@@ -265,7 +265,6 @@ be looking at a path that is not there.
 | `steamcmdExe` | Full path to `steamcmd.exe`. Leave `""` if you don't use mod installs or server updates through this app. |
 | `authToken` | The shared access token. `""` disables authentication (see Security). |
 | `steamApiKey` | A Steam Web API key, needed only for Workshop search. Everything else, including installing a mod by its Workshop id, updating mods and updating the server, works without one. Get one at https://steamcommunity.com/dev/apikey. |
-| `owners` | List of world owner names. The client can edit this remotely. |
 | `lastWorld` | The most recently started world. The client can edit this remotely. |
 | `stopTimeoutMs` | How long a graceful stop is given before the daemon reports it as timed out (it does not kill the process on timeout). Default `90000`. The client can edit this remotely. |
 | `jvmArgs` | JVM flags passed to `Server.jar`. Sensible defaults are shipped; only change these if you know why. |
@@ -287,6 +286,40 @@ not configured, and the daemon recomputes all five every time it starts:
 
 A few other keys (`modUploadMaxBytes`, `serverAppId`, `workshopAppId`)
 exist with working defaults and normally don't need to be touched at all.
+
+## Launch options
+
+Server launch options (owner, password, player slots, world border and so
+on) live outside `config.json`, in the client's launch options dialog. There
+are daemon-wide defaults, and each world can override any of them; a world
+that sets nothing just uses the defaults.
+
+A few things about how they work are easy to miss:
+
+- **Changes take effect at the world's next start, not immediately.** The
+  game reads its command line only at launch, so editing options while a
+  world is running does not affect that running world; the daemon accepts
+  the write anyway; you just have to stop and start the world for it to
+  apply.
+- **`owner` holds one name, not a list**, because the game itself only
+  supports one: it builds its launch options into a plain map, so repeated
+  `-owner` flags overwrite each other and only the last one survives. If you
+  need more than one privileged account, that has to be handled some other
+  way (in-game permissions), not through this option.
+- **Clearing an option and setting it to blank are different.** Setting an
+  option to `null` in the client removes it, so the world falls back to the
+  daemon-wide default (or the game's own default if there is no default
+  either). Setting it to an empty string keeps it set, and the game receives
+  that flag with an empty value.
+- **The game's port is not the daemon's port.** The daemon listens on
+  `8710` (or whatever `port` is set to) for the client to talk to it; the
+  `port` launch option is what players connect to. Changing the game port
+  needs its own inbound firewall rule, the same way the daemon's own port
+  does (see "Open the port" above). Changing one port does not touch the
+  other.
+- A handful of options are not offered at all: `-nogui`, `-datadir` and
+  `-world` are the daemon's own arguments and cannot be set from here, at
+  any level.
 
 ## Building from source
 
