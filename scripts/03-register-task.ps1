@@ -76,14 +76,24 @@ New-NetFirewallRule -Name $firewallRuleName -DisplayName "Necesse Daemon ($Daemo
   -ErrorAction SilentlyContinue
 
 $node = $null
-try { $node = (Get-Command node.exe -ErrorAction Stop).Source } catch {}
+# The installer ships a private Node in the install directory. Prefer it over
+# anything on PATH: the scheduled task stores whatever path is resolved here
+# LITERALLY, so a task pointed at the bundled runtime keeps working when the
+# operator upgrades, downgrades or uninstalls their own Node - which is exactly
+# the kind of unrelated action that would otherwise silently break the daemon at
+# the next boot, hours later, with nothing to connect the two events.
+$bundled = Join-Path $dir "node\node.exe"
+if (Test-Path $bundled) { $node = $bundled }
+if (-not $node) {
+  try { $node = (Get-Command node.exe -ErrorAction Stop).Source } catch {}
+}
 if (-not $node) {
   # PATH may not be visible in this session yet (see 01-install-node.ps1's
   # note on sshd not picking up a machine-PATH change until restarted).
   $fallback = "C:\Program Files\nodejs\node.exe"
   if (Test-Path $fallback) { $node = $fallback }
 }
-if (-not $node) { throw "node.exe not found on PATH or at the default winget install location." }
+if (-not $node) { throw "node.exe not found: no bundled runtime at $bundled, nothing named node.exe on PATH, and nothing at C:\Program Files\nodejs\node.exe." }
 # The task stores this path literally and SYSTEM's PATH is not the interactive
 # user's, so a relative "node" would be resolved against the wrong environment
 # at boot.
