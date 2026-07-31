@@ -8,6 +8,40 @@ $ErrorActionPreference = "Stop"
 # The daemon payload, identical to what the release zip contains. Shared by the
 # release workflow, CI and the local installer verification so there is one
 # definition of "what ships" rather than three that drift.
+
+# Guard before the Remove-Item below: this now runs unattended from two
+# GitHub Actions workflows, where -StageDir is composed from environment
+# variables ($env:RUNNER_TEMP, $PWD) rather than typed by a person at a
+# prompt. A blank value, a bare drive letter, or a path that resolves
+# somewhere unexpected must refuse loudly instead of recursively deleting
+# whatever it lands on.
+$trimmedStageDir = $StageDir.Trim()
+if ([string]::IsNullOrWhiteSpace($trimmedStageDir)) {
+  throw "stage-daemon.ps1: -StageDir is empty or whitespace; refusing to delete anything."
+}
+
+$resolvedStageDir = [System.IO.Path]::GetFullPath($trimmedStageDir)
+$driveRoot = [System.IO.Path]::GetPathRoot($resolvedStageDir)
+if ($resolvedStageDir.TrimEnd('\', '/') -eq $driveRoot.TrimEnd('\', '/')) {
+  throw "stage-daemon.ps1: -StageDir '$resolvedStageDir' is a drive root; refusing to delete it."
+}
+
+function Test-UnderRoot([string]$Candidate, [string]$Root) {
+  if (-not $Root) { return $false }
+  $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd('\', '/')
+  return $Candidate.StartsWith($rootFull + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+# The three real call sites: CI stages under $env:RUNNER_TEMP, the release
+# workflow stages under <repo>\staging, and verify-installer.ps1 stages under
+# $env:TEMP. Anything else is not a root this script was written to expect.
+$expectedRoots = @($env:TEMP, $env:TMP, $env:RUNNER_TEMP, (Join-Path $RepoRoot "staging"))
+$isExpectedRoot = @($expectedRoots | Where-Object { Test-UnderRoot $resolvedStageDir $_ }).Count -gt 0
+if (-not $isExpectedRoot) {
+  throw ("stage-daemon.ps1: -StageDir '$resolvedStageDir' is not under a recognised temp directory " +
+         "(`$env:TEMP, `$env:TMP, `$env:RUNNER_TEMP) or under '$RepoRoot\staging'; refusing to delete it.")
+}
+
 if (Test-Path $StageDir) { Remove-Item -Recurse -Force $StageDir }
 New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
 

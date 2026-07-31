@@ -26,17 +26,30 @@ jobs:
       - name: Stage the daemon zip
         shell: pwsh
         run: |
-          $stage = "staging/necesse-daemon"
-          New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          Copy-Item -Recurse daemon/dist "$stage/dist"
-          Copy-Item daemon/package.json,daemon/package-lock.json $stage
-          Copy-Item daemon/setup.cmd,daemon/start-daemon.cmd,daemon/migrate.cmd $stage
-          Copy-Item scripts/03-register-task.ps1 "$stage/register-task.ps1"
-          Copy-Item config.example.json $stage
-          Push-Location $stage
-          npm ci --omit=dev
-          Pop-Location
-          Compress-Archive -Path "$stage/*" -DestinationPath "necesse-daemon-${{ github.ref_name }}.zip"
+          pwsh -File installer/stage-daemon.ps1 -RepoRoot $PWD -StageDir "$PWD\staging\necesse-daemon"
+          # Zipped BEFORE the Node runtime is added: the zip deliberately ships
+          # without one and uses whatever Node the operator already has, which
+          # is why the .cmd shims fall back to PATH. Staging once and zipping
+          # first is what lets both artifacts come from one staging run.
+          Compress-Archive -Path "staging/necesse-daemon/*" -DestinationPath "necesse-daemon-${{ github.ref_name }}.zip"
+
+      - name: Build the daemon installer
+        shell: pwsh
+        run: |
+          # resolve-iscc.ps1 is shared with installer/verify-installer.ps1 and
+          # the CI workflow, so there is one definition of "where is ISCC.exe"
+          # rather than a hardcoded path here that only matches choco's layout
+          # and not winget's.
+          . installer/resolve-iscc.ps1
+          try { $iscc = Resolve-Iscc } catch {
+            choco install innosetup -y --no-progress
+            $iscc = Resolve-Iscc
+          }
+          pwsh -File installer/fetch-node.ps1 -StageDir "$PWD\staging\necesse-daemon" -RepoRoot $PWD
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          & $iscc "/DStageDir=$PWD\staging\necesse-daemon" "/DAppVersion=$version" "/DOutDir=$PWD" installer/necesse-daemon.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit $LASTEXITCODE" }
+          Get-ChildItem "necesse-daemon-*-setup.exe"
 
       - name: Build client
         working-directory: client
@@ -60,10 +73,16 @@ jobs:
           # spaces replaced by dots.
           files: |
             necesse-daemon-${{ github.ref_name }}.zip
+            necesse-daemon-*-setup.exe
             client/src-tauri/target/release/bundle/nsis/*.exe
             client/src-tauri/target/release/bundle/msi/*.msi
           body: |
-            The installer is unsigned, so Windows SmartScreen will warn on first run.
-            Choose "More info" then "Run anyway".
+            Two ways to install the daemon: run necesse-daemon-*-setup.exe, which
+            brings its own Node and can register the boot task for you, or unzip
+            necesse-daemon-*.zip and run setup.cmd yourself (that one needs Node 22+).
 
-            Upgrading from an install that kept its state beside dist/: run migrate.cmd once.
+            Both installers are unsigned, so Windows SmartScreen will warn on first
+            run. Choose "More info" then "Run anyway".
+
+            Upgrading from an install that kept its state beside dist/: run
+            migrate.cmd in that old folder once, before installing.

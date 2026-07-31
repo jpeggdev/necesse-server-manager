@@ -51,23 +51,10 @@ function Info($m) { Write-Host "      $m" }
 
 # ---------------------------------------------------------------- environment
 
-# ISCC's location depends on how it got there: winget puts it under the
-# per-user LOCALAPPDATA, choco (what CI uses) puts it under Program Files
-# (x86). A single hardcoded path breaks on whichever machine used the other
-# installer, so probe and name everywhere looked at if none exist.
-function Resolve-Iscc {
-  $candidates = New-Object System.Collections.Generic.List[string]
-  foreach ($base in @(${env:ProgramFiles(x86)}, $env:ProgramFiles, $env:LOCALAPPDATA)) {
-    if ($base) {
-      $candidates.Add((Join-Path $base "Inno Setup 6\ISCC.exe"))
-      $candidates.Add((Join-Path $base "Programs\Inno Setup 6\ISCC.exe"))
-    }
-  }
-  $onPath = Get-Command ISCC.exe -ErrorAction SilentlyContinue
-  if ($onPath) { $candidates.Add($onPath.Source) }
-  foreach ($c in $candidates) { if (Test-Path $c) { return $c } }
-  throw "ISCC.exe not found. Looked in:`n  $($candidates -join "`n  ")"
-}
+# Resolve-Iscc now lives in resolve-iscc.ps1, shared with the CI and release
+# workflows' installer-build steps, so there is one definition instead of
+# three that can drift.
+. (Join-Path $PSScriptRoot "resolve-iscc.ps1")
 $iscc = Resolve-Iscc
 
 $isElevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)

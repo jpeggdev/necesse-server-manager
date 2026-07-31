@@ -37,6 +37,28 @@ jobs:
         run: npm run build
         working-directory: daemon
 
+      # Compiling the installer against a real stage is what catches a missing
+      # file, a wrong path or a bad define. A syntax-only check would not: the
+      # commonest breakage here is [Files] pointing at something that is no
+      # longer produced, and that only shows up when the payload is real.
+      - name: Build the daemon installer
+        shell: pwsh
+        run: |
+          # resolve-iscc.ps1 is shared with installer/verify-installer.ps1 and
+          # the release workflow, so there is one definition of "where is
+          # ISCC.exe" rather than a hardcoded path here that only matches
+          # choco's layout and not winget's.
+          . installer/resolve-iscc.ps1
+          try { $iscc = Resolve-Iscc } catch {
+            choco install innosetup -y --no-progress
+            $iscc = Resolve-Iscc
+          }
+          pwsh -File installer/stage-daemon.ps1 -RepoRoot $PWD -StageDir "$env:RUNNER_TEMP\stage"
+          pwsh -File installer/fetch-node.ps1 -StageDir "$env:RUNNER_TEMP\stage" -RepoRoot $PWD
+          & $iscc "/DStageDir=$env:RUNNER_TEMP\stage" "/DAppVersion=0.0.0-ci" "/DOutDir=$env:RUNNER_TEMP\out" installer/necesse-daemon.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit $LASTEXITCODE" }
+          Get-ChildItem "$env:RUNNER_TEMP\out"
+
       - name: Test daemon
         run: npx vitest run
         working-directory: daemon
