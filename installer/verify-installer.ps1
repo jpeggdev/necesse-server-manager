@@ -2,9 +2,14 @@ $ErrorActionPreference = "Stop"
 # End-to-end proof of the two claims this installer lives or dies by: the
 # bundled Node runtime is what actually runs the daemon, and uninstalling never
 # touches the state directory. Everything happens inside one scratch directory
-# under TEMP, with /DIR= pointed at it and /TASKS="" throughout, so no
-# scheduled task and no firewall rule is ever created on the machine running
-# this.
+# under TEMP with /DIR= pointed at it.
+#
+# It passes /TASKS="" throughout, but do not read that as the safety mechanism:
+# measured on Inno 6.7.3, no form of /TASKS or /MERGETASKS changes what
+# WizardIsTaskSelected reports under /VERYSILENT. What actually keeps a
+# scheduled task and a firewall rule off this machine is installing against an
+# empty state directory, so the boot-task branch finds no config.json and never
+# reaches register-task.ps1 -- asserted explicitly below, not assumed.
 #
 # Run it as: pwsh -NoProfile -File installer\verify-installer.ps1
 
@@ -28,6 +33,7 @@ $realState  = Join-Path $env:ProgramData "NecesseServerManager"
 # Inno derives the Add/Remove Programs key from AppId in necesse-daemon.iss.
 $arpKey     = "{7B1B3E2A-9C4D-4F2E-A6D1-2E5C9F0B4A17}_is1"
 $version    = "0.0.0-test"
+$startedAt  = Get-Date
 
 $passes = 0
 $fails  = 0
@@ -81,13 +87,18 @@ function Show-RealState($label) {
 # the whole point of this script vacuous. Wait for the family to go quiet.
 function Get-SetupProcesses {
   @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-      # Matched narrowly on purpose: Stop-SetupProcesses kills whatever this
-      # returns, and a bare "setup" or "unins000" would eventually match some
-      # unrelated installer the operator is running.
+      # The worker keeps the ".tmp" suffix in its process name
+      # (necesse-daemon-v0.0.0-test-setup.tmp, _unins.tmp), so a pattern
+      # anchored on the .exe name matches nothing and every wait below returns
+      # instantly -- which is how a run reported a hung uninstaller as
+      # COMPLETED and left two message boxes sitting on the desktop.
+      # Still matched narrowly, because Stop-SetupProcesses kills whatever this
+      # returns and a bare "setup" would eventually hit some unrelated
+      # installer the operator is running.
       $path = $null
       try { $path = $_.Path } catch { }
-      ($_.ProcessName -like 'necesse-daemon-v*-setup') -or
-      (($_.ProcessName -like '_iu*') -and $path -and $path.StartsWith($env:TEMP, [System.StringComparison]::OrdinalIgnoreCase)) -or
+      ($_.ProcessName -like 'necesse-daemon-v*setup*') -or
+      ((($_.ProcessName -like '_unins*') -or ($_.ProcessName -like '_iu*')) -and $path -and $path.StartsWith($env:TEMP, [System.StringComparison]::OrdinalIgnoreCase)) -or
       ($path -and $path.StartsWith($work, [System.StringComparison]::OrdinalIgnoreCase))
     })
 }
@@ -130,7 +141,21 @@ function Invoke-Cleanup {
   foreach ($k in Get-ArpEntries) { Remove-Item -Recurse -Force $k -ErrorAction SilentlyContinue }
   foreach ($g in $startMenuGroups) { Remove-Item -Recurse -Force $g -ErrorAction SilentlyContinue }
   Remove-Item -Force $issHarness -ErrorAction SilentlyContinue
-  Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
+  # A killed measurement run strands the is-XXXX.tmp directory Inno unpacked
+  # itself into. Scoped to ones created after this script started, so it can
+  # never delete the working directory of an installer someone else is running.
+  foreach ($d in @(Get-ChildItem $env:TEMP -Filter 'is-*.tmp' -Directory -ErrorAction SilentlyContinue | Where-Object { $_.CreationTime -ge $startedAt })) {
+    Remove-Item -Recurse -Force $d.FullName -ErrorAction SilentlyContinue
+  }
+  # Windows keeps the compiled setup.exe's image mapped for a few seconds after
+  # the process that ran it is gone, so one delete attempt loses the race and
+  # strands the scratch directory -- which is how the previous attempt littered
+  # TEMP. Retry, and say so out loud if it still will not go.
+  for ($i = 0; $i -lt 10 -and (Test-Path $work); $i++) {
+    Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
+    if (Test-Path $work) { Start-Sleep -Seconds 2 }
+  }
+  if (Test-Path $work) { Write-Host "WARNING: could not delete scratch directory $work - remove it by hand" }
   Remove-Item Env:\NECESSE_MANAGER_DATA -ErrorAction SilentlyContinue
 }
 
@@ -191,6 +216,9 @@ try {
   Write-Host ""
 
   Check "no stale Add/Remove Programs entry for this AppId" ((Get-ArpEntries).Count -eq 0) "$((Get-ArpEntries) -join ', ')"
+  # A setup or uninstall process left over from an earlier run would make every
+  # Wait-SetupIdle below time out against someone else's window.
+  Check "no leftover setup/uninstall process from an earlier run" ((Get-SetupProcesses).Count -eq 0) "$((Get-SetupProcesses | ForEach-Object { $_.ProcessName }) -join ', ')"
   # The installer's preflight probes this port; something else holding it would
   # make the gate's verdict mean something other than what this script assumes.
   $portFree = @(Get-NetTCPConnection -LocalPort 8710 -State Listen -ErrorAction SilentlyContinue).Count -eq 0
@@ -204,14 +232,20 @@ try {
   # instead of the real %PROGRAMDATA%\NecesseServerManager.
   $env:NECESSE_MANAGER_DATA = $state
 
-  # Seeded before the install, so the install, the preflight gate and the
-  # uninstall are all exercised against a state directory that has something in
-  # it worth losing.
-  Set-Content -Path (Join-Path $state "config.json") -Value '{"port":8710,"authToken":""}' -NoNewline
-  New-Item -ItemType Directory -Force (Join-Path $state "mod-library\abc") | Out-Null
-  Set-Content -Path (Join-Path $state "mod-library\abc\a.jar") -Value "JAR-CONTENT-THAT-MUST-SURVIVE" -NoNewline
-  $stateBefore = Get-StateManifest $state
-  Info "seeded state directory: $($stateBefore.Count) files under $state"
+  # The state directory is deliberately left EMPTY for the install, and only
+  # seeded afterwards for the uninstall. Measured on this box (Inno 6.7.3): the
+  # brief's /TASKS="" does NOT deselect anything -- WizardIsTaskSelected
+  # ('boottask') stays True under /VERYSILENT no matter what is passed, including
+  # /MERGETASKS="!boottask" and even /TASKS=nosuchtask. So the boottask branch in
+  # CurStepChanged runs on every silent install, and the ONLY thing standing
+  # between this harness and a real scheduled task plus a real firewall rule is
+  # ConfigExists() returning False, which sends it down the "nothing to register"
+  # path instead of executing {app}\register-task.ps1.
+  #
+  # That is asserted below rather than assumed, because it is load-bearing: with
+  # a config.json here, an elevated run of this script would register the boot
+  # task on the machine doing the testing.
+  Info "state directory left empty for the install: $state"
 
   # ------------------------------------------------------------------- build
   Write-Host ""
@@ -262,7 +296,16 @@ try {
   # abort here would be the gate working, not a harness bug.
   $installLogText = if (Test-Path $installLog) { Get-Content $installLog -Raw } else { "" }
   Check "session preflight passed (install was not aborted)" ($installLogText -notmatch 'aborting unattended install') ""
-  @(Get-Content $installLog -ErrorAction SilentlyContinue | Where-Object { $_ -match 'RunSessionPreflight|Setup version|Setup aborted' } | Select-Object -First 3) | ForEach-Object { Info $_ }
+
+  # The three checks this harness's safety actually rests on. /TASKS="" does not
+  # deselect the boot task (see above), so prove by observation that the branch
+  # which would have created them was never taken, and that neither exists.
+  Check "boot task branch stopped at 'no configuration exists yet' (register-task.ps1 never ran)" (
+    $installLogText -match 'boot task was not registered because no configuration exists yet') ""
+  Check "no NecesseDaemon scheduled task was created" (
+    $null -eq (Get-ScheduledTask -TaskName 'NecesseDaemon' -ErrorAction SilentlyContinue)) ""
+  Check "no NecesseDaemon-Inbound firewall rule was created" (
+    $null -eq (Get-NetFirewallRule -Name 'NecesseDaemon-Inbound' -ErrorAction SilentlyContinue)) ""
 
   foreach ($f in @("dist\index.js","dist\setup-cli.js","dist\migrate-cli.js","node\node.exe","start-daemon.cmd","setup.cmd","migrate.cmd","register-task.ps1","config.example.json","package.json")) {
     Check "installed: $f" (Test-Path (Join-Path $dest $f)) ""
@@ -275,7 +318,7 @@ try {
   if (-not $isElevated) {
     Check "[Dirs] state folder created (redirected for this harness)" (Test-Path $dirsAnchor) ""
   }
-  Check "install did not modify the state directory" (((Get-StateManifest $state) -join "`n") -eq ($stateBefore -join "`n")) ""
+  Check "install wrote nothing into the state directory" ((Get-StateManifest $state).Count -eq 0) ""
 
   # ------------------------------------------- the bundled runtime is genuine
   Write-Host ""
@@ -318,14 +361,25 @@ try {
   } finally { Move-Item $hidden $bundled }
   Check "bundled node restored after the substitution proof" (Test-Path $bundled) ""
 
-  # The launcher test writes boot-refusal.txt; it must land in the throwaway
-  # run state, not in the state directory whose contents are under assertion.
-  Check "launcher refusal landed in the scratch run state" (Test-Path (Join-Path $runState "boot-refusal.txt")) ""
-  Check "state directory still unmodified after the launcher test" (((Get-StateManifest $state) -join "`n") -eq ($stateBefore -join "`n")) ""
+  # A missing config.json is a plain thrown Error out of loadConfig, not one of
+  # the resolveBootConfig refusals that write boot-refusal.txt -- so the thing
+  # to assert is that it refused instead of starting: nothing is left listening.
+  Check "launcher refused rather than started (nothing listening on 8710)" (
+    @(Get-NetTCPConnection -LocalPort 8710 -State Listen -ErrorAction SilentlyContinue).Count -eq 0) ""
+  Check "launcher test wrote nothing into the state directory" ((Get-StateManifest $state).Count -eq 0) ""
 
   # --------------------------------------------------------------- uninstall
   Write-Host ""
   Write-Host "--- silent uninstall ---"
+  # Seeded now, between install and uninstall: this is the content whose
+  # survival is the point of the script. It also gives the uninstaller's own
+  # preflight a config.json to read, so that side exercises the "port probed,
+  # connection refused" branch rather than the "no config" one.
+  Set-Content -Path (Join-Path $state "config.json") -Value '{"port":8710,"authToken":""}' -NoNewline
+  New-Item -ItemType Directory -Force (Join-Path $state "mod-library\abc") | Out-Null
+  Set-Content -Path (Join-Path $state "mod-library\abc\a.jar") -Value "JAR-CONTENT-THAT-MUST-SURVIVE" -NoNewline
+  $stateBefore = Get-StateManifest $state
+  Info "seeded state directory: $($stateBefore.Count) files under $state"
   $unins = Join-Path $dest "unins000.exe"
   Check "uninstaller present" (Test-Path $unins) ""
   $u = Start-Process -FilePath $unins -Wait -PassThru -ArgumentList @("/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART")
@@ -343,7 +397,7 @@ try {
   $stateAfter = Get-StateManifest $state
   Check "STATE DIRECTORY SURVIVED" (Test-Path (Join-Path $state "config.json")) ""
   Check "MOD LIBRARY SURVIVED" ((Get-Content (Join-Path $state "mod-library\abc\a.jar") -Raw -ErrorAction SilentlyContinue) -eq "JAR-CONTENT-THAT-MUST-SURVIVE") ""
-  Check "STATE DIRECTORY BYTE-IDENTICAL ACROSS INSTALL AND UNINSTALL" (($stateAfter -join "`n") -eq ($stateBefore -join "`n")) "$($stateBefore.Count) files before, $($stateAfter.Count) after"
+  Check "STATE DIRECTORY BYTE-IDENTICAL ACROSS THE UNINSTALL" (($stateAfter -join "`n") -eq ($stateBefore -join "`n")) "$($stateBefore.Count) files before, $($stateAfter.Count) after"
 
   # ------------------------------------------------------------- measurement
   # Not a Check(): measured and reported, never asserted. The installer's
