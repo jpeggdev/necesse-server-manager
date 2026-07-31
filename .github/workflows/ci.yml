@@ -54,7 +54,9 @@ jobs:
             $iscc = Resolve-Iscc
           }
           pwsh -File installer/stage-daemon.ps1 -RepoRoot $PWD -StageDir "$env:RUNNER_TEMP\stage"
+          if ($LASTEXITCODE -ne 0) { throw "stage-daemon.ps1 failed with exit $LASTEXITCODE" }
           pwsh -File installer/fetch-node.ps1 -StageDir "$env:RUNNER_TEMP\stage" -RepoRoot $PWD
+          if ($LASTEXITCODE -ne 0) { throw "fetch-node.ps1 failed with exit $LASTEXITCODE" }
           & $iscc "/DStageDir=$env:RUNNER_TEMP\stage" "/DAppVersion=0.0.0-ci" "/DOutDir=$env:RUNNER_TEMP\out" installer/necesse-daemon.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit $LASTEXITCODE" }
           Get-ChildItem "$env:RUNNER_TEMP\out"

@@ -27,6 +27,7 @@ jobs:
         shell: pwsh
         run: |
           pwsh -File installer/stage-daemon.ps1 -RepoRoot $PWD -StageDir "$PWD\staging\necesse-daemon"
+          if ($LASTEXITCODE -ne 0) { throw "stage-daemon.ps1 failed with exit $LASTEXITCODE" }
           # Zipped BEFORE the Node runtime is added: the zip deliberately ships
           # without one and uses whatever Node the operator already has, which
           # is why the .cmd shims fall back to PATH. Staging once and zipping
@@ -46,6 +47,7 @@ jobs:
             $iscc = Resolve-Iscc
           }
           pwsh -File installer/fetch-node.ps1 -StageDir "$PWD\staging\necesse-daemon" -RepoRoot $PWD
+          if ($LASTEXITCODE -ne 0) { throw "fetch-node.ps1 failed with exit $LASTEXITCODE" }
           $version = "${{ github.ref_name }}".TrimStart("v")
           & $iscc "/DStageDir=$PWD\staging\necesse-daemon" "/DAppVersion=$version" "/DOutDir=$PWD" installer/necesse-daemon.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit $LASTEXITCODE" }
