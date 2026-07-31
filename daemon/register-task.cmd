@@ -24,7 +24,7 @@ if /i "%~1"=="--elevated" (
   echo or this account cannot elevate. Nothing has been changed.
   echo.
   pause
-  goto :eof
+  endlocal & exit /b 1
 )
 
 echo Administrator rights are required to register the boot task.
@@ -33,8 +33,23 @@ rem Passed through the environment rather than interpolated into the -Command
 rem string: %~dp0 can contain spaces, and $env:NSM_SELF needs no quoting of its
 rem own once PowerShell has it.
 set "NSM_SELF=%~dp0register-task.cmd"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath $env:NSM_SELF -ArgumentList '--elevated' -Verb RunAs"
-goto :eof
+rem Start-Process -Verb RunAs throws when the UAC prompt is declined (or the
+rem account cannot elevate at all), and without -ErrorAction Stop that lands as
+rem a non-terminating error PowerShell swallows -- powershell.exe still exits 0,
+rem so a declined prompt used to look identical to a successful relaunch: this
+rem process just went to :eof with nothing on screen and nothing changed. The
+rem explicit catch + exit 1 makes that failure observable to cmd.exe.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath $env:NSM_SELF -ArgumentList '--elevated' -Verb RunAs -ErrorAction Stop } catch { Write-Host $_.Exception.Message; exit 1 }"
+if not errorlevel 1 goto :eof
+
+echo.
+echo The elevation prompt was declined, or this account cannot elevate.
+echo Nothing has been changed - the boot task was not registered.
+echo Re-run register-task.cmd and accept the prompt, or run it from an
+echo already-elevated Command Prompt.
+echo.
+pause
+endlocal & exit /b 1
 
 :run
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0register-task.ps1"
