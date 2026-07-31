@@ -1,0 +1,338 @@
+<meta charset="utf-8">
+<title>Daemon Installer - Design</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1a1a1a; --muted: #5f6b7a; --line: #e2e6ea;
+    --accent: #2f6f4f; --accent-bg: #eef6f1; --warn: #8a5a00; --warn-bg: #fdf6e7;
+    --code-bg: #f5f7f9; --card: #fafbfc;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171a; --fg: #e6e9ec; --muted: #9aa6b2; --line: #2b3138;
+      --accent: #6fd39b; --accent-bg: #17281f; --warn: #e0b25c; --warn-bg: #2a2113;
+      --code-bg: #1c2126; --card: #181c20;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.65 -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 62rem; margin: 0 auto; padding: 2.5rem 1.25rem 6rem; }
+  header h1 { margin: 0 0 .3rem; font-size: 1.9rem; letter-spacing: -.02em; }
+  header .sub { color: var(--muted); margin: 0 0 2rem; }
+  h2 {
+    font-size: 1.25rem; margin: 2.75rem 0 .85rem;
+    padding-bottom: .4rem; border-bottom: 2px solid var(--line);
+  }
+  h3 { font-size: 1.02rem; margin: 1.7rem 0 .5rem; }
+  p, li { color: var(--fg); }
+  code, pre { font-family: "Cascadia Code", Consolas, monospace; font-size: .875em; }
+  code { background: var(--code-bg); padding: .12em .35em; border-radius: 3px; }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--line); border-radius: 6px;
+    padding: .85rem 1rem; overflow-x: auto; line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; }
+  .tablewrap { overflow-x: auto; margin: 1rem 0; }
+  table { border-collapse: collapse; width: 100%; font-size: .92rem; }
+  th, td { text-align: left; padding: .5rem .7rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 600; color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+  td code { white-space: nowrap; }
+  .note, .warn {
+    border-left: 3px solid var(--accent); background: var(--accent-bg);
+    padding: .8rem 1rem; border-radius: 0 5px 5px 0; margin: 1.1rem 0;
+  }
+  .warn { border-left-color: var(--warn); background: var(--warn-bg); }
+  .note p:first-child, .warn p:first-child { margin-top: 0; }
+  .note p:last-child, .warn p:last-child { margin-bottom: 0; }
+  .toc { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 1rem 1.25rem; }
+  .toc ol { margin: .3rem 0 0; padding-left: 1.3rem; columns: 2; column-gap: 2rem; }
+  .toc a { color: inherit; }
+  @media (max-width: 40rem) { .toc ol { columns: 1; } }
+</style>
+
+<div class="wrap">
+<header>
+  <h1>Daemon Installer</h1>
+  <p class="sub">Design document &middot; 2026-07-30 &middot; A Windows installer for the daemon, alongside the existing release zip</p>
+</header>
+
+<div class="toc">
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#goal">Goal &amp; scope</a></li>
+    <li><a href="#decisions">Decisions taken</a></li>
+    <li><a href="#layout">Layout and the bundled runtime</a></li>
+    <li><a href="#shims">Shim and task changes</a></li>
+    <li><a href="#sequence">Install sequence</a></li>
+    <li><a href="#upgrade">Upgrade</a></li>
+    <li><a href="#uninstall">Uninstall</a></li>
+    <li><a href="#build">Build and release</a></li>
+    <li><a href="#verify">Verification</a></li>
+    <li><a href="#scope-out">Out of scope</a></li>
+  </ol>
+</div>
+
+<h2 id="goal">1. Goal &amp; scope</h2>
+
+<p>The daemon currently ships as a zip. Installing it means: unzip somewhere,
+install Node 22+ yourself, run <code>setup.cmd</code>, then run
+<code>register-task.ps1</code> as Administrator, in that order, having read the
+README closely enough to know that the order matters. That is a reasonable
+amount to ask of someone who already runs a dedicated server, and too much to
+ask of everyone else.</p>
+
+<p>This adds a second artifact: a single elevated installer that places the
+files, brings its own Node, runs the existing setup wizard, registers the
+scheduled task and firewall rule, and provides a real uninstaller. The zip
+stays exactly as it is.</p>
+
+<h2 id="decisions">2. Decisions taken</h2>
+
+<div class="tablewrap">
+<table>
+  <tr><th>Question</th><th>Decision</th><th>Consequence</th></tr>
+  <tr>
+    <td>Node runtime</td><td>Bundle a private one</td>
+    <td>Roughly 35MB larger. The install is genuinely self-contained and cannot
+    be broken by the user upgrading or removing their own Node. Creates an
+    ongoing duty to update it.</td>
+  </tr>
+  <tr>
+    <td>Configuration</td><td>Launch the existing wizard in a console</td>
+    <td>No second implementation of path probing, validation or token
+    generation. Costs a visible console window mid-install.</td>
+  </tr>
+  <tr>
+    <td>Uninstall and the state directory</td><td>Never touch it</td>
+    <td>Uninstall cannot destroy a mod library. Leaves a directory behind that
+    a user has to remove deliberately.</td>
+  </tr>
+  <tr>
+    <td>Toolchain</td><td>Inno Setup</td>
+    <td>Readable script for a repo meant to be forked. Needs ISCC on the
+    runner, installed via choco if absent.</td>
+  </tr>
+</table>
+</div>
+
+<h2 id="layout">3. Layout and the bundled runtime</h2>
+
+<p>Default install directory <code>C:\Program Files\Necesse Server Manager</code>
+(<code>{autopf}</code>). Administrator is required regardless, for the scheduled
+task and the firewall rule.</p>
+
+<p>Contents are the release zip's, plus the runtime:</p>
+
+<pre><code>C:\Program Files\Necesse Server Manager\
+  dist\
+  node_modules\
+  node\node.exe          &lt;- pinned, private
+  package.json
+  setup.cmd
+  start-daemon.cmd
+  migrate.cmd
+  register-task.ps1
+  config.example.json</code></pre>
+
+<div class="note">
+<p><strong>Program Files being read-only for the daemon is fine, and worth
+stating because it would otherwise look like a problem.</strong> Nothing writes
+into the install directory at runtime: <code>config.json</code>,
+<code>mods.json</code>, <code>mod-sets.json</code>, <code>mod-library.json</code>
+and <code>mod-library\</code> all live in
+<code>%PROGRAMDATA%\NecesseServerManager</code>, and
+<code>boot-refusal.txt</code> is written there too. The install directory holds
+only code.</p>
+</div>
+
+<h2 id="shims">4. Shim and task changes</h2>
+
+<p>The three <code>.cmd</code> shims currently invoke a bare <code>node</code>,
+which resolves against <code>PATH</code>. They gain a preference for the bundled
+runtime with a fallback:</p>
+
+<pre><code>set "NODE=node"
+if exist "%~dp0node\node.exe" set "NODE=%~dp0node\node.exe"
+"%NODE%" dist\index.js %*</code></pre>
+
+<p>One set of shims then works in both artifacts: the installer, where the
+bundled runtime exists, and the zip, where it does not and the system Node is
+used exactly as today. Shipping two different sets of shims was rejected -
+they would drift.</p>
+
+<p><code>register-task.ps1</code> gets the same preference, ahead of its
+existing <code>Get-Command node.exe</code> lookup and its
+<code>C:\Program Files\nodejs\node.exe</code> fallback. This matters more than
+it looks: the scheduled task stores the resolved path <em>literally</em>, so
+after this change the task points at a runtime that ships with the daemon and
+cannot be changed out from under it.</p>
+
+<h2 id="sequence">5. Install sequence</h2>
+
+<p>All in one elevated run:</p>
+
+<ol>
+  <li><strong>Quiesce any previous install.</strong> If the scheduled task
+  exists and is Running, stop it and wait for it to exit and for the port to
+  clear - the same two waits <code>register-task.ps1</code> already performs,
+  for the same reasons. Overwriting <code>node\node.exe</code> while it is
+  running fails outright, and a surviving process keeps the port.</li>
+  <li><strong>Copy files.</strong></li>
+  <li><strong>Run the setup wizard</strong> in a visible console window and wait
+  for it to exit - <em>unless</em> <code>config.json</code> already exists in the
+  state directory, in which case skip it entirely.</li>
+  <li><strong>Register the scheduled task and firewall rule</strong>, by running
+  the shipped <code>register-task.ps1</code> - but only if
+  <code>config.json</code> now exists, and only if that task was selected.</li>
+  <li><strong>Report honestly.</strong> If the wizard was cancelled or failed,
+  say so and point at the Start Menu shortcut, rather than finishing with a
+  success page over a half-configured install.</li>
+</ol>
+
+<div class="warn">
+<p><strong>Step 4's ordering is load-bearing, not stylistic.</strong> Registering
+the task before a config exists would start a daemon that refuses to boot
+(there is nothing to read), and <code>register-task.ps1</code> ends with a
+health check against <code>/api/status</code> - so it would report failure on a
+registration that had in fact worked perfectly. The condition on
+<code>config.json</code> existing is what keeps the installer from producing
+that outcome.</p>
+</div>
+
+<p>Both post-install actions are Inno <code>[Tasks]</code>, selected by default.
+That is a product-neutral choice with a useful side effect: <code>/TASKS=""</code>
+disables both, which is what makes a silent install testable (&sect;9).</p>
+
+<p>Start Menu shortcuts: Setup, Start daemon, Register boot task, Open state
+folder.</p>
+
+<h2 id="upgrade">6. Upgrade</h2>
+
+<p>Inno recognises an existing install by <code>AppId</code>. An upgrade stops
+the task (step 1 above), replaces the files, and <strong>skips the wizard</strong>
+because <code>config.json</code> exists. An upgrade must never make someone
+re-answer five path questions, and must never regenerate their access token -
+that would silently lock out every client already configured with the old one.</p>
+
+<p>Task handling on an upgrade follows what was already there, rather than what
+the checkbox happens to say. If the scheduled task <em>existed</em> before the
+upgrade it is re-registered afterwards, so it points at the new files, and left
+running. If it did not exist, the upgrade does not create one: someone who
+deliberately runs the daemon by hand should not find a boot task appearing
+because they accepted a default on an upgrade screen. The default state of that
+checkbox on an upgrade is therefore read from the machine, not assumed.</p>
+
+<div class="note">
+<p><strong>Upgrading from a zip install is documented, not automated.</strong>
+Someone whose state still sits beside <code>dist\</code> in an old unzipped
+folder should run <code>migrate.cmd</code> <em>in that folder</em> before
+installing. The installer creates a fresh directory in Program Files and
+cannot know where they unzipped the old one, so its legacy-state check will
+find nothing and the install will look empty rather than broken. A README
+sentence is the honest fix; a filesystem search for old installs is not.</p>
+</div>
+
+<h2 id="uninstall">7. Uninstall</h2>
+
+<ol>
+  <li>Stop the scheduled task and wait for it to exit.</li>
+  <li>Unregister the task.</li>
+  <li>Remove the firewall rule.</li>
+  <li>Delete the install directory.</li>
+  <li><strong>Leave <code>%PROGRAMDATA%\NecesseServerManager</code> entirely
+  alone</strong>, and print its path so the user can remove it deliberately.</li>
+</ol>
+
+<div class="warn">
+<p><strong>No "also remove my data" checkbox.</strong> It was considered and
+rejected. <code>mod-library\</code> is the only copy of every uploaded and
+hand-placed jar, and uninstall is precisely the screen people click through
+without reading. This is the same stance the rest of the project already takes:
+<code>migrate.cmd</code> copies rather than moves, and the daemon refuses to
+boot rather than relocating state on its own.</p>
+</div>
+
+<h2 id="build">8. Build and release</h2>
+
+<div class="tablewrap">
+<table>
+  <tr><th>Path</th><th>Purpose</th></tr>
+  <tr><td><code>installer/necesse-daemon.iss</code></td><td>The Inno Setup script</td></tr>
+  <tr><td><code>installer/node-version.txt</code></td><td>The pinned Node version, as a single source of truth. The release workflow reads it to fetch the runtime, so bumping Node is one line in one file</td></tr>
+</table>
+</div>
+
+<p>The release workflow, after staging the daemon zip contents, downloads
+<code>node-v&lt;pinned&gt;-win-x64.zip</code> from nodejs.org,
+<strong>verifies its SHA-256 against the published
+<code>SHASUMS256.txt</code></strong>, extracts <code>node.exe</code> to
+<code>node\node.exe</code> in the staging directory, then runs ISCC to produce
+<code>necesse-daemon-vX.Y.Z-setup.exe</code> and attaches it to the release.</p>
+
+<div class="warn">
+<p><strong>The checksum step is not ceremony.</strong> This is a binary being
+shipped to other people under the maintainer's name. An unverified download is
+the one place a supply-chain problem could enter this project, and the
+verification costs three lines.</p>
+</div>
+
+<p>Release artifacts become four: the daemon zip (unchanged, still requires a
+system Node), the daemon installer, and the two client installers. The daemon
+installer is unsigned, like the client's, so SmartScreen will warn - documented
+in the README beside the existing client warning rather than discovered.</p>
+
+<h2 id="verify">9. Verification</h2>
+
+<h3>CI</h3>
+
+<p><code>ci.yml</code> compiles the <code>.iss</code> with ISCC on every push.
+That alone catches a missing file, a wrong path or a syntax error - the failure
+modes that would otherwise appear for the first time at tag time, which is the
+worst moment to discover them.</p>
+
+<h3>Local, before release</h3>
+
+<p>A script that proves the artifact rather than inspecting it:</p>
+
+<ol>
+  <li>Install with <code>/VERYSILENT /DIR=&lt;scratch&gt; /TASKS=""</code>.</li>
+  <li>Assert the files landed, including <code>node\node.exe</code>.</li>
+  <li>Run the installed <code>start-daemon.cmd</code> against a scratch
+  <code>NECESSE_MANAGER_DATA</code>, <strong>with <code>node</code> removed from
+  <code>PATH</code></strong>, and assert the daemon starts and answers. Removing
+  it from PATH is the whole point: without that, a bundled runtime that was
+  never actually used would pass identically.</li>
+  <li>Run the uninstaller with <code>/VERYSILENT</code> and assert the install
+  directory is gone <strong>and the state directory and its contents are
+  intact</strong>.</li>
+</ol>
+
+<p>Step 4 is the assertion that matters most in this document. It is the claim
+that would otherwise only ever be tested by a user losing their mod library.</p>
+
+<h3>Not testable silently</h3>
+
+<p>The interactive wizard launch and the real scheduled-task registration cannot
+be exercised by a silent install. Those get a real install on the live server,
+the same way the state-directory migration was verified, and whatever is not
+run gets recorded as not run.</p>
+
+<h2 id="scope-out">10. Out of scope</h2>
+
+<ul>
+  <li><strong>Auto-detecting an old zip install to migrate from.</strong>
+  Documented instead (&sect;6).</li>
+  <li><strong>Installer pages replacing the setup wizard.</strong> Rejected in
+  favour of one implementation of config writing.</li>
+  <li><strong>Code signing.</strong> Unsigned, SmartScreen documented.</li>
+  <li><strong>Changes to <code>02-deploy.ps1</code>.</strong> It remains the
+  maintainer's fast dev loop and is unaffected.</li>
+  <li><strong>Bundling Node into the zip.</strong> The zip stays as it is; the
+  shim fallback covers it.</li>
+  <li><strong>A client installer change of any kind.</strong> The client already
+  ships an NSIS installer and an MSI from Tauri.</li>
+</ul>
+
+</div>
