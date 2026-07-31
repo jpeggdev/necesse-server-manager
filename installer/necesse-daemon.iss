@@ -514,6 +514,22 @@ begin
     // drive returns False rather than throwing.
     '  if ($env:PROGRAMDATA) { $stateDir = [System.IO.Path]::Combine($env:PROGRAMDATA, ' + Q + 'NecesseServerManager' + Q + ') }' + #13#10 +
     '}' + #13#10 +
+    // FINDING J fix (mirrors preflight.ps1's Test-StateRootReachable): Test-Path
+    // on a config.json under an unreachable drive/share returns False, same as a
+    // genuinely absent config.json, so this used to fall straight into the
+    // NO_CONFIG/exit 0 branch below and wave a possibly-live daemon through on
+    // uninstall too. GetPathRoot on a relative path returns '' (unreachable, by
+    // design - a relative value here is meaningless); on a UNC path it returns
+    // the share, which Test-Path resolves normally. A merely-missing directory
+    // under a reachable root stays NO_CONFIG, since [Dirs] creates it only after
+    // ssInstall on the daemon''s own machine, not on the uninstalling one.
+    'if ($stateDir) {' + #13#10 +
+    '  $stateRoot = [System.IO.Path]::GetPathRoot($stateDir)' + #13#10 +
+    '  if ((-not $stateRoot) -or (-not (Test-Path $stateRoot))) {' + #13#10 +
+    '    Write-Output "CANNOT_DETERMINE: state directory root is not reachable ($stateDir)."' + #13#10 +
+    '    exit 3' + #13#10 +
+    '  }' + #13#10 +
+    '}' + #13#10 +
     '$port = 8710' + #13#10 +
     '$authToken = $null' + #13#10 +
     '$sawConfig = $false' + #13#10 +

@@ -330,6 +330,33 @@ function Build-Setup([string]$OutDir, [string]$Version, [string]$StageDir = $sta
   return (Join-Path $OutDir "necesse-daemon-v$Version-setup.exe")
 }
 
+# FINDING J substitution helper: writes a copy of the real preflight.ps1 with
+# the root-reachability gate (Test-StateRootReachable and its call in Check
+# mode) stripped back out, to a scratch path. Used only to prove the new
+# unreachable-root case below can fail -- run directly rather than through a
+# second ISCC compile + silent install, because [Dirs] creating the state
+# directory at a genuinely unreachable path (the whole point of the case) is
+# also a real Inno file-system failure, and there is no way to reproduce the
+# gate's fail-open without making that path genuinely unreachable. Direct
+# invocation exercises the identical script the compiled installer extracts
+# and runs via RunPreflight, with none of that risk.
+function New-UnfixedPreflightCopy([string]$Dest) {
+  $preflightText = Get-Content (Join-Path $repo "installer\preflight.ps1") -Raw
+  $gateBlock = @'
+  if (-not (Test-StateRootReachable $stateDir)) {
+    # An unreachable root gives Test-Path the exact same False as a genuinely
+    # absent config.json further down. Left alone, that reads as NO_CONFIG and
+    # waves a possibly-live daemon through -- the fail-open this whole function
+    # exists to prevent. The directory itself being absent is fine (see
+    # Test-StateRootReachable); it is the root that must answer.
+    Write-Output "CANNOT_DETERMINE: state directory root is not reachable ($stateDir)."
+    exit 3
+  }
+'@
+  if (-not $preflightText.Contains($gateBlock)) { throw "substitution patch target not found in preflight.ps1 (gate block)" }
+  Set-Content -Path $Dest -Value ($preflightText.Replace($gateBlock, "")) -NoNewline
+}
+
 # =============================================================================
 try {
   Show-RealState "before"
@@ -798,6 +825,51 @@ try {
   Check "substitution-proof install uninstalled cleanly" ((Get-ArpEntries).Count -eq 0) "$((Get-ArpEntries) -join ', ')"
   Check "no NecesseDaemon scheduled task exists after the preflight cases" (
     $null -eq (Get-ScheduledTask -TaskName 'NecesseDaemon' -ErrorAction SilentlyContinue)) ""
+
+  # ------------------------------------------ FINDING J: unreachable state root
+  # None of the cases above ever point NECESSE_MANAGER_DATA at anything but a
+  # path under $work, which sits on this machine's own system drive and is
+  # therefore always reachable -- so a regression that dropped
+  # Test-StateRootReachable back out of preflight.ps1 would go completely
+  # unnoticed by every other check in this script. Q: is not a mapped drive on
+  # this machine; if that ever stops being true this case needs a different
+  # unreachable path, not a workaround, which is why it is a Check and not an
+  # assumption.
+  Write-Host ""
+  Write-Host "--- unreachable state root must CANNOT_DETERMINE, not fail open ---"
+  if (Test-Path "Q:\") {
+    Check "control: Q: is unmapped on this machine (prerequisite for this case)" $false "Q:\ exists here; this case needs a genuinely unreachable drive"
+  } else {
+    $unreachableRoot = "Q:\nowhere\state"
+    $destJ = Join-Path $work "app-j"
+    $jLog  = Join-Path $work "unreachable-root.log"
+    $env:NECESSE_MANAGER_DATA = $unreachableRoot
+    $j = Start-Process -FilePath $setupP -PassThru -ArgumentList @(
+      "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$destJ", "/TASKS=""""", "/LOG=$jLog")
+    $jDone = Wait-SetupIdle 60000
+    if ($jDone) { $j.WaitForExit(15000) | Out-Null } else { Stop-SetupProcesses }
+    Check "install against an unreachable state root finished instead of hanging" $jDone ""
+    $jText = if (Test-Path $jLog) { Get-Content $jLog -Raw } else { "" }
+    Check "FINDING J: an unreachable state root ABORTS the unattended install (CheckCode=3, not fail-open)" (
+      ($jText -match 'aborting unattended install') -and ($jText -match 'CheckCode=3')) ""
+    Check "FINDING J: it aborted BEFORE copying anything - {app}\dist was never created" (
+      -not (Test-Path (Join-Path $destJ "dist"))) ""
+    Remove-Item Env:\NECESSE_MANAGER_DATA -ErrorAction SilentlyContinue
+
+    # Substitution proof: same unreachable root, run directly against a copy of
+    # preflight.ps1 with the gate stripped back out (the pre-fix shape) -- MUST
+    # come back NO_CONFIG/exit 0, or the case above was never testing the gate.
+    # Run standalone rather than through a second compiled installer: see
+    # New-UnfixedPreflightCopy's comment for why.
+    $unfixedPreflight = Join-Path $work "preflight-unfixed.ps1"
+    New-UnfixedPreflightCopy $unfixedPreflight
+    $env:NECESSE_MANAGER_DATA = $unreachableRoot
+    $subOut = & powershell -NoProfile -ExecutionPolicy Bypass -File $unfixedPreflight -Mode Check 2>&1 | Out-String
+    $subExit = $LASTEXITCODE
+    Remove-Item Env:\NECESSE_MANAGER_DATA -ErrorAction SilentlyContinue
+    Check "substitution proof: without the gate, an unreachable root reports NO_CONFIG/exit 0 (fails open)" (
+      ($subExit -eq 0) -and ($subOut -match 'NO_CONFIG')) "exit=$subExit output=$($subOut.Trim())"
+  }
 
   # -------------------------------------------------------------- real state
   Write-Host ""

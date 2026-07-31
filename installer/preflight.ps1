@@ -38,6 +38,24 @@ if (-not $stateDir -or $stateDir.Trim().Length -eq 0) {
 $configFile = $null
 if ($stateDir) { $configFile = [System.IO.Path]::Combine($stateDir, "config.json") }
 
+# Test-Path on $configFile cannot tell "no config.json here" apart from "this
+# path is not reachable at all" -- both return False, and a mapped drive the
+# daemon's own session can see is routinely invisible to an elevated or SYSTEM
+# token, which is exactly the arrangement the README recommends for
+# NECESSE_MANAGER_DATA. Gate on the drive/share ROOT instead: [Dirs] in
+# necesse-daemon.iss creates the state directory itself after ssInstall, so a
+# missing directory on a reachable root is a legitimate fresh-install state and
+# must stay NO_CONFIG, not CANNOT_DETERMINE.
+#
+# GetPathRoot on a relative path returns '' -- treated as unreachable, since a
+# relative value in this variable cannot mean anything here. On a UNC path it
+# returns the share (\\server\share), which Test-Path resolves correctly.
+function Test-StateRootReachable([string]$Dir) {
+  $root = [System.IO.Path]::GetPathRoot($Dir)
+  if (-not $root) { return $false }
+  return Test-Path $root
+}
+
 function Read-DaemonConfig {
   if (-not $configFile) { return $null }
   if (-not (Test-Path $configFile)) { return $null }
@@ -61,6 +79,15 @@ if ($Mode -eq 'Check') {
     # where to look", not "we looked and found nothing". Reporting it as safe
     # would be the exact fail-open this check exists to prevent.
     Write-Output "CANNOT_DETERMINE: neither NECESSE_MANAGER_DATA nor PROGRAMDATA is set."
+    exit 3
+  }
+  if (-not (Test-StateRootReachable $stateDir)) {
+    # An unreachable root gives Test-Path the exact same False as a genuinely
+    # absent config.json further down. Left alone, that reads as NO_CONFIG and
+    # waves a possibly-live daemon through -- the fail-open this whole function
+    # exists to prevent. The directory itself being absent is fine (see
+    # Test-StateRootReachable); it is the root that must answer.
+    Write-Output "CANNOT_DETERMINE: state directory root is not reachable ($stateDir)."
     exit 3
   }
   $cfg = Read-DaemonConfig
