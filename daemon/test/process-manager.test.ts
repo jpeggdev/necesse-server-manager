@@ -5,7 +5,7 @@ import { DEFAULT_CONFIG } from "../src/config.js";
 import type { DaemonConfig } from "../src/types.js";
 import * as F from "./fixtures/log-fixtures.js";
 
-const cfg: DaemonConfig = { ...DEFAULT_CONFIG, owners: ["Jeff", "Eli"], stopTimeoutMs: 50 };
+const cfg: DaemonConfig = { ...DEFAULT_CONFIG, stopTimeoutMs: 50 };
 
 let spawn: ReturnType<typeof makeFakeSpawn>;
 let pm: ProcessManager;

@@ -98,7 +98,6 @@ export interface DaemonConfig {
    */
   modUploadMaxBytes: number;
   jvmArgs: string[];
-  owners: string[];
   lastWorld: string | null;
   serverAppId: number;
   workshopAppId: number;

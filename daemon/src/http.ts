@@ -7,6 +7,7 @@ import { listWorlds, worldExists, worldZipPath, isValidWorldName } from "./world
 import { openWorldSettings, WorldSettingsError } from "./world-settings.js";
 import type { WorldSettingsFile } from "./world-settings-file.js";
 import { knownField, checkChange, isSameValue } from "./world-settings-schema.js";
+import type { LaunchOptions } from "./launch-options.js";
 import type { ModInstaller } from "./mod-installer.js";
 import type { ModLibrary } from "./mod-library.js";
 import type { ModSets } from "./mod-sets.js";
@@ -46,6 +47,13 @@ export interface Deps {
   workshop: SteamWorkshop;
   /** Non-fatal configuration problems, published so a client can surface them. */
   configWarnings: string[];
+  /**
+   * Optional here because the routes that read and write launch options are
+   * Task 5's job. index.ts already constructs and passes it - the migration
+   * has to run before the server starts - so this only declares the type;
+   * nothing in this file reads it yet.
+   */
+  launchOptions?: LaunchOptions;
 }
 
 const WORKSHOP_ID = /^\d+$/;
@@ -77,7 +85,7 @@ export const TASK_EXPIRY_MS = 60 * 60 * 1000;
  * Those are different powers, and the token is a shared secret on a plain-HTTP
  * LAN rather than a per-user credential.
  */
-const ALLOWED_CONFIG_KEYS = new Set<keyof DaemonConfig>(["owners", "lastWorld", "stopTimeoutMs"]);
+const ALLOWED_CONFIG_KEYS = new Set<keyof DaemonConfig>(["lastWorld", "stopTimeoutMs"]);
 
 /**
  * The config as it may leave the daemon. Secrets are dropped entirely rather
@@ -1105,12 +1113,6 @@ export function buildServer(deps: Deps): FastifyInstance {
     for (const key of Object.keys(patch)) {
       if (!ALLOWED_CONFIG_KEYS.has(key as keyof DaemonConfig)) {
         return reply.code(400).send({ ok: false, error: `Field "${key}" cannot be changed remotely.` });
-      }
-    }
-    if ("owners" in patch) {
-      const owners = patch.owners;
-      if (!Array.isArray(owners) || !owners.every((o) => typeof o === "string" && o.trim().length > 0)) {
-        return reply.code(400).send({ ok: false, error: "owners must be an array of non-empty strings." });
       }
     }
     if ("stopTimeoutMs" in patch) {

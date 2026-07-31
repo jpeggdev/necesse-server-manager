@@ -2,8 +2,10 @@ import { spawn as nodeSpawn } from "node:child_process";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { resolveBootConfig } from "./config.js";
+import { readStoredConfig, resolveBootConfig } from "./config.js";
 import { buildServer } from "./http.js";
+import { LaunchOptions } from "./launch-options.js";
+import { migrateOwners } from "./launch-options-migration.js";
 import { ModInstaller } from "./mod-installer.js";
 import { ModLibrary } from "./mod-library.js";
 import { ModRegistry } from "./mod-registry.js";
@@ -11,7 +13,7 @@ import { ModSets } from "./mod-sets.js";
 import { migrateModSets } from "./mod-migration.js";
 import { resolveLegacyState } from "./migrate-state.js";
 import { ProcessManager, type SpawnFn } from "./process-manager.js";
-import { BOOT_REFUSAL_FILE, stateDir } from "./state-dir.js";
+import { BOOT_REFUSAL_FILE, stateDir, stateFile } from "./state-dir.js";
 import { SteamCmd } from "./steamcmd.js";
 import { SteamWorkshop } from "./steam-workshop.js";
 import { findOrphanServer, listJavaProcesses } from "./orphan.js";
@@ -88,6 +90,14 @@ const installer = new ModInstaller(cfg, registry, steam, library);
 // daemon that reaches the network directly.
 const workshop = new SteamWorkshop(cfg, (url, init) => fetch(url, init));
 
+const launchOptions = new LaunchOptions(stateFile("launch-options.json"));
+
+// `stored` is the raw parsed config.json, so a retired key is still visible
+// here even though DaemonConfig no longer declares it.
+const stored = await readStoredConfig(configFile);
+const ownerMigration = await migrateOwners((stored as { owners?: unknown }).owners, launchOptions);
+if (ownerMigration !== null) console.warn(ownerMigration);
+
 const orphan = await findOrphanServer(listJavaProcesses, cfg.serverJar);
 if (orphan) {
   pm.markUnmanaged(orphan.pid);
@@ -126,6 +136,7 @@ const app = buildServer({
   sets,
   steam,
   workshop,
+  launchOptions,
 });
 await app.listen({ host: "0.0.0.0", port: cfg.port });
 // A refusal log that outlived the problem it described would send the next
