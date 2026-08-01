@@ -17,6 +17,7 @@ const entry = {
   name: "Safe Haven QOL",
   jar: "SafeHavenQOL-1.2.0-2.6.jar",
   lastUpdated: "2026-07-26T04:24:00.000Z",
+  workshopUpdatedAt: null,
 };
 
 describe("ModRegistry", () => {
@@ -59,5 +60,16 @@ describe("ModRegistry", () => {
     // EISDIR (not ENOENT), which must NOT be swallowed into [].
     await mkdir(file);
     await expect(reg.load()).rejects.toThrow(file);
+  });
+
+  it("reads a registry written before workshopUpdatedAt existed as unknown, not undefined", async () => {
+    await writeFile(
+      file,
+      JSON.stringify([{ id: "123", name: "Old", jar: "Old.jar", lastUpdated: "2026-07-01T00:00:00.000Z" }]),
+      "utf8",
+    );
+    const entries = await new ModRegistry(file).load();
+    expect(entries[0].workshopUpdatedAt).toBeNull();
+    expect("workshopUpdatedAt" in entries[0]).toBe(true);
   });
 });

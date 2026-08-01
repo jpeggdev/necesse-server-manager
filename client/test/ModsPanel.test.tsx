@@ -6,7 +6,7 @@ import type { ModLibraryEntry, WorldModsResponse } from "../src/types";
 
 const mods = {
   managed: [
-    { id: "3731244177", name: "Safe Haven QOL", jar: "SafeHavenQOL-1.2.0-2.6.jar", lastUpdated: "2026-07-26T00:00:00.000Z" },
+    { id: "3731244177", name: "Safe Haven QOL", jar: "SafeHavenQOL-1.2.0-2.6.jar", lastUpdated: "2026-07-26T00:00:00.000Z", workshopUpdatedAt: null },
   ],
   untracked: [{ jar: "MysteryMod.jar" }],
 };
@@ -540,6 +540,7 @@ describe("ModsPanel a managed mod the library lost", () => {
     name: "Ghost Mod",
     jar: "Ghost.jar",
     lastUpdated: "2026-07-26T00:00:00.000Z",
+    workshopUpdatedAt: null,
   };
 
   it("still lists it, and still lets it be removed", async () => {

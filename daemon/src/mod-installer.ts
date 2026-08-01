@@ -123,7 +123,7 @@ export class ModInstaller {
       replacedJar = previous.jar;
     }
 
-    await this.registry.upsert({ id, name, jar, lastUpdated: new Date().toISOString() });
+    await this.registry.upsert({ id, name, jar, lastUpdated: new Date().toISOString(), workshopUpdatedAt: null });
     return { id, name, jar, ok: true, replacedJar };
   }
 

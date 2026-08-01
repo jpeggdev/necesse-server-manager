@@ -762,7 +762,7 @@ describe("POST /api/mods name resolution", () => {
  */
 describe("GET /api/mods/updates", () => {
   const installed = async (id: string, name: string, lastUpdated: string): Promise<void> =>
-    registry.upsert({ id, name, jar: `${name}.jar`, lastUpdated });
+    registry.upsert({ id, name, jar: `${name}.jar`, lastUpdated, workshopUpdatedAt: null });
 
   it("flags a mod whose workshop entry changed after it was installed", async () => {
     await installed("111", "Old Local Name", "2026-01-01T00:00:00.000Z");
