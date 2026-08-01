@@ -30,7 +30,12 @@ export class ModInstaller {
     return { managed, untracked };
   }
 
-  async install(id: string, name: string, onLine: (line: string) => void): Promise<InstallResult> {
+  async install(
+    id: string,
+    name: string,
+    onLine: (line: string) => void,
+    workshopUpdatedAt: string | null,
+  ): Promise<InstallResult> {
     const dir = this.steam.workshopItemDir(id);
     // Clear the item's download dir first so a stale jar from a previous version
     // (under a different filename) can never be mistaken for this download's
@@ -123,7 +128,7 @@ export class ModInstaller {
       replacedJar = previous.jar;
     }
 
-    await this.registry.upsert({ id, name, jar, lastUpdated: new Date().toISOString(), workshopUpdatedAt: null });
+    await this.registry.upsert({ id, name, jar, lastUpdated: new Date().toISOString(), workshopUpdatedAt });
     return { id, name, jar, ok: true, replacedJar };
   }
 
@@ -135,7 +140,10 @@ export class ModInstaller {
     for (const mod of managed) {
       onLine(`--- Updating ${mod.name} (${mod.id})`);
       try {
-        results.push(await this.install(mod.id, mod.name, onLine));
+        // Unconditional reinstall, so nothing here yet knows the current
+        // workshop timestamp to gate on or to record - recorded as unknown
+        // until that lookup and the gate itself are wired in.
+        results.push(await this.install(mod.id, mod.name, onLine, null));
       } catch (e) {
         results.push({ id: mod.id, name: mod.name, jar: null, ok: false, error: (e as Error).message });
       }

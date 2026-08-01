@@ -71,25 +71,26 @@ function build(jars: Record<string, string | null>): ModInstaller {
 describe("install", () => {
   it("copies the downloaded jar into the mods dir and records it", async () => {
     const inst = build({ "3731244177": "SafeHavenQOL-1.2.0-2.6.jar" });
-    const r = await inst.install("3731244177", "Safe Haven QOL", () => {});
+    const r = await inst.install("3731244177", "Safe Haven QOL", () => {}, null);
     expect(r.ok).toBe(true);
     expect(await readdir(modsDir)).toEqual(["SafeHavenQOL-1.2.0-2.6.jar"]);
     expect((await registry.get("3731244177"))?.jar).toBe("SafeHavenQOL-1.2.0-2.6.jar");
   });
 
   it("deletes the previously recorded jar when the version filename changes", async () => {
-    await build({ "3731244177": "SafeHavenQOL-1.2.0-2.6.jar" }).install("3731244177", "Safe Haven QOL", () => {});
+    await build({ "3731244177": "SafeHavenQOL-1.2.0-2.6.jar" }).install("3731244177", "Safe Haven QOL", () => {}, null);
     const r = await build({ "3731244177": "SafeHavenQOL-1.2.0-2.7.jar" }).install(
       "3731244177",
       "Safe Haven QOL",
       () => {},
+      null,
     );
     expect(await readdir(modsDir)).toEqual(["SafeHavenQOL-1.2.0-2.7.jar"]);
     expect(r.replacedJar).toBe("SafeHavenQOL-1.2.0-2.6.jar");
   });
 
   it("fails with steamcmd's output and writes nothing when the download fails", async () => {
-    const r = await build({ "999": null }).install("999", "Nope", () => {});
+    const r = await build({ "999": null }).install("999", "Nope", () => {}, null);
     expect(r.ok).toBe(false);
     expect(r.error).toContain("ERROR! Download item 999 failed");
     expect(await readdir(modsDir)).toEqual([]);
@@ -103,7 +104,7 @@ describe("install", () => {
       exitCode: 0,
       output: "Success.",
     });
-    const r = await inst.install("555", "Ghost", () => {});
+    const r = await inst.install("555", "Ghost", () => {}, null);
     expect(r.ok).toBe(false);
     expect(r.error).toMatch(/no \.jar/i);
   });
@@ -111,7 +112,7 @@ describe("install", () => {
   it("adopts an untracked jar when its filename matches the download", async () => {
     await writeFile(join(modsDir, "AutoTorch-1.0.jar"), "old");
     const inst = build({ "3754847143": "AutoTorch-1.0.jar" });
-    await inst.install("3754847143", "AutoTorch", () => {});
+    await inst.install("3754847143", "AutoTorch", () => {}, null);
     const list = await inst.list();
     expect(list.untracked).toEqual([]);
     expect(list.managed.map((m) => m.id)).toEqual(["3754847143"]);
@@ -129,7 +130,7 @@ describe("install", () => {
       await writeFile(dir, "not a directory");
       return { ok: true, exitCode: 0, output: "Success." };
     });
-    const r = await inst.install("777", "Weird", () => {});
+    const r = await inst.install("777", "Weird", () => {}, null);
     expect(r.ok).toBe(false);
     expect(r.error).toMatch(/cannot read/i);
     expect(r.error).not.toMatch(/no \.jar/i);
@@ -140,7 +141,7 @@ describe("install", () => {
     const dir = steam.workshopItemDir("42");
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, "OldName-1.0.jar"), "stale");
-    const r = await inst.install("42", "Thing", () => {});
+    const r = await inst.install("42", "Thing", () => {}, null);
     expect(r.ok).toBe(true);
     expect(r.jar).toBe("NewName-2.0.jar");
     expect(await readdir(dir)).toEqual(["NewName-2.0.jar"]);
@@ -150,7 +151,7 @@ describe("install", () => {
   it("tolerates a first-time install with no pre-existing workshop item directory", async () => {
     const inst = build({ "42": "Something-1.0.jar" });
     await expect(readdir(steam.workshopItemDir("42"))).rejects.toThrow();
-    const r = await inst.install("42", "Thing", () => {});
+    const r = await inst.install("42", "Thing", () => {}, null);
     expect(r.ok).toBe(true);
   });
 
@@ -163,12 +164,28 @@ describe("install", () => {
       await writeFile(join(dir, "Two.jar"), "b");
       return { ok: true, exitCode: 0, output: "Success." };
     });
-    const r = await inst.install("88", "Weird", () => {});
+    const r = await inst.install("88", "Weird", () => {}, null);
     expect(r.ok).toBe(false);
     expect(r.error).toContain("One.jar");
     expect(r.error).toContain("Two.jar");
     expect(await readdir(modsDir)).toEqual([]);
     expect(await registry.get("88")).toBeUndefined();
+  });
+
+  it("records the workshop timestamp it installed from, not this machine's clock", async () => {
+    const inst = build({ "3731244177": "SafeHavenQOL-1.2.0-2.6.jar" });
+    await inst.install("3731244177", "Safe Haven QOL", () => {}, "2026-07-20T10:00:00.000Z");
+    const entry = await registry.get("3731244177");
+    expect(entry?.workshopUpdatedAt).toBe("2026-07-20T10:00:00.000Z");
+    // lastUpdated stays this machine's clock: it answers "when did this daemon
+    // install it", which is what the UI reports and is not what the gate uses.
+    expect(entry?.lastUpdated).not.toBe("2026-07-20T10:00:00.000Z");
+  });
+
+  it("records unknown when Steam could not say when the entry changed", async () => {
+    const inst = build({ "3731244177": "SafeHavenQOL-1.2.0-2.6.jar" });
+    await inst.install("3731244177", "Safe Haven QOL", () => {}, null);
+    expect((await registry.get("3731244177"))?.workshopUpdatedAt).toBeNull();
   });
 });
 
@@ -183,7 +200,7 @@ describe("install", () => {
 describe("installing writes the library, so reconcile does not undo it", () => {
   it("files the download as that mod's current jar", async () => {
     const inst = build({ "3731244177": "SafeHavenQOL-1.2.0-2.6.jar" });
-    await inst.install("3731244177", "Safe Haven QOL", () => {});
+    await inst.install("3731244177", "Safe Haven QOL", () => {}, null);
 
     const entry = await library.get(modIdFor("3731244177"));
     expect(entry?.jar).toBe("SafeHavenQOL-1.2.0-2.6.jar");
@@ -195,7 +212,7 @@ describe("installing writes the library, so reconcile does not undo it", () => {
 
   it("survives the reconcile that follows: the NEW jar is what the world starts with", async () => {
     // The state after migration: v2.6 installed, and a world set to load it.
-    await build({ "3731244177": "SafeHavenQOL-1.2.0-2.6.jar" }).install("3731244177", "Safe Haven QOL", () => {});
+    await build({ "3731244177": "SafeHavenQOL-1.2.0-2.6.jar" }).install("3731244177", "Safe Haven QOL", () => {}, null);
     const modId = modIdFor("3731244177");
 
     // Update All lands v2.7.
@@ -217,7 +234,7 @@ describe("installing writes the library, so reconcile does not undo it", () => {
     const inst = build({ "42": "Thing-1.jar" });
     vi.spyOn(library, "add").mockRejectedValue(new Error("disk full"));
 
-    const r = await inst.install("42", "Thing", () => {});
+    const r = await inst.install("42", "Thing", () => {}, null);
 
     expect(r.ok).toBe(false);
     expect(r.error).toContain("disk full");
@@ -230,7 +247,7 @@ describe("installing writes the library, so reconcile does not undo it", () => {
 describe("list", () => {
   it("separates managed entries from untracked jars", async () => {
     const inst = build({ "3754847143": "AutoTorch-1.0.jar" });
-    await inst.install("3754847143", "AutoTorch", () => {});
+    await inst.install("3754847143", "AutoTorch", () => {}, null);
     await writeFile(join(modsDir, "MysteryMod.jar"), "x");
     await writeFile(join(modsDir, "modlist.data"), "not a jar");
     const list = await inst.list();
@@ -240,7 +257,7 @@ describe("list", () => {
 
   it("reports a managed mod whose jar has vanished from disk as untracked-free but still managed", async () => {
     const inst = build({ "3754847143": "AutoTorch-1.0.jar" });
-    await inst.install("3754847143", "AutoTorch", () => {});
+    await inst.install("3754847143", "AutoTorch", () => {}, null);
     const list = await inst.list();
     expect(list.managed).toHaveLength(1);
   });
@@ -262,8 +279,8 @@ describe("list", () => {
 
 describe("updateAll", () => {
   it("continues past a failing mod and reports each result", async () => {
-    await build({ "1": "A-1.jar" }).install("1", "A", () => {});
-    await build({ "2": "B-1.jar" }).install("2", "B", () => {});
+    await build({ "1": "A-1.jar" }).install("1", "A", () => {}, null);
+    await build({ "2": "B-1.jar" }).install("2", "B", () => {}, null);
     const inst = build({ "1": null, "2": "B-2.jar" });
     const results = await inst.updateAll(() => {});
     expect(results).toHaveLength(2);
@@ -283,7 +300,7 @@ describe("updateAll", () => {
 describe("remove", () => {
   it("deletes the jar and the registry entry", async () => {
     const inst = build({ "3754847143": "AutoTorch-1.0.jar" });
-    await inst.install("3754847143", "AutoTorch", () => {});
+    await inst.install("3754847143", "AutoTorch", () => {}, null);
     await inst.remove("3754847143");
     expect(await readdir(modsDir)).toEqual([]);
     expect(await registry.get("3754847143")).toBeUndefined();

@@ -807,7 +807,21 @@ export function buildServer(deps: Deps): FastifyInstance {
     }
     if (!requireNoActiveTask(reply, "install a mod")) return reply;
     const taskId = runTask("mod-install", async (onLine) => {
-      const r = await installer.install(id, resolved, onLine);
+      // Fetched so a fresh install is gated correctly from its first run. A
+      // Steam failure here is not fatal: the install proceeds recording
+      // "unknown", and the next Update All reinstalls it once and records the
+      // real value. Losing the install over a badge-grade lookup would be a
+      // worse trade. Done inside the task body, after the interlock above has
+      // already reserved this task's slot synchronously, so this await cannot
+      // reopen the race that name resolution above was hoisted to avoid.
+      let workshopUpdatedAt: string | null = null;
+      try {
+        const [item] = await workshop.getDetails([id]);
+        workshopUpdatedAt = item?.updatedAt ?? null;
+      } catch {
+        workshopUpdatedAt = null;
+      }
+      const r = await installer.install(id, resolved, onLine, workshopUpdatedAt);
       return { ok: r.ok, error: r.error };
     });
     return { ok: true, taskId };

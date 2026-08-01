@@ -654,13 +654,17 @@ describe("POST /api/mods name resolution", () => {
     expect(install.mock.calls[0][1]).toBe("Safe Haven QOL");
   });
 
-  it("prefers an explicitly supplied name and never asks Steam", async () => {
+  // Steam is still asked once, for the workshop timestamp the install records -
+  // that lookup is unconditional. What "never asks Steam" actually pins is
+  // narrower: the NAME itself never comes from that call when one was supplied.
+  it("prefers an explicitly supplied name over Steam's title", async () => {
     const install = vi.spyOn(installer, "install").mockResolvedValue({
       id: "3731244177",
       name: "My Own Name",
       jar: "x.jar",
       ok: true,
     });
+    net.respondJson(detailsBody([{ id: "3731244177", title: "Steam's Title" }]));
     const res = await app.inject({
       method: "POST",
       url: "/api/mods",
@@ -669,7 +673,6 @@ describe("POST /api/mods name resolution", () => {
     expect(res.statusCode).toBe(200);
     await vi.waitFor(() => expect(install).toHaveBeenCalled());
     expect(install.mock.calls[0][1]).toBe("My Own Name");
-    expect(net.calls).toHaveLength(0);
   });
 
   it("fails with a 400 telling the user to supply a name when Steam is unreachable", async () => {
@@ -752,6 +755,56 @@ describe("POST /api/mods name resolution", () => {
     expect(res.statusCode).toBe(400);
     expect(res.json().error).toMatch(/workshop id/i);
     expect(net.calls).toHaveLength(0);
+  });
+});
+
+// The lookup runs unconditionally, even when a name is supplied explicitly -
+// both tests below do, so the single Steam call each makes is unambiguously
+// this one, not name resolution's.
+describe("POST /api/mods records the workshop timestamp", () => {
+  it("fetches the workshop entry and passes its timestamp to install", async () => {
+    const install = vi.spyOn(installer, "install").mockResolvedValue({
+      id: "3731244177",
+      name: "Safe Haven QOL",
+      jar: "SafeHavenQOL.jar",
+      ok: true,
+    });
+    net.respondJson(
+      detailsBody([{ id: "3731244177", title: "Safe Haven QOL", timeUpdated: 1_700_000_000 }]),
+    );
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/mods",
+      payload: { id: "3731244177", name: "Safe Haven QOL" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    await vi.waitFor(() => expect(install).toHaveBeenCalled());
+    expect(install.mock.calls[0][3]).toBe(new Date(1_700_000_000 * 1000).toISOString());
+  });
+
+  // The one deliberate absorbed failure in this feature: losing the install
+  // over a badge-grade lookup would be the worse trade, so a Steam failure
+  // here records "unknown" rather than failing the request.
+  it("records unknown, and still installs, when the workshop lookup fails", async () => {
+    const install = vi.spyOn(installer, "install").mockResolvedValue({
+      id: "3731244177",
+      name: "Safe Haven QOL",
+      jar: "SafeHavenQOL.jar",
+      ok: true,
+    });
+    net.failWith("getaddrinfo ENOTFOUND api.steampowered.com");
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/mods",
+      payload: { id: "3731244177", name: "Safe Haven QOL" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    await vi.waitFor(() => expect(install).toHaveBeenCalled());
+    expect(install.mock.calls[0][3]).toBeNull();
   });
 });
 
