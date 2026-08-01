@@ -287,6 +287,38 @@ not configured, and the daemon recomputes all five every time it starts:
 A few other keys (`modUploadMaxBytes`, `serverAppId`, `workshopAppId`)
 exist with working defaults and normally don't need to be touched at all.
 
+## Mods and Update All
+
+**Update All only downloads mods whose Workshop entry has changed since the
+jar you have installed came from it.** Anything unchanged is left alone and
+reported as "unchanged" rather than as updated, so a run with nothing to do
+finishes in seconds instead of redownloading every mod.
+
+What that decision rests on is worth knowing:
+
+- **A moved timestamp indicates a new jar, it does not prove one.** Steam
+  moves an entry's `time_updated` for any edit to it, including a changed
+  description or title. So Update All can download a mod whose actual jar is
+  identical to the one you had. It will never do the reverse and skip a mod
+  whose jar genuinely changed.
+- **The first Update All after upgrading to this version reinstalls
+  everything, once.** Nothing installed by an older daemon has a recorded
+  Workshop timestamp, and an unknown timestamp always means "download it".
+  That run records the real values, and every run after it skips.
+- **A mod Steam will not tell us about is downloaded again rather than
+  skipped.** That covers a Steam outage (the whole run says so in the console
+  and updates everything), an entry that has been removed or banned, and an
+  entry Steam serves with no timestamp at all.
+- **A mod is also reinstalled if the mod library no longer holds its jar**,
+  whatever the timestamps say, so deleting a jar out of the library is enough
+  to get it back.
+
+The update badges in the mod list are painted from exactly the same
+comparison, so the list never offers an update that Update All then skips.
+The two are not quite symmetrical: a mod with no usable Workshop entry is not
+badged but is still retried by Update All. That asymmetry only ever runs one
+way, with Update All doing more than the badges imply.
+
 ## Launch options
 
 Server launch options (owner, password, player slots, world border and so

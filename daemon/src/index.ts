@@ -81,14 +81,15 @@ const steam = new SteamCmd(cfg, spawnFn);
 const registry = new ModRegistry(modsFile);
 const library = new ModLibrary(cfg.modLibraryFile, cfg.modLibraryDir);
 const sets = new ModSets(cfg.modSetsFile);
-// The installer writes every download into the library as that mod's current
-// jar, because the library - not the mods folder - is what reconcile applies a
-// world's set from.
-const installer = new ModInstaller(cfg, registry, steam, library);
 // Node's global fetch, wrapped so what SteamWorkshop sees is its own narrow
 // FetchFn rather than the full DOM signature. This is the only place in the
 // daemon that reaches the network directly.
 const workshop = new SteamWorkshop(cfg, (url, init) => fetch(url, init));
+// The installer writes every download into the library as that mod's current
+// jar, because the library - not the mods folder - is what reconcile applies a
+// world's set from. `workshop` is also what its update gate checks a managed
+// mod's entry against before deciding to re-download it.
+const installer = new ModInstaller(cfg, registry, steam, library, workshop);
 
 const launchOptions = new LaunchOptions(stateFile("launch-options.json"));
 

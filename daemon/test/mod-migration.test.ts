@@ -56,6 +56,7 @@ async function liveState(): Promise<void> {
       name: `Managed ${i}`,
       jar,
       lastUpdated: "2026-07-01T00:00:00.000Z",
+      workshopUpdatedAt: null,
     });
   }
   await makeModJar(modsDir, "SummonerExpansion-1.2.0-7.7.jar", {}, {
@@ -150,6 +151,7 @@ describe("seeding the library", () => {
       name: "Aphorea Mod",
       jar: "AphoreaMod-1.0.38.jar",
       lastUpdated: "2026-06-01T00:00:00.000Z",
+      workshopUpdatedAt: null,
     });
     await makeModJar(workshopItemDir("2001"), "AphoreaMod-1.0.38.jar", {
       id: "aphoreateam.aphoreamod",
@@ -171,6 +173,7 @@ describe("seeding the library", () => {
       name: "Gone",
       jar: "Gone-1.0.jar",
       lastUpdated: "2026-06-01T00:00:00.000Z",
+      workshopUpdatedAt: null,
     });
     const summary = await migrate();
     expect(summary.recovered).toEqual([]);

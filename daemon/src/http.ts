@@ -19,6 +19,7 @@ import type { ModLibrary } from "./mod-library.js";
 import type { ModSets } from "./mod-sets.js";
 import { NotAModJarError } from "./mod-info.js";
 import { installedModIds, ReconcileError, reconcileMods } from "./mod-reconcile.js";
+import { workshopEntryUnchanged } from "./mod-updates.js";
 import type { ProcessManager } from "./process-manager.js";
 import type { SteamCmd } from "./steamcmd.js";
 import { WorkshopError, type SteamWorkshop } from "./steam-workshop.js";
@@ -807,7 +808,21 @@ export function buildServer(deps: Deps): FastifyInstance {
     }
     if (!requireNoActiveTask(reply, "install a mod")) return reply;
     const taskId = runTask("mod-install", async (onLine) => {
-      const r = await installer.install(id, resolved, onLine);
+      // Fetched so a fresh install is gated correctly from its first run. A
+      // Steam failure here is not fatal: the install proceeds recording
+      // "unknown", and the next Update All reinstalls it once and records the
+      // real value. Losing the install over a badge-grade lookup would be a
+      // worse trade. Done inside the task body, after the interlock above has
+      // already reserved this task's slot synchronously, so this await cannot
+      // reopen the race that name resolution above was hoisted to avoid.
+      let workshopUpdatedAt: string | null = null;
+      try {
+        const [item] = await workshop.getDetails([id]);
+        workshopUpdatedAt = item?.updatedAt ?? null;
+      } catch {
+        workshopUpdatedAt = null;
+      }
+      const r = await installer.install(id, resolved, onLine, workshopUpdatedAt);
       return { ok: r.ok, error: r.error };
     });
     return { ok: true, taskId };
@@ -839,8 +854,6 @@ export function buildServer(deps: Deps): FastifyInstance {
     const byId = new Map(items.map((i) => [i.id, i]));
     const mods: ModUpdateInfo[] = managed.map((m) => {
       const item = byId.get(m.id);
-      const installedMs = Date.parse(m.lastUpdated);
-      const updatedMs = item?.updatedAt ? Date.parse(item.updatedAt) : NaN;
       return {
         id: m.id,
         title: item !== undefined && item.title.length > 0 ? item.title : m.name,
@@ -851,13 +864,23 @@ export function buildServer(deps: Deps): FastifyInstance {
         previewUrl: item?.previewUrl ?? "",
         description: item?.description ?? "",
         workshopUpdatedAt: item?.updatedAt ?? null,
+        // Still this daemon's install time: it answers "when did we install
+        // this", which is what a reader wants, and is deliberately not what
+        // the decision below is made from.
         installedAt: m.lastUpdated,
         onWorkshop: item !== undefined,
-        // Both ends must parse for the comparison to mean anything; a registry
-        // entry with an unreadable lastUpdated reports "no update" rather than
-        // a guess in either direction.
+        // The same function Update All gates on, so nothing is ever badged
+        // that Update All would then skip. The two guards ahead of it are
+        // deliberate asymmetries and both run the same direction - Update All
+        // reinstalls where the badge stays quiet, never the reverse. An entry
+        // Steam will not show us (removed, banned, no timestamp on it) is not
+        // an installable update however stale the jar is; Update All still
+        // retries it, and still reinstalls when the library has lost the jar,
+        // which this route cannot see.
         updateAvailable:
-          Number.isFinite(installedMs) && Number.isFinite(updatedMs) && updatedMs > installedMs,
+          item !== undefined &&
+          item.updatedAt !== null &&
+          !workshopEntryUnchanged(m.workshopUpdatedAt, item),
       };
     });
     return { ok: true, checkedAt: new Date().toISOString(), mods };

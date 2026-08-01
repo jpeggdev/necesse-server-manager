@@ -148,6 +148,18 @@ export interface ModEntry {
   name: string;
   jar: string;
   lastUpdated: string;
+  /**
+   * The workshop entry's `time_updated`, as ISO, for the jar currently
+   * installed. `null` when unknown: written by a daemon that predates this
+   * field, or installed while Steam could not be reached.
+   *
+   * Stored rather than derived because `lastUpdated` is this machine's clock at
+   * install time. Comparing that against Steam's clock is wrong if the two
+   * disagree, and wrong again if a mod is republished while we are downloading
+   * it - we would record an install time later than the new `time_updated`,
+   * conclude we are current, and keep the older jar forever.
+   */
+  workshopUpdatedAt: string | null;
 }
 
 export interface UntrackedMod {
@@ -475,6 +487,12 @@ export interface InstallResult {
   ok: boolean;
   error?: string;
   replacedJar?: string;
+  /**
+   * Set when the workshop entry had not changed and the library still held the
+   * jar, so nothing was downloaded. `ok` is true and `jar` is the jar that was
+   * already installed.
+   */
+  skipped?: boolean;
 }
 
 export type WsMessage =

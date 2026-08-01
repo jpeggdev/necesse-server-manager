@@ -302,8 +302,19 @@ export function useDaemon(conn: Connection): DaemonState {
           const summary = msg.ok ? `--- ${msg.kind} finished` : `--- ${msg.kind} FAILED: ${msg.error ?? ""}`;
           append({ line: summary, ts: new Date().toISOString(), kind: "task" });
           for (const r of msg.results ?? []) {
+            // Update All skips a mod whose workshop entry has not changed, and
+            // this line is the only place that is reported. Reusing "ok -> jar"
+            // for it would make a run that downloaded nothing read exactly like
+            // one that reinstalled everything. The jar is still named: it is
+            // what the world loads either way. Failure wins over skipped, so a
+            // result carrying both cannot lose its error to the quiet line.
+            const outcome = !r.ok
+              ? `FAILED: ${r.error ?? ""}`
+              : r.skipped
+                ? `unchanged, kept ${r.jar}`
+                : `ok -> ${r.jar}`;
             append({
-              line: `    ${r.name} (${r.id}): ${r.ok ? `ok -> ${r.jar}` : `FAILED: ${r.error ?? ""}`}`,
+              line: `    ${r.name} (${r.id}): ${outcome}`,
               ts: new Date().toISOString(),
               kind: "task",
             });

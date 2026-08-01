@@ -15,7 +15,14 @@ export class ModRegistry {
       return [];
     }
     try {
-      return JSON.parse(raw) as ModEntry[];
+      // Normalised on the way in, so a registry written before this field
+      // existed reads as an explicit "unknown" rather than as undefined. The
+      // gate treats unknown as "reinstall", which is what makes this field its
+      // own migration.
+      return (JSON.parse(raw) as ModEntry[]).map((m) => ({
+        ...m,
+        workshopUpdatedAt: m.workshopUpdatedAt ?? null,
+      }));
     } catch (e) {
       throw new Error(`Failed to parse mod registry at ${this.file}: ${(e as Error).message}`);
     }

@@ -80,6 +80,28 @@ export class ModLibrary {
   }
 
   /**
+   * `resolve`, keyed by workshop id instead of mod id.
+   *
+   * Not `get(id)`/`resolve(id)`: the library files entries under the mod id
+   * read out of the jar, while a managed mod is keyed by its Steam
+   * published-file id. The two are different keyspaces and a lookup by the
+   * wrong one silently finds nothing.
+   *
+   * Checks the file for the same reason `resolve` does. Update All's skip gate
+   * is the caller, and skipping on the manifest alone would leave a mod that
+   * reconcile then refuses to apply, with nothing offering to fetch it back.
+   */
+  async resolveByWorkshopId(
+    workshopId: string,
+  ): Promise<{ entry: ModLibraryEntry; path: string } | undefined> {
+    const entry = (await this.load()).find(
+      (e) => e.source.kind === "workshop" && e.source.workshopId === workshopId,
+    );
+    if (entry === undefined) return undefined;
+    return this.resolve(entry.id);
+  }
+
+  /**
    * Where a jar of this mod is on disk, or would be. Defaults to the current
    * one. Addressed by its storage name (`file`), which is the only name that is
    * unique within the folder - `jar` is the label the mods folder gets and two
