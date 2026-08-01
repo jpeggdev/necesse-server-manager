@@ -210,6 +210,58 @@ describe("useDaemon busy - orderings that previously wedged it", () => {
   });
 });
 
+// Update All no longer downloads a mod whose workshop entry has not changed.
+// The per-result line is the only place a user is told what it actually did, so
+// a skipped mod that reports the same "ok -> jar" as a real update makes the
+// feature invisible and looks like every mod was reinstalled anyway.
+describe("useDaemon update-all results", () => {
+  async function pushResults(ws: FakeWebSocket, results: unknown[]) {
+    await act(async () => {
+      ws.onmessage?.({
+        data: JSON.stringify({ type: "task-done", taskId: "t1", kind: "mod-update-all", ok: true, results }),
+      });
+      await Promise.resolve();
+    });
+  }
+
+  it("reports a skipped mod as unchanged, not as updated", async () => {
+    const { result, ws, unmount } = await openConnection();
+    await pushResults(ws, [
+      { id: "1", name: "Alpha", jar: "Alpha.jar", ok: true },
+      { id: "2", name: "Beta", jar: "Beta.jar", ok: true, skipped: true },
+    ]);
+
+    const lines = result.current.console.map((l) => l.line);
+    expect(lines.some((l) => l.includes("Beta (2)") && /unchanged/i.test(l))).toBe(true);
+    // The point of the feature: Beta must not read as a download that happened.
+    expect(lines.some((l) => l.includes("Beta (2)") && l.includes("ok -> Beta.jar"))).toBe(false);
+    // ...and the mod that really was updated still reports what it installed.
+    expect(lines.some((l) => l.includes("Alpha (1)") && l.includes("ok -> Alpha.jar"))).toBe(true);
+    unmount();
+  });
+
+  it("still names the jar a skipped mod is left running", async () => {
+    // Skipping is not "nothing to say": the jar in the line is what the world
+    // will load, and it is the same jar whether it was downloaded or kept.
+    const { result, ws, unmount } = await openConnection();
+    await pushResults(ws, [{ id: "2", name: "Beta", jar: "Beta.jar", ok: true, skipped: true }]);
+    expect(result.current.console.some((l) => l.line.includes("Beta.jar"))).toBe(true);
+    unmount();
+  });
+
+  it("reports a failure as a failure even if the daemon also marked it skipped", async () => {
+    // Nothing produces this pairing today. Pinned because the skipped branch
+    // sits ahead of the failure branch, so a future result carrying both must
+    // not have its error swallowed by the cheerful line.
+    const { result, ws, unmount } = await openConnection();
+    await pushResults(ws, [
+      { id: "3", name: "Gamma", jar: null, ok: false, error: "download failed", skipped: true },
+    ]);
+    expect(result.current.console.some((l) => l.line.includes("download failed"))).toBe(true);
+    unmount();
+  });
+});
+
 /*
  * A websocket that never opens leaves the app on "Connecting to the daemon..."
  * indefinitely - `connected` stays false, so App never renders the real UI, and

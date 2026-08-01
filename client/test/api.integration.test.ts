@@ -10,6 +10,7 @@ import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { request as httpRequest } from "node:http";
+import { WebSocket as WsClient } from "ws";
 import { buildServer } from "../../daemon/src/http.js";
 import { ProcessManager } from "../../daemon/src/process-manager.js";
 import { ModInstaller } from "../../daemon/src/mod-installer.js";
@@ -21,10 +22,12 @@ import { SteamCmd } from "../../daemon/src/steamcmd.js";
 import { SteamWorkshop } from "../../daemon/src/steam-workshop.js";
 import { makeTestConfig } from "../../daemon/test/fixtures/test-config.js";
 import { makeFakeSpawn } from "../../daemon/test/fixtures/fake-spawn.js";
+import { detailsBody, makeFakeFetch, type FakeFetch } from "../../daemon/test/fixtures/fake-fetch.js";
 import { makeWorldZip } from "../../daemon/test/fixtures/world-zip.js";
 import { modJarBytes } from "../../daemon/test/fixtures/mod-jar.js";
 import { makeApi } from "../src/api";
 import { wsUrl, type Connection } from "../src/settings";
+import type { WsMessage } from "../src/types";
 
 /** Small enough that the oversize case is a few KB rather than 64MB of payload. */
 const UPLOAD_LIMIT = 4096;
@@ -99,6 +102,11 @@ let root: string;
 /** cfg.modsDir/cfg.worldsDir, derived from dataDir - captured so tests can reach into them by their real location rather than the pre-Task-2 literal "root/mods". */
 let modsDir: string;
 let worldsDir: string;
+/** The daemon's own library and registry, so a test can arrange state the client API cannot reach. */
+let library: ModLibrary;
+let registry: ModRegistry;
+/** What the daemon's SteamWorkshop calls. Refuses by default; a test can queue an answer. */
+let net: FakeFetch;
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "necesse-client-http-"));
@@ -123,15 +131,17 @@ beforeEach(async () => {
   const spawn = makeFakeSpawn();
   const pm = new ProcessManager(cfg, spawn.spawn);
   const steam = new SteamCmd(cfg, spawn.spawn);
-  const library = new ModLibrary(cfg.modLibraryFile, cfg.modLibraryDir);
+  library = new ModLibrary(cfg.modLibraryFile, cfg.modLibraryDir);
   const sets = new ModSets(cfg.modSetsFile);
   // Same rule as the fake spawn: this test stands up a real daemon, so its
   // fetch is stubbed to refuse rather than reach Steam. Anything that tries
-  // fails loudly instead of quietly making a live call from the test suite.
-  const workshop = new SteamWorkshop(cfg, () =>
-    Promise.reject(new Error("no network in tests")),
-  );
-  const installer = new ModInstaller(cfg, new ModRegistry(join(root, "mods.json")), steam, library, workshop);
+  // fails loudly instead of quietly making a live call from the test suite. A
+  // test that needs an answer queues one on `net`; it still never leaves here.
+  net = makeFakeFetch();
+  net.failWith("no network in tests");
+  const workshop = new SteamWorkshop(cfg, net.fetch);
+  registry = new ModRegistry(join(root, "mods.json"));
+  const installer = new ModInstaller(cfg, registry, steam, library, workshop);
   const launchOptions = new LaunchOptions(join(root, "launch-options.json"));
   app = buildServer({
     cfg,
@@ -360,6 +370,103 @@ describe("world settings over a real daemon instance", () => {
     await expect(
       makeApi(baseUrl, TOKEN).saveWorldSettings("Tulsa", { dayTimeMod: 99 }),
     ).rejects.toThrow(/at most 10/i);
+  });
+});
+
+/*
+ * Update All's per-mod results across the real seam.
+ *
+ * `skipped` is a new field on a shape that only ever crosses the wire inside a
+ * `task-done` websocket frame - there is no HTTP route that returns it, so
+ * neither the daemon's inject() tests nor the client's fake-WebSocket tests
+ * ever put it on a socket. This connects a real WebSocket at the URL the app's
+ * own wsUrl() builds, drives the real POST through makeApi, and reads the frame
+ * the browser would have received.
+ *
+ * Self-proving in a way worth keeping: the fake spawn's child never exits, so a
+ * mod this run decided to download would leave the task hanging and time this
+ * test out. It can only finish because the gate skipped.
+ */
+describe("update-all results across the real seam", () => {
+  const WORKSHOP_ID = "3731244177";
+  const AT = "2026-07-20T10:00:00.000Z";
+  const TASK_TIMEOUT_MS = 5000;
+
+  /**
+   * Opens the socket the app would open, resolving once it is receiving.
+   *
+   * Deliberately `ws` and not the environment's own `WebSocket`: jsdom's
+   * delegates to undici, which dispatches a Node `Event` at a jsdom
+   * `EventTarget` and throws before the connection is ever established. The URL
+   * is still the app's own `wsUrl()`, which is the part of the client this test
+   * needs to be real.
+   */
+  const openSocket = (): Promise<WsClient> =>
+    new Promise((resolve, reject) => {
+      const ws = new WsClient(wsUrl(wsConnection(TOKEN)));
+      ws.on("open", () => resolve(ws));
+      ws.on("error", (e) => reject(e));
+    });
+
+  /** The `task-done` frame for `taskId`, as the client's message handler would see it. */
+  const taskDone = (ws: WsClient, taskId: string): Promise<WsMessage & { type: "task-done" }> =>
+    new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error(`no task-done for ${taskId} within ${TASK_TIMEOUT_MS}ms`)),
+        TASK_TIMEOUT_MS,
+      );
+      ws.on("message", (data: Buffer) => {
+        const msg = JSON.parse(data.toString("utf8")) as WsMessage;
+        if (msg.type === "task-done" && msg.taskId === taskId) {
+          clearTimeout(timer);
+          resolve(msg);
+        }
+      });
+    });
+
+  it("carries skipped: true for an unchanged mod all the way to the client", async () => {
+    // A managed mod installed from the entry Steam is about to report, whose
+    // jar the library still holds under its workshop id. Arranged directly:
+    // there is no client-facing route that produces a workshop-sourced library
+    // entry without steamcmd.
+    const jarPath = join(root, "SafeHavenQOL.jar");
+    await writeFile(jarPath, await modJarBytes({ id: "safehaven.qol", name: "Safe Haven QOL" }));
+    await library.add(jarPath, { kind: "workshop", workshopId: WORKSHOP_ID }, "SafeHavenQOL.jar");
+    await registry.upsert({
+      id: WORKSHOP_ID,
+      name: "Safe Haven QOL",
+      jar: "SafeHavenQOL.jar",
+      lastUpdated: "2026-07-01T00:00:00.000Z",
+      workshopUpdatedAt: AT,
+    });
+    net.respondJson(
+      detailsBody([
+        {
+          id: WORKSHOP_ID,
+          title: "Safe Haven QOL",
+          timeUpdated: Math.floor(Date.parse(AT) / 1000),
+        },
+      ]),
+    );
+
+    const ws = await openSocket();
+    try {
+      const { taskId } = await makeApi(baseUrl, TOKEN).updateAllMods();
+      const done = await taskDone(ws, taskId);
+
+      expect(done.ok).toBe(true);
+      expect(done.results).toHaveLength(1);
+      // The whole point of the field: `ok` alone cannot tell a client that
+      // nothing was downloaded, and `ok` is true either way.
+      expect(done.results?.[0]).toMatchObject({
+        id: WORKSHOP_ID,
+        ok: true,
+        skipped: true,
+        jar: "SafeHavenQOL.jar",
+      });
+    } finally {
+      ws.close();
+    }
   });
 });
 
