@@ -125,6 +125,39 @@ stale pin is a Node CVE nobody on the other end can do anything about. Nothing
 enforces this automatically; `installer/verify-installer.ps1` only checks that
 the *staged* runtime matches whatever the file says.
 
+## Cutting a release
+
+Pushing a `v*` tag is what builds everything — `.github/workflows/release.yml`
+stages the zip, runs ISCC for the installer, builds the client, and publishes
+the lot. Two things have to be true of the commit the tag lands on, and
+nothing checks either of them:
+
+**1. Bump the version in all seven places first, in their own commit, and tag
+*that* commit.** The daemon installer takes its version from the tag
+(`/DAppVersion`), but the client's Tauri bundles take theirs from
+`tauri.conf.json`, so a stale one publishes `Necesse Server GUI_<old>_x64-setup.exe`
+under the new release. The build still goes green — the version is a filename,
+not an assertion. The seven:
+
+```
+daemon/package.json                 daemon/package-lock.json      (2 places: root, packages[""])
+client/package.json                 client/package-lock.json      (2 places: root, packages[""])
+client/src-tauri/Cargo.toml         client/src-tauri/Cargo.lock   (the tauri-app entry only)
+client/src-tauri/tauri.conf.json
+```
+
+`Cargo.lock` and both `package-lock.json`s hold the version more than once and
+share it with unrelated dependencies that happen to be on the same number, so
+match on the surrounding `name =` / `"name":` line rather than replacing every
+occurrence. Confirm the lockfiles still agree with `npm ci` in each package.
+The v1.0.0 and v1.1.0 bumps missed the two npm lockfiles, so those releases
+shipped with `version` disagreeing between `package.json` and its lock.
+
+**2. Check the Node pin** (above) in the same pass.
+
+Getting this wrong is recoverable but noisy: cancel the run before it reaches
+the publish step, commit the bump, then delete and re-push the tag.
+
 ## Access token
 
 Every HTTP route and the WebSocket upgrade require an access token, sent as an
