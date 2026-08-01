@@ -7,9 +7,10 @@ import { ModInstaller } from "../src/mod-installer.js";
 import { ModLibrary } from "../src/mod-library.js";
 import { ModRegistry } from "../src/mod-registry.js";
 import { SteamCmd } from "../src/steamcmd.js";
+import { SteamWorkshop } from "../src/steam-workshop.js";
 import { DEFAULT_CONFIG } from "../src/config.js";
 import { makeModJar } from "./fixtures/mod-jar.js";
-import type { DaemonConfig } from "../src/types.js";
+import type { DaemonConfig, ModLibraryEntry, WorkshopItem } from "../src/types.js";
 
 let modsDir: string;
 let steamRoot: string;
@@ -18,6 +19,8 @@ let registry: ModRegistry;
 let library: ModLibrary;
 let steam: SteamCmd;
 let installer: ModInstaller;
+/** Every workshop id `downloadWorkshopItem` was actually called with, in order. */
+let downloadedIds: string[];
 
 /** The mod id a jar downloaded for workshop item `id` declares in its mod.info. */
 const modIdFor = (id: string): string => `vendor.mod${id}`;
@@ -35,6 +38,7 @@ function fakeSteam(jarByModId: Record<string, string | null>): SteamCmd {
     throw new Error("spawn should not be called");
   }) as never);
   vi.spyOn(s, "downloadWorkshopItem").mockImplementation(async (id: string) => {
+    downloadedIds.push(id);
     const jar = jarByModId[id];
     if (jar === null || jar === undefined) {
       return { ok: false, exitCode: 8, output: `ERROR! Download item ${id} failed (Failure).` };
@@ -51,6 +55,33 @@ function fakeSteam(jarByModId: Record<string, string | null>): SteamCmd {
   return s;
 }
 
+/**
+ * A `SteamWorkshop` whose `getDetails` answers with a fixed script instead of
+ * reaching the network: `"absent"` for no entry, `null` for an entry with no
+ * timestamp, `"throw"` for Steam being unreachable, or any other string as the
+ * entry's `updatedAt`.
+ */
+function fakeWorkshop(steam: string | null): SteamWorkshop {
+  const w = new SteamWorkshop(cfg, (() => {
+    throw new Error("fetch should not be called");
+  }) as never);
+  vi.spyOn(w, "getDetails").mockImplementation(async () => {
+    if (steam === "throw") throw new Error("Steam is down");
+    if (steam === "absent") return [];
+    const item: WorkshopItem = {
+      id: "3731244177",
+      title: "Safe Haven QOL",
+      previewUrl: "",
+      description: "",
+      updatedAt: steam,
+      fileSize: 0,
+      subscriptions: 0,
+    };
+    return [item];
+  });
+  return w;
+}
+
 beforeEach(async () => {
   const root = await mkdtemp(join(tmpdir(), "necesse-inst-"));
   modsDir = join(root, "mods");
@@ -60,11 +91,57 @@ beforeEach(async () => {
   cfg = { ...DEFAULT_CONFIG, modsDir, steamcmdExe: join(steamRoot, "steamcmd.exe") };
   registry = new ModRegistry(join(root, "mods.json"));
   library = new ModLibrary(join(root, "mod-library.json"), join(root, "mod-library"));
+  downloadedIds = [];
 });
 
 function build(jars: Record<string, string | null>): ModInstaller {
   steam = fakeSteam(jars);
-  installer = new ModInstaller(cfg, registry, steam, library);
+  installer = new ModInstaller(cfg, registry, steam, library, fakeWorkshop("absent"));
+  return installer;
+}
+
+/**
+ * Wires up `updateAll`'s gate for one managed mod, id "3731244177": a stored
+ * `workshopUpdatedAt`, what Steam's `getDetails` answers with, and whether the
+ * library still holds the installed jar under this mod's workshop id.
+ *
+ * Synchronous, like `build`: the registry and library are stubbed directly
+ * (`vi.spyOn`, same style as `fakeSteam` and the `library.add` rejection test
+ * below) rather than written to real files, so there is no race between setup
+ * and the `updateAll` call that immediately follows it in each test.
+ */
+function buildGated(opts: {
+  stored: string | null;
+  steam: string | null;
+  jarInLibrary: boolean;
+}): ModInstaller {
+  const id = "3731244177";
+  const jarName = "SafeHavenQOL-1.2.0-2.6.jar";
+
+  vi.spyOn(registry, "load").mockResolvedValue([
+    { id, name: "Safe Haven QOL", jar: jarName, lastUpdated: "2020-01-01T00:00:00.000Z", workshopUpdatedAt: opts.stored },
+  ]);
+
+  const libraryEntry: ModLibraryEntry = {
+    id: modIdFor(id),
+    name: `Mod ${id}`,
+    version: "1.0",
+    gameVersion: "",
+    author: "",
+    clientside: false,
+    jar: jarName,
+    source: { kind: "workshop", workshopId: id },
+    addedAt: "2020-01-01T00:00:00.000Z",
+    sizeBytes: 1,
+    sha256: "0".repeat(64),
+    superseded: [],
+  };
+  vi.spyOn(library, "currentForWorkshopId").mockImplementation(async (workshopId: string) =>
+    opts.jarInLibrary && workshopId === id ? libraryEntry : undefined,
+  );
+
+  steam = fakeSteam({ [id]: jarName });
+  installer = new ModInstaller(cfg, registry, steam, library, fakeWorkshop(opts.steam));
   return installer;
 }
 
@@ -294,6 +371,64 @@ describe("updateAll", () => {
 
   it("returns an empty array when nothing is managed", async () => {
     expect(await build({}).updateAll(() => {})).toEqual([]);
+  });
+});
+
+describe("updateAll gate", () => {
+  const AT = "2026-07-20T10:00:00.000Z";
+
+  // The central test. Delete the gate and this is what goes red.
+  it("does not download a mod whose entry is unchanged and whose jar is still held", async () => {
+    const inst = buildGated({ stored: AT, steam: AT, jarInLibrary: true });
+    const results = await inst.updateAll(() => {});
+    expect(results[0].skipped).toBe(true);
+    expect(results[0].ok).toBe(true);
+    expect(downloadedIds).toEqual([]);
+  });
+
+  it("downloads when Steam has no entry for it", async () => {
+    const inst = buildGated({ stored: AT, steam: "absent", jarInLibrary: true });
+    await inst.updateAll(() => {});
+    expect(downloadedIds).toEqual(["3731244177"]);
+  });
+
+  it("downloads when Steam's entry carries no timestamp", async () => {
+    const inst = buildGated({ stored: AT, steam: null, jarInLibrary: true });
+    await inst.updateAll(() => {});
+    expect(downloadedIds).toEqual(["3731244177"]);
+  });
+
+  it("downloads when nothing was recorded for the installed jar", async () => {
+    const inst = buildGated({ stored: null, steam: AT, jarInLibrary: true });
+    await inst.updateAll(() => {});
+    expect(downloadedIds).toEqual(["3731244177"]);
+  });
+
+  it("downloads when the entry changed", async () => {
+    const inst = buildGated({ stored: AT, steam: "2026-07-21T10:00:00.000Z", jarInLibrary: true });
+    await inst.updateAll(() => {});
+    expect(downloadedIds).toEqual(["3731244177"]);
+  });
+
+  it("downloads when the library no longer holds the jar", async () => {
+    const inst = buildGated({ stored: AT, steam: AT, jarInLibrary: false });
+    await inst.updateAll(() => {});
+    expect(downloadedIds).toEqual(["3731244177"]);
+  });
+
+  it("downloads everything and says why when Steam cannot be reached", async () => {
+    const lines: string[] = [];
+    const inst = buildGated({ stored: AT, steam: "throw", jarInLibrary: true });
+    await inst.updateAll((l) => lines.push(l));
+    expect(downloadedIds).toEqual(["3731244177"]);
+    expect(lines.join("\n")).toContain("Could not reach Steam");
+  });
+
+  it("closes with a summary of what it did", async () => {
+    const lines: string[] = [];
+    const inst = buildGated({ stored: AT, steam: AT, jarInLibrary: true });
+    await inst.updateAll((l) => lines.push(l));
+    expect(lines[lines.length - 1]).toBe("Updated 0, skipped 1, failed 0.");
   });
 });
 

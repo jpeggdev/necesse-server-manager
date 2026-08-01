@@ -35,9 +35,9 @@ beforeEach(async () => {
   const registry = new ModRegistry(join(root, "mods.json"));
   const library = new ModLibrary(cfg.modLibraryFile, cfg.modLibraryDir);
   const sets = new ModSets(cfg.modSetsFile);
-  const installer = new ModInstaller(cfg, registry, steam, library);
   const net = makeFakeFetch();
   const workshop = new SteamWorkshop(cfg, net.fetch);
+  const installer = new ModInstaller(cfg, registry, steam, library, workshop);
   const launchOptions = new LaunchOptions(join(root, "launch-options.json"));
   app = buildServer({
     cfg,

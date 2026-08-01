@@ -487,6 +487,12 @@ export interface InstallResult {
   ok: boolean;
   error?: string;
   replacedJar?: string;
+  /**
+   * Set when the workshop entry had not changed and the library still held the
+   * jar, so nothing was downloaded. `ok` is true and `jar` is the jar that was
+   * already installed.
+   */
+  skipped?: boolean;
 }
 
 export type WsMessage =

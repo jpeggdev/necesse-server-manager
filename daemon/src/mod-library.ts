@@ -80,6 +80,20 @@ export class ModLibrary {
   }
 
   /**
+   * The entry whose current jar came from this workshop id.
+   *
+   * Not `get(id)`: the library files entries under the mod id read out of the
+   * jar, while a managed mod is keyed by its Steam published-file id. The two
+   * are different keyspaces and a lookup by the wrong one silently finds
+   * nothing.
+   */
+  async currentForWorkshopId(workshopId: string): Promise<ModLibraryEntry | undefined> {
+    return (await this.load()).find(
+      (e) => e.source.kind === "workshop" && e.source.workshopId === workshopId,
+    );
+  }
+
+  /**
    * Where a jar of this mod is on disk, or would be. Defaults to the current
    * one. Addressed by its storage name (`file`), which is the only name that is
    * unique within the folder - `jar` is the label the mods folder gets and two

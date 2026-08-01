@@ -77,9 +77,9 @@ beforeEach(async () => {
   registry = new ModRegistry(join(root, "mods.json"));
   library = new ModLibrary(cfg.modLibraryFile, cfg.modLibraryDir);
   sets = new ModSets(cfg.modSetsFile);
-  installer = new ModInstaller(cfg, registry, steam, library);
   net = makeFakeFetch();
   workshop = new SteamWorkshop(cfg, net.fetch);
+  installer = new ModInstaller(cfg, registry, steam, library, workshop);
   launchOptions = new LaunchOptions(join(root, "launch-options.json"));
   app = buildServer({
     cfg,

@@ -1,9 +1,11 @@
 import { copyFile, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { ModLibrary } from "./mod-library.js";
+import { workshopEntryUnchanged } from "./mod-updates.js";
 import type { ModRegistry } from "./mod-registry.js";
 import type { SteamCmd } from "./steamcmd.js";
-import type { DaemonConfig, InstallResult, ModListResponse } from "./types.js";
+import type { SteamWorkshop } from "./steam-workshop.js";
+import type { DaemonConfig, InstallResult, ModListResponse, WorkshopItem } from "./types.js";
 
 export class ModInstaller {
   constructor(
@@ -11,6 +13,7 @@ export class ModInstaller {
     private registry: ModRegistry,
     private steam: SteamCmd,
     private library: ModLibrary,
+    private workshop: SteamWorkshop,
   ) {}
 
   async list(): Promise<ModListResponse> {
@@ -135,19 +138,58 @@ export class ModInstaller {
   async updateAll(onLine: (line: string) => void): Promise<InstallResult[]> {
     const managed = await this.registry.load();
     const results: InstallResult[] = [];
+
+    // One call for the whole run rather than one per mod.
+    let byId = new Map<string, WorkshopItem>();
+    try {
+      const items = await this.workshop.getDetails(managed.map((m) => m.id));
+      byId = new Map(items.map((i) => [i.id, i]));
+    } catch (e) {
+      // Not fatal and not silent. Every mod becomes unknown, so every mod is
+      // reinstalled, which is exactly what this did before the gate existed - a
+      // Steam outage costs time and nothing else. Reporting "no updates" here
+      // would be the one answer that is actively misleading.
+      onLine(`--- Could not reach Steam (${(e as Error).message}). Updating every mod.`);
+    }
+
+    let updated = 0;
+    let skipped = 0;
+    let failed = 0;
+
     // Sequential by design: ModRegistry does load-modify-write with no locking,
     // so concurrent installs here would clobber each other's writes.
     for (const mod of managed) {
+      const entry = byId.get(mod.id);
+      const held =
+        workshopEntryUnchanged(mod.workshopUpdatedAt, entry) &&
+        (await this.library.currentForWorkshopId(mod.id)) !== undefined;
+
+      if (held) {
+        onLine(`--- ${mod.name} (${mod.id}) is unchanged, skipping`);
+        results.push({ id: mod.id, name: mod.name, jar: mod.jar, ok: true, skipped: true });
+        skipped += 1;
+        continue;
+      }
+
       onLine(`--- Updating ${mod.name} (${mod.id})`);
       try {
-        // Unconditional reinstall, so nothing here yet knows the current
-        // workshop timestamp to gate on or to record - recorded as unknown
-        // until that lookup and the gate itself are wired in.
-        results.push(await this.install(mod.id, mod.name, onLine, null));
+        const r = await this.install(mod.id, mod.name, onLine, entry?.updatedAt ?? null);
+        results.push(r);
+        if (r.ok) updated += 1;
+        else failed += 1;
       } catch (e) {
-        results.push({ id: mod.id, name: mod.name, jar: null, ok: false, error: (e as Error).message });
+        results.push({
+          id: mod.id,
+          name: mod.name,
+          jar: null,
+          ok: false,
+          error: (e as Error).message,
+        });
+        failed += 1;
       }
     }
+
+    onLine(`Updated ${updated}, skipped ${skipped}, failed ${failed}.`);
     return results;
   }
 

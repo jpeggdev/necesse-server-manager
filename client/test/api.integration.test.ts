@@ -125,13 +125,13 @@ beforeEach(async () => {
   const steam = new SteamCmd(cfg, spawn.spawn);
   const library = new ModLibrary(cfg.modLibraryFile, cfg.modLibraryDir);
   const sets = new ModSets(cfg.modSetsFile);
-  const installer = new ModInstaller(cfg, new ModRegistry(join(root, "mods.json")), steam, library);
   // Same rule as the fake spawn: this test stands up a real daemon, so its
   // fetch is stubbed to refuse rather than reach Steam. Anything that tries
   // fails loudly instead of quietly making a live call from the test suite.
   const workshop = new SteamWorkshop(cfg, () =>
     Promise.reject(new Error("no network in tests")),
   );
+  const installer = new ModInstaller(cfg, new ModRegistry(join(root, "mods.json")), steam, library, workshop);
   const launchOptions = new LaunchOptions(join(root, "launch-options.json"));
   app = buildServer({
     cfg,

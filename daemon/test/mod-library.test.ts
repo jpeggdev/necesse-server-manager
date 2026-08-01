@@ -220,6 +220,24 @@ describe("addBytes", () => {
   });
 });
 
+describe("currentForWorkshopId", () => {
+  it("finds the current entry by workshop id, which is not the id it files jars under", async () => {
+    const path = await makeModJar(incoming, "SafeHavenQOL-1.2.0-2.6.jar", {
+      id: "vendor.safehavenqol",
+      version: "1.2.0-2.6",
+    });
+    await library.add(path, { kind: "workshop", workshopId: "3731244177" }, "SafeHavenQOL-1.2.0-2.6.jar");
+
+    const found = await library.currentForWorkshopId("3731244177");
+    expect(found?.jar).toBe("SafeHavenQOL-1.2.0-2.6.jar");
+
+    // The guard against keying this off the wrong id: the library files this jar
+    // under the mod id from inside it, so a lookup by that id must NOT be how
+    // this works, and an unknown workshop id must miss.
+    expect(await library.currentForWorkshopId("0000000000")).toBeUndefined();
+  });
+});
+
 describe("resolve", () => {
   it("hands back the jar's real path for a mod it holds", async () => {
     await library.add(await makeModJar(incoming, "A.jar", { id: "x.a", version: "1" }), {
