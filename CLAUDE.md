@@ -23,6 +23,20 @@ Run the two packages separately; there is no workspace root.
 kill a live game session. Before `02-deploy.ps1` or `04-restart-daemon.ps1`,
 confirm nobody is playing — `GET /api/status` reporting `stopped` is the check.
 
+**A box can hold two installs, and deploying to the wrong one reports total
+success.** A zip/source deploy under a user profile and an Inno install under
+`C:\Program Files\Necesse Server Manager` can both be present; only the one
+the Scheduled Task names is running. Copying into the other one succeeds at
+every step — files land, `npm ci` succeeds, `04-restart-daemon.ps1` restarts
+the task, and its health check passes, because a daemon *is* answering the
+port. Just the old one. The only symptom is that the new behaviour is missing,
+which looks exactly like having built it wrong. So `02-deploy.ps1` now reads
+the task's own action directory first and refuses when it disagrees with
+`$InstallDir`, before it builds or copies anything; a missing task is treated
+as a first deploy and allowed. An install under Program Files belongs to the
+installer and an `scp` as the remote user cannot write there — upgrade that
+one by running the installer, not by repointing `deploy.local.ps1`.
+
 `02-deploy.ps1` copies `dist/`, `package.json`, `package-lock.json`, the four
 launchers (`setup.cmd`, `start-daemon.cmd`, `migrate.cmd`, `register-task.cmd`
 — the boot refusals name the first three, and the setup wizard's closing
