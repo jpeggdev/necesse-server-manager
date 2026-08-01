@@ -31,6 +31,66 @@ function Invoke-RemoteScript {
   }
 }
 
+# $InstallDir and the Scheduled Task have to be talking about the same copy of
+# the daemon. This box has had two -- a source deploy under the user profile
+# and an Inno install under Program Files -- and deploying to the one the task
+# does not run is a total no-op that reports success at every step: every file
+# copies, npm ci succeeds, 04-restart-daemon.ps1 restarts the task, and its
+# health check passes because a daemon IS answering on the port. Just the old
+# one, from the other directory. The only symptom is that the new behaviour is
+# missing, which is indistinguishable from having built it wrong.
+#
+# Checked before npm ci and tsc so a mismatch costs a round trip rather than a
+# build, and before anything is copied so a refused deploy has written nothing.
+function ConvertTo-ComparablePath([string]$p) {
+  return ($p -replace '"', '').Trim().TrimEnd('\', '/')
+}
+
+$taskProbe = @(Invoke-RemoteScript @"
+`$t = `$null
+# -ErrorAction Stop inside a try, not SilentlyContinue: a missing task is an
+# answer this script wants ("first deploy"), not an error to swallow, and
+# SilentlyContinue would still leave the remote exit code nonzero.
+try { `$t = Get-ScheduledTask -TaskName "$TaskName" -ErrorAction Stop } catch {}
+if (`$null -eq `$t) { Write-Output "TASK_MISSING"; exit 0 }
+# @() before indexing: a task with one action hands back a scalar, and
+# indexing that gives a character.
+`$a = @(`$t.Actions)[0]
+`$dir = `$a.WorkingDirectory
+if (-not `$dir) { `$dir = Split-Path -Parent `$a.Execute }
+Write-Output "TASK_DIR=`$dir"
+"@)
+
+if ($taskProbe -contains "TASK_MISSING") {
+  Write-Host "No Scheduled Task named '$TaskName' on $RemoteHost yet. Deploying, then run register-task.cmd there."
+} else {
+  $line = @($taskProbe | Where-Object { $_ -like "TASK_DIR=*" })[0]
+  if ($null -eq $line) {
+    throw "Could not read what Scheduled Task '$TaskName' runs on $RemoteHost. Refusing to deploy rather than copy into a directory that may not be the one that runs:`n$($taskProbe -join "`n")"
+  }
+  $taskDir = ConvertTo-ComparablePath ($line -replace '^TASK_DIR=', '')
+  if (-not [string]::Equals($taskDir, (ConvertTo-ComparablePath $dest), [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw @"
+Scheduled Task '$TaskName' runs the daemon from:
+    $taskDir
+but this deploy would write to `$InstallDir:
+    $dest
+
+Nothing has been copied. Deploying to a directory the task does not run
+succeeds at every step and changes nothing, so this refuses instead.
+
+Fix whichever is stale:
+  - the install moved (a zip install replaced by the Inno installer, or the
+    reverse): point `$InstallDir in scripts\deploy.local.ps1 at the path above;
+  - the task is stale: re-register it from this install by running
+    register-task.cmd in $dest on $RemoteHost.
+An install under Program Files is the installer's, and an scp as $RemoteUser
+cannot write there -- upgrade that one by running the installer, not by
+repointing this script.
+"@
+  }
+}
+
 Push-Location "$repo\daemon"
 try {
   npm ci
