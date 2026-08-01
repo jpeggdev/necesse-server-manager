@@ -814,12 +814,21 @@ describe("POST /api/mods records the workshop timestamp", () => {
  * costs badges rather than the mod list.
  */
 describe("GET /api/mods/updates", () => {
-  const installed = async (id: string, name: string, lastUpdated: string): Promise<void> =>
-    registry.upsert({ id, name, jar: `${name}.jar`, lastUpdated, workshopUpdatedAt: null });
+  const installed = async (
+    id: string,
+    name: string,
+    lastUpdated: string,
+    workshopUpdatedAt: string | null = null,
+  ): Promise<void> =>
+    registry.upsert({ id, name, jar: `${name}.jar`, lastUpdated, workshopUpdatedAt });
 
   it("flags a mod whose workshop entry changed after it was installed", async () => {
-    await installed("111", "Old Local Name", "2026-01-01T00:00:00.000Z");
-    await installed("222", "Current", "2026-06-01T00:00:00.000Z");
+    // The badge compares Steam's clock to the Steam clock we recorded, so what
+    // decides these two is workshopUpdatedAt, not lastUpdated: 111 was
+    // installed from an entry Steam has since moved, 222 from the entry Steam
+    // still reports.
+    await installed("111", "Old Local Name", "2026-01-01T00:00:00.000Z", "2026-04-01T00:00:00.000Z");
+    await installed("222", "Current", "2026-06-01T00:00:00.000Z", "2026-02-01T00:00:00.000Z");
     net.respondJson(
       detailsBody([
         { id: "111", title: "Fancy New Title", timeUpdated: Math.floor(Date.parse("2026-05-01T00:00:00.000Z") / 1000) },
@@ -927,6 +936,63 @@ describe("GET /api/mods/updates", () => {
     net.respondJson(detailsBody([{ id: "999", result: 9 }]));
     const [mod] = (await app.inject({ method: "GET", url: "/api/mods/updates" })).json().mods;
     expect(mod).toMatchObject({ onWorkshop: false, previewUrl: "", description: "" });
+  });
+
+  it("claims no update for an entry Steam carries but cannot date", async () => {
+    // The entry is on the workshop, so this is not the unknown-id case, but
+    // Steam sent no time_updated. There is nothing to compare against, and
+    // "unknown" is not an installable update. Update All still retries it -
+    // the asymmetry runs that way on purpose.
+    await installed("111", "Undated", "2026-01-01T00:00:00.000Z", "2026-04-01T00:00:00.000Z");
+    net.respondJson(detailsBody([{ id: "111", title: "Undated", timeUpdated: 0 }]));
+    const [mod] = (await app.inject({ method: "GET", url: "/api/mods/updates" })).json().mods;
+    expect(mod).toMatchObject({ onWorkshop: true, workshopUpdatedAt: null, updateAvailable: false });
+  });
+
+  it("does not badge a mod that Update All would skip", async () => {
+    await registry.upsert({
+      id: "3731244177",
+      name: "Safe Haven QOL",
+      jar: "SafeHavenQOL.jar",
+      lastUpdated: "2026-07-01T00:00:00.000Z",
+      workshopUpdatedAt: "2026-07-20T10:00:00.000Z",
+    });
+    // Steam reports exactly what we recorded, but the entry changed AFTER our
+    // install wall-clock time. The old comparison badged this; the gate skips it.
+    net.respondJson(
+      detailsBody([
+        {
+          id: "3731244177",
+          title: "Safe Haven QOL",
+          timeUpdated: Math.floor(Date.parse("2026-07-20T10:00:00.000Z") / 1000),
+        },
+      ]),
+    );
+
+    const res = await app.inject({ method: "GET", url: "/api/mods/updates" });
+    expect(res.json().mods[0].updateAvailable).toBe(false);
+  });
+
+  it("badges a mod whose entry moved since the jar we installed", async () => {
+    await registry.upsert({
+      id: "3731244177",
+      name: "Safe Haven QOL",
+      jar: "SafeHavenQOL.jar",
+      lastUpdated: "2026-07-01T00:00:00.000Z",
+      workshopUpdatedAt: "2026-07-20T10:00:00.000Z",
+    });
+    net.respondJson(
+      detailsBody([
+        {
+          id: "3731244177",
+          title: "Safe Haven QOL",
+          timeUpdated: Math.floor(Date.parse("2026-07-21T10:00:00.000Z") / 1000),
+        },
+      ]),
+    );
+
+    const res = await app.inject({ method: "GET", url: "/api/mods/updates" });
+    expect(res.json().mods[0].updateAvailable).toBe(true);
   });
 });
 
