@@ -31,4 +31,13 @@ describe("workshopEntryUnchanged", () => {
   it("is false when the entry moved backwards", () => {
     expect(workshopEntryUnchanged(AT, { updatedAt: "2026-07-19T10:00:00.000Z" })).toBe(false);
   });
+
+  // Both unknown at once is reachable: a mod installed while Steam was
+  // unreachable records null, and Steam can separately return an entry with no
+  // timestamp. Without this the two null guards can BOTH be deleted and the
+  // suite stays green, because null === null would report "unchanged" and skip
+  // a mod we know nothing about.
+  it("is false when neither side knows when the entry changed", () => {
+    expect(workshopEntryUnchanged(null, { updatedAt: null })).toBe(false);
+  });
 });
