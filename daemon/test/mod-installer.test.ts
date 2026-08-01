@@ -410,6 +410,16 @@ describe("updateAll gate", () => {
     expect(downloadedIds).toEqual(["3731244177"]);
   });
 
+  // Task 1's lesson: workshopEntryUnchanged has two individually-redundant
+  // guards (no stored timestamp, no Steam timestamp) that are jointly
+  // load-bearing. Both null at once must still mean "reinstall", not throw or
+  // short-circuit into something else.
+  it("downloads when both the stored timestamp and Steam's entry are unknown", async () => {
+    const inst = buildGated({ stored: null, steam: null, jarInLibrary: true });
+    await inst.updateAll(() => {});
+    expect(downloadedIds).toEqual(["3731244177"]);
+  });
+
   it("downloads when the library no longer holds the jar", async () => {
     const inst = buildGated({ stored: AT, steam: AT, jarInLibrary: false });
     await inst.updateAll(() => {});
@@ -429,6 +439,66 @@ describe("updateAll gate", () => {
     const inst = buildGated({ stored: AT, steam: AT, jarInLibrary: true });
     await inst.updateAll((l) => lines.push(l));
     expect(lines[lines.length - 1]).toBe("Updated 0, skipped 1, failed 0.");
+  });
+
+  /*
+   * An all-skipped run can't tell `updated` and `failed` apart - swapping their
+   * increments still prints "Updated 0, skipped N, failed 0" either way. This
+   * drives one of each outcome (2 updated, so the counts are asymmetric and a
+   * swap actually changes the line), and does it against a REAL ModRegistry and
+   * ModLibrary rather than buildGated's stubs, so the skipped mod's "still
+   * held" answer comes from an actual `currentForWorkshopId` lookup - not just
+   * the dedicated mod-library.test.ts case.
+   */
+  it("closes with a summary reflecting a mix of skipped, updated and failed mods", async () => {
+    const skippedId = "111";
+    const updatedAId = "222";
+    const updatedBId = "333";
+    const failedId = "444";
+    const incoming = join(steamRoot, "incoming");
+
+    const skippedJar = await makeModJar(incoming, "Skipped-1.0.jar", { id: modIdFor(skippedId), version: "1.0" });
+    await library.add(skippedJar, { kind: "workshop", workshopId: skippedId }, "Skipped-1.0.jar");
+
+    await registry.upsert({ id: skippedId, name: "Skipped", jar: "Skipped-1.0.jar", lastUpdated: AT, workshopUpdatedAt: AT });
+    await registry.upsert({ id: updatedAId, name: "Updated A", jar: "UpdatedA-1.0.jar", lastUpdated: AT, workshopUpdatedAt: AT });
+    await registry.upsert({ id: updatedBId, name: "Updated B", jar: "UpdatedB-1.0.jar", lastUpdated: AT, workshopUpdatedAt: AT });
+    await registry.upsert({ id: failedId, name: "Failed", jar: "Failed-1.0.jar", lastUpdated: AT, workshopUpdatedAt: AT });
+
+    steam = fakeSteam({
+      [updatedAId]: "UpdatedA-2.0.jar",
+      [updatedBId]: "UpdatedB-2.0.jar",
+      [failedId]: null,
+    });
+    const NEWER = "2026-07-21T10:00:00.000Z";
+    const workshop = new SteamWorkshop(cfg, (() => {
+      throw new Error("fetch should not be called");
+    }) as never);
+    const item = (id: string, updatedAt: string | null): WorkshopItem => ({
+      id,
+      title: id,
+      previewUrl: "",
+      description: "",
+      updatedAt,
+      fileSize: 0,
+      subscriptions: 0,
+    });
+    vi.spyOn(workshop, "getDetails").mockResolvedValue([
+      item(skippedId, AT),
+      item(updatedAId, NEWER),
+      item(updatedBId, NEWER),
+      item(failedId, NEWER),
+    ]);
+
+    installer = new ModInstaller(cfg, registry, steam, library, workshop);
+    const lines: string[] = [];
+    const results = await installer.updateAll((l) => lines.push(l));
+
+    expect(results.find((r) => r.id === skippedId)?.skipped).toBe(true);
+    expect(results.find((r) => r.id === updatedAId)?.ok).toBe(true);
+    expect(results.find((r) => r.id === updatedBId)?.ok).toBe(true);
+    expect(results.find((r) => r.id === failedId)?.ok).toBe(false);
+    expect(lines[lines.length - 1]).toBe("Updated 2, skipped 1, failed 1.");
   });
 });
 
