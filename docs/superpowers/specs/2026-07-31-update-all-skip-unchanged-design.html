@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Update All: skip unchanged mods - design</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfbfa; --fg: #1a1a1a; --muted: #5c5c5c; --rule: #dcdcd8;
+    --card: #fff; --accent: #7a4f01; --code-bg: #f2f1ee;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16171a; --fg: #e6e6e3; --muted: #9a9a96; --rule: #2e3035;
+      --card: #1d1f23; --accent: #e0a33a; --code-bg: #24262b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2.5rem 1.25rem 5rem; background: var(--bg); color: var(--fg);
+    font: 16px/1.65 -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  main { max-width: 46rem; margin: 0 auto; }
+  h1 { font-size: 1.75rem; line-height: 1.25; margin: 0 0 .35rem; }
+  h2 {
+    font-size: 1.15rem; margin: 2.75rem 0 .75rem; padding-top: .85rem;
+    border-top: 1px solid var(--rule);
+  }
+  h3 { font-size: 1rem; margin: 1.75rem 0 .5rem; }
+  .sub { color: var(--muted); margin: 0 0 2rem; }
+  code, pre { font-family: "Cascadia Code", Consolas, ui-monospace, monospace; font-size: .875em; }
+  code { background: var(--code-bg); padding: .12em .35em; border-radius: 3px; }
+  pre {
+    background: var(--code-bg); padding: .85rem 1rem; border-radius: 6px;
+    overflow-x: auto; border: 1px solid var(--rule);
+  }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  .wrap { overflow-x: auto; }
+  .note {
+    background: var(--card); border: 1px solid var(--rule); border-left: 3px solid var(--accent);
+    padding: .85rem 1rem; border-radius: 0 6px 6px 0; margin: 1.25rem 0;
+  }
+  .note strong { color: var(--accent); }
+  ul, ol { padding-left: 1.35rem; }
+  li { margin: .3rem 0; }
+  footer { margin-top: 3.5rem; padding-top: 1rem; border-top: 1px solid var(--rule); color: var(--muted); font-size: .875rem; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Update All: skip unchanged mods</h1>
+<p class="sub">Design, 2026-07-31. Necesse Server Manager.</p>
+
+<h2>The problem</h2>
+
+<p><code>ModInstaller.updateAll</code> loops every managed mod and calls
+<code>install</code> unconditionally: a steamcmd download, a jar copy, a library
+write and a registry upsert, per mod, every time. With 11 managed mods that is
+11 full downloads to land however many actual updates exist, usually zero.</p>
+
+<p>The comparison that would prevent this already exists and is careful, but it
+lives only in <code>GET /api/mods/updates</code>, which paints the update badges.
+It never gates the loop.</p>
+
+<h2>Decisions taken</h2>
+
+<div class="wrap">
+<table>
+  <tr><th>Question</th><th>Decision</th><th>Why</th></tr>
+  <tr>
+    <td>Is a moved <code>time_updated</code> good enough evidence?</td>
+    <td>Yes, trust it.</td>
+    <td>Steam moves <code>time_updated</code> for any edit to the entry, including a
+    retitle or a new screenshot. It indicates a new jar rather than proving one.
+    Accepted: the cost of a false positive is one unnecessary download.</td>
+  </tr>
+  <tr>
+    <td>What happens when we cannot tell?</td>
+    <td>Reinstall.</td>
+    <td>Unknown means might have changed. Never silently miss an update. This
+    covers a mod with no workshop entry, a null <code>time_updated</code>, and an
+    unreadable stored value.</td>
+  </tr>
+  <tr>
+    <td>What if Steam is unreachable entirely?</td>
+    <td>Reinstall everything, and say so.</td>
+    <td>Falls out of the rule above: every mod becomes unknown. That is exactly
+    today's behaviour, so an outage costs speed and nothing else. No abort.</td>
+  </tr>
+  <tr>
+    <td>Compare against what?</td>
+    <td>Steam's timestamp to Steam's timestamp.</td>
+    <td>See below. Comparing Steam's clock to ours has two failure modes.</td>
+  </tr>
+  <tr>
+    <td>A force-reinstall-everything switch?</td>
+    <td>No.</td>
+    <td>YAGNI. The gate reinstalls anything unknown or missing, which covers the
+    real repair cases, and <code>POST /api/mods</code> already reinstalls a single
+    mod by id.</td>
+  </tr>
+</table>
+</div>
+
+<h2>Why not compare against install time</h2>
+
+<p><code>ModEntry.lastUpdated</code> is the wall-clock time this daemon performed
+the install, not anything Steam said. Gating on
+<code>workshopUpdatedAt &gt; lastUpdated</code> therefore compares two different
+clocks, and fails in two ways:</p>
+
+<ul>
+  <li>If this box's clock and Steam's disagree, the comparison is wrong in one
+  direction or the other for every mod at once.</li>
+  <li>If a mod is republished <em>while we are downloading it</em>, we record an
+  install time later than the new <code>time_updated</code>, conclude we are
+  current, and keep the older jar. Nothing ever corrects it.</li>
+</ul>
+
+<p>Storing the value Steam gave us removes both.</p>
+
+<h2>Data model</h2>
+
+<p><code>ModEntry</code> gains one field, in both <code>daemon/src/types.ts</code>
+and <code>client/src/types.ts</code>, which stay byte-identical:</p>
+
+<pre><code>/**
+ * The workshop entry's `time_updated`, as ISO, for the jar currently
+ * installed. `null` when unknown: written by a daemon that predates this
+ * field, or installed while Steam could not be reached.
+ */
+workshopUpdatedAt: string | null;</code></pre>
+
+<div class="note">
+<strong>This field is also the migration.</strong> Every entry written before it
+existed reads as <code>null</code>, which is unknown, which reinstalls. So the
+first Update All after this ships behaves exactly like today, and every run after
+it is gated. There is no migration code to write and nothing to get wrong.
+</div>
+
+<h2>The gate</h2>
+
+<p>A mod is <strong>skipped only if all five conditions hold</strong>. Anything
+else reinstalls.</p>
+
+<div class="wrap">
+<table>
+  <tr><th>#</th><th>Condition</th><th>Failing it means</th></tr>
+  <tr><td>1</td><td>Steam returned an entry for this id</td><td>Delisted, private, or an id that no longer resolves</td></tr>
+  <tr><td>2</td><td>That entry has a usable <code>time_updated</code></td><td>Steam answered but without the field we gate on</td></tr>
+  <tr><td>3</td><td>The registry's <code>workshopUpdatedAt</code> is not <code>null</code></td><td>We never recorded what we installed</td></tr>
+  <tr><td>4</td><td>The two values are <strong>equal</strong></td><td>The entry changed since we installed it</td></tr>
+  <tr><td>5</td><td>The library still resolves a current jar for it</td><td>The jar is gone, so there is nothing to keep</td></tr>
+</table>
+</div>
+
+<p>Condition 4 is equality rather than <code>&gt;</code> deliberately. Any movement
+in Steam's timestamp means the entry is not the one we installed, including
+movement backwards, which a <code>&gt;</code> test would skip in silence.</p>
+
+<p>Condition 5 is what makes a hand-deleted or lost jar self-heal. Without it a
+mod with correct timestamps and no jar is skipped forever as "current".</p>
+
+<div class="note">
+<strong>To pin down during planning:</strong> condition 5 is
+<code>ModLibrary.resolve(id)</code>, but the library keys entries by its own
+<code>ModLibraryEntry.id</code> while a managed mod is keyed by its workshop
+published-file id, and <code>library.add</code> is handed the workshop id inside a
+<code>ModSource</code>. Confirm those are the same keyspace before relying on the
+lookup. If they are not, the condition needs the workshop-id lookup instead, and
+a test that a jar removed from the library forces a reinstall would otherwise
+pass for the wrong reason.
+</div>
+
+<h2>Flow</h2>
+
+<ol>
+  <li><code>registry.load()</code> for the managed list.</li>
+  <li>One <code>workshop.getDetails(ids)</code> call for the whole run. On throw:
+  log the failure with its message, treat every mod as unknown, continue.</li>
+  <li>Per mod, evaluate the five conditions. Skip, or install.</li>
+  <li><code>install()</code> records the entry's <code>time_updated</code> into the
+  registry alongside the jar it wrote.</li>
+</ol>
+
+<h3>install() signature</h3>
+
+<p><code>install</code> takes the timestamp as a parameter rather than fetching its
+own, so <code>updateAll</code> pays for one Steam call and not one per mod.
+<code>POST /api/mods</code> fetches details for its single id and passes the value
+through, so a fresh install is exact immediately. If that fetch fails the install
+still proceeds with <code>null</code>, and the next Update All corrects it once.</p>
+
+<h2>One comparison, two callers</h2>
+
+<div class="note">
+<strong>The badge and the gate must not be able to disagree.</strong> Today the
+badge route compares <code>workshopUpdatedAt &gt; installTime</code>. If the gate
+moves to the stored-Steam-value basis and the badge does not, the client shows
+"update available" on a mod that Update All then skips. Both look correct in
+isolation, which is what makes it hard to diagnose.
+</div>
+
+<p>So the comparison becomes one exported function, and both
+<code>GET /api/mods/updates</code> and <code>updateAll</code> call it.
+<code>ModUpdateInfo.installedAt</code> keeps reporting this daemon's install time,
+because that is genuinely what it means to someone reading the UI; only the
+decision changes basis.</p>
+
+<h2>Reporting</h2>
+
+<p><code>InstallResult</code> gains <code>skipped?: boolean</code>, matching the
+existing optional <code>replacedJar?</code>. A skipped mod is <code>ok: true</code>,
+<code>skipped: true</code>, carrying its existing jar.</p>
+
+<p>The streamed run log distinguishes the two cases per mod, and closes with a
+summary line:</p>
+
+<pre><code>--- Updating &lt;name&gt; (&lt;id&gt;)
+--- &lt;name&gt; (&lt;id&gt;) is unchanged, skipping
+...
+Updated 2, skipped 9, failed 0.</code></pre>
+
+<p>The client must render a skipped mod as skipped. Counting them as updates
+would have the run claim 11 updates for 2 downloads, which is worse than the
+unconditional behaviour it replaces.</p>
+
+<h2>Errors</h2>
+
+<p>Unchanged from the rest of the daemon: nothing is swallowed or reworded.</p>
+
+<ul>
+  <li>A per-mod install failure records <code>ok: false</code> with its message and
+  the loop continues, as it does today.</li>
+  <li>The <code>getDetails</code> failure is written to the run log with its message
+  and degrades to reinstall-everything. It is not silently treated as "no
+  updates", which is the one answer that would be actively misleading.</li>
+</ul>
+
+<h2>Testing</h2>
+
+<p>The gate has five clauses, so a single all-conditions-true test would pass
+trivially against a broken implementation. Required:</p>
+
+<ul>
+  <li><strong>The central test:</strong> a fully current mod is never handed to
+  steamcmd. This is the substitution target - delete the gate and it must go
+  red.</li>
+  <li><strong>One test per clause</strong>, flipping only that condition and
+  asserting a download happens. Five tests, not one.</li>
+  <li>The recorded <code>workshopUpdatedAt</code> is Steam's value, not this
+  machine's clock.</li>
+  <li><code>getDetails</code> throwing downloads everything and puts the reason in
+  the log.</li>
+  <li>The badge and the gate agree: a mod the gate would skip does not show as
+  having an update available.</li>
+  <li>One seam test in <code>client/test/api.integration.test.ts</code>, since
+  <code>skipped</code> is a new shape crossing the wire and the client's mocked
+  tests cannot see it.</li>
+</ul>
+
+<p>Existing <code>updateAll</code> tests assume unconditional reinstall. Several
+will need a stored timestamp to keep asserting what they were written to assert;
+that churn is expected rather than a sign something is wrong.</p>
+
+<h2>Out of scope</h2>
+
+<ul>
+  <li>A force-reinstall switch.</li>
+  <li>Verifying the downloaded jar actually differs. Steam gives us an entry
+  timestamp, not a file hash, and hashing after the fact would mean doing the
+  download we are trying to avoid.</li>
+  <li>Changing what a mod set stores. Sets reference mod identity, not a jar
+  version; Update All refreshes the library and each world picks the new version
+  up at its next start.</li>
+</ul>
+
+<footer>
+Supersedes nothing. Related: <code>docs/mod-sets-design.md</code> decision row 1.
+</footer>
+
+</main>
+</body>
+</html>
