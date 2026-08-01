@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { mkdtemp, writeFile, mkdir, readdir, readFile } from "node:fs/promises";
+import { mkdtemp, writeFile, mkdir, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { reconcileMods } from "../src/mod-reconcile.js";
@@ -136,8 +136,10 @@ function buildGated(opts: {
     sha256: "0".repeat(64),
     superseded: [],
   };
-  vi.spyOn(library, "currentForWorkshopId").mockImplementation(async (workshopId: string) =>
-    opts.jarInLibrary && workshopId === id ? libraryEntry : undefined,
+  vi.spyOn(library, "resolveByWorkshopId").mockImplementation(async (workshopId: string) =>
+    opts.jarInLibrary && workshopId === id
+      ? { entry: libraryEntry, path: library.jarPath(libraryEntry) }
+      : undefined,
   );
 
   steam = fakeSteam({ [id]: jarName });
@@ -426,6 +428,47 @@ describe("updateAll gate", () => {
     expect(downloadedIds).toEqual(["3731244177"]);
   });
 
+  /*
+   * The sibling of the case above, and the one the manifest alone cannot
+   * answer. `ModLibrary` draws this distinction itself: `resolve` stats the
+   * file because "the library has an entry" and "the library can hand over
+   * this jar" are different statements, and reconcile refuses to copy a jar
+   * that is only the former. A gate that stops at the manifest would skip a
+   * mod that reconcile then will not apply, and leave the world short a jar
+   * with nothing offering to fetch it back. Real registry and library, since a
+   * stubbed lookup is exactly the layer under test.
+   */
+  it("downloads when the manifest still lists the jar but the file is gone", async () => {
+    const id = "111";
+    const jarName = "Ghost-1.0.jar";
+    const incoming = join(steamRoot, "incoming");
+    const jar = await makeModJar(incoming, jarName, { id: modIdFor(id), version: "1.0" });
+    await library.add(jar, { kind: "workshop", workshopId: id }, jarName);
+
+    const held = await library.resolve(modIdFor(id));
+    expect(held).toBeDefined();
+    await rm(held!.path);
+    // The state this is about: the manifest still claims the jar, the disk does not have it.
+    expect(await library.get(modIdFor(id))).toBeDefined();
+    expect(await library.resolve(modIdFor(id))).toBeUndefined();
+
+    await registry.upsert({ id, name: "Ghost", jar: jarName, lastUpdated: AT, workshopUpdatedAt: AT });
+
+    steam = fakeSteam({ [id]: jarName });
+    const workshop = new SteamWorkshop(cfg, (() => {
+      throw new Error("fetch should not be called");
+    }) as never);
+    vi.spyOn(workshop, "getDetails").mockResolvedValue([
+      { id, title: id, previewUrl: "", description: "", updatedAt: AT, fileSize: 0, subscriptions: 0 },
+    ]);
+
+    installer = new ModInstaller(cfg, registry, steam, library, workshop);
+    const results = await installer.updateAll(() => {});
+
+    expect(downloadedIds).toEqual([id]);
+    expect(results.find((r) => r.id === id)?.skipped).toBeUndefined();
+  });
+
   it("downloads everything and says why when Steam cannot be reached", async () => {
     const lines: string[] = [];
     const inst = buildGated({ stored: AT, steam: "throw", jarInLibrary: true });
@@ -447,7 +490,7 @@ describe("updateAll gate", () => {
    * drives one of each outcome (2 updated, so the counts are asymmetric and a
    * swap actually changes the line), and does it against a REAL ModRegistry and
    * ModLibrary rather than buildGated's stubs, so the skipped mod's "still
-   * held" answer comes from an actual `currentForWorkshopId` lookup - not just
+   * held" answer comes from an actual `resolveByWorkshopId` lookup - not just
    * the dedicated mod-library.test.ts case.
    */
   it("closes with a summary reflecting a mix of skipped, updated and failed mods", async () => {

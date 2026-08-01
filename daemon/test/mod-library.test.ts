@@ -220,21 +220,37 @@ describe("addBytes", () => {
   });
 });
 
-describe("currentForWorkshopId", () => {
-  it("finds the current entry by workshop id, which is not the id it files jars under", async () => {
+describe("resolveByWorkshopId", () => {
+  async function addSafeHaven(): Promise<void> {
     const path = await makeModJar(incoming, "SafeHavenQOL-1.2.0-2.6.jar", {
       id: "vendor.safehavenqol",
       version: "1.2.0-2.6",
     });
     await library.add(path, { kind: "workshop", workshopId: "3731244177" }, "SafeHavenQOL-1.2.0-2.6.jar");
+  }
 
-    const found = await library.currentForWorkshopId("3731244177");
-    expect(found?.jar).toBe("SafeHavenQOL-1.2.0-2.6.jar");
+  it("finds the current entry by workshop id, which is not the id it files jars under", async () => {
+    await addSafeHaven();
+
+    const found = await library.resolveByWorkshopId("3731244177");
+    expect(found?.entry.jar).toBe("SafeHavenQOL-1.2.0-2.6.jar");
+    expect(await readFile(found!.path)).toBeInstanceOf(Buffer);
 
     // The guard against keying this off the wrong id: the library files this jar
     // under the mod id from inside it, so a lookup by that id must NOT be how
     // this works, and an unknown workshop id must miss.
-    expect(await library.currentForWorkshopId("0000000000")).toBeUndefined();
+    expect(await library.resolveByWorkshopId("0000000000")).toBeUndefined();
+  });
+
+  // Same claim-versus-file distinction `resolve` makes, and the reason this
+  // returns a path rather than an entry: Update All skips on this answer, so a
+  // manifest entry whose jar is gone must read as "not held".
+  it("returns nothing when the manifest claims a jar that is no longer on disk", async () => {
+    await addSafeHaven();
+    await rm(library.jarPath((await library.get("vendor.safehavenqol"))!));
+
+    expect(await library.resolveByWorkshopId("3731244177")).toBeUndefined();
+    expect(await library.get("vendor.safehavenqol")).toBeDefined();
   });
 });
 

@@ -162,7 +162,7 @@ export class ModInstaller {
       const entry = byId.get(mod.id);
       const held =
         workshopEntryUnchanged(mod.workshopUpdatedAt, entry) &&
-        (await this.library.currentForWorkshopId(mod.id)) !== undefined;
+        (await this.library.resolveByWorkshopId(mod.id)) !== undefined;
 
       if (held) {
         onLine(`--- ${mod.name} (${mod.id}) is unchanged, skipping`);
