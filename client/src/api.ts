@@ -1,4 +1,5 @@
 import type {
+  CommandDef,
   LaunchOptionsResponse,
   LaunchOptionValue,
   ModLibraryResponse,
@@ -117,6 +118,22 @@ export function makeApi(base: string, token: string) {
     stop: () => post<{ ok: true }>("/api/server/stop"),
     kill: () => post<{ ok: true }>("/api/server/kill"),
     updateServer: () => post<{ ok: true; taskId: string }>("/api/server/update"),
+    /**
+     * Every command the daemon will send, with the game version the table was
+     * extracted from and the version actually running, so a mismatch can be
+     * surfaced rather than guessed at.
+     */
+    commands: () =>
+      get<{ ok: true; commands: CommandDef[]; schemaGameVersion: string; gameVersion: string | null }>(
+        "/api/commands",
+      ),
+    /**
+     * Runs one of the game's own commands. Resolves with what was sent, which
+     * is the strongest claim available: the server prints its reply to the
+     * console, and a command accepted during startup can be silently ignored.
+     */
+    runCommand: (name: string, args: Record<string, string>) =>
+      post<{ ok: true; sent: string }>("/api/command", { name, args }),
     /**
      * Who is on the server right now, as the daemon last saw it. The roster is
      * also pushed over the websocket on every change, so this is only needed

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ServerHeader } from "./ServerHeader";
 import { ModsPanel } from "./ModsPanel";
 import { PlayersPanel } from "./PlayersPanel";
+import { CommandDialog } from "./CommandDialog";
 import { ConsolePanel } from "./ConsolePanel";
 import { ErrorBanner } from "./ErrorBanner";
 import { Splitter } from "./Splitter";
@@ -120,6 +121,7 @@ function ConnectedApp({
     if (unauthorized) onTokenRejected();
   }, [unauthorized, onTokenRejected]);
   const [leftTab, setLeftTab] = useState<"mods" | "players">("mods");
+  const [runningCommand, setRunningCommand] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [candidate, setCandidate] = useState<{ name: string; valid: boolean; exists: boolean } | null>(null);
   // Covers the click-to-response span only: from the moment a mutation is
@@ -400,6 +402,7 @@ function ConnectedApp({
             <PlayersPanel
               players={players}
               running={running}
+              onRunCommand={() => setRunningCommand(true)}
               onRefresh={guard(async () => {
                 const r = await api.refreshPlayers();
                 // Answers ok:false rather than throwing when there is no server
@@ -440,6 +443,9 @@ function ConnectedApp({
         />
         <ConsolePanel lines={lines} />
       </div>
+      {runningCommand && (
+        <CommandDialog api={api} players={players} onClose={() => setRunningCommand(false)} />
+      )}
       {settingsWorld !== null && (
         <WorldSettingsDialog
           // A fresh mount per world, so no state can outlive the world it

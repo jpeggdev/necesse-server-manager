@@ -5,6 +5,7 @@ interface Props {
   /** Whether a server is up at all, which is what makes an empty roster meaningful. */
   running: boolean;
   onRefresh: () => void;
+  onRunCommand: () => void;
 }
 
 /**
@@ -23,7 +24,7 @@ function session(joinedAt: string | null): string {
   return hours > 0 ? `${hours}h ${minutes % 60}m` : `${minutes}m`;
 }
 
-export function PlayersPanel({ players, running, onRefresh }: Props) {
+export function PlayersPanel({ players, running, onRefresh, onRunCommand }: Props) {
   return (
     <section className="players">
       <div className="mods-head">
@@ -31,6 +32,9 @@ export function PlayersPanel({ players, running, onRefresh }: Props) {
         <div className="mods-head-actions">
           {/* Refresh asks the server itself. There is nothing to ask when it is
               not running, and the daemon would refuse anyway. */}
+          <button onClick={onRunCommand} disabled={!running}>
+            Run command
+          </button>
           <button onClick={onRefresh} disabled={!running}>
             Refresh
           </button>
