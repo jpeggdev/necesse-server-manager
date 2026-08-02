@@ -1,5 +1,7 @@
 # Necesse Server Manager
 
+![Necesse](assets/Necesse-header.png)
+
 A desktop app for managing a Necesse dedicated server on your LAN: start and
 stop the server, install and update mods from the Steam Workshop, watch the
 live console, run server commands, and edit world settings and launch
