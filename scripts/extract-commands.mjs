@@ -168,17 +168,53 @@ function parseHandler(expr) {
   return { type: values.length > 0 ? "enum" : type, values };
 }
 
-function parseParam(expr) {
+/**
+ * One CmdParameter and everything nested inside it, flattened in command-line
+ * order.
+ *
+ * A CmdParameter's trailing varargs are FURTHER PARAMETERS, not metadata: the
+ * game nests each one inside the parameter it follows, which is what the wiki
+ * renders as `[<authentication/name> [<permissions>]]`. Reading only the
+ * top-level constructor arguments silently drops them, and the form then has no
+ * field for an argument the command genuinely needs - `permissions set <name>`
+ * with no level is accepted by the daemon and answered by the game with
+ * "Missing permissions".
+ */
+function parseParams(expr) {
   const inner = argsOf(expr, expr.indexOf("CmdParameter"));
-  if (inner === null) return null;
+  if (inner === null) return [];
   const parts = splitArgs(inner);
   const name = stringLiteral(parts[0] ?? "");
-  if (name === null) return null;
+  if (name === null) return [];
   const handler = parseHandler(parts[1] ?? "");
-  // Overloads: (name, handler), (name, handler, extra...),
-  // (name, handler, optional, extra...), (name, handler, optional, partOfUsage, extra...)
-  const optional = (parts[2] ?? "").trim() === "true";
-  return { name, type: handler.type, optional, values: handler.values };
+
+  // Overloads: (name, handler), (name, handler, extras...),
+  // (name, handler, optional, extras...),
+  // (name, handler, optional, partOfUsage, extras...)
+  // Booleans before the first nested CmdParameter are the flags, in that order.
+  let optional = false;
+  let seenFlags = 0;
+  const nested = [];
+  for (const part of parts.slice(2)) {
+    const t = part.trim();
+    if (t.includes("new CmdParameter(")) {
+      nested.push(...parseParams(part));
+      continue;
+    }
+    // `new CmdParameter[0]` is an empty varargs array, not a parameter.
+    if (t.startsWith("new CmdParameter[")) continue;
+    if (t === "true" || t === "false") {
+      if (seenFlags === 0) optional = t === "true";
+      seenFlags += 1;
+    }
+  }
+
+  // A nested parameter can only be supplied when its parent was, so it is
+  // optional whatever its own flag says.
+  return [
+    { name, type: handler.type, optional, values: handler.values },
+    ...nested.map((n) => ({ ...n, optional: true })),
+  ];
 }
 
 /** Names a class is registered under, for the six that take their name as an argument. */
@@ -226,8 +262,7 @@ for (const file of readdirSync(SERVER_COMMANDS_DIR).filter((f) => f.endsWith(".j
   const params = args
     .slice(4)
     .filter((a) => a.includes("new CmdParameter("))
-    .map(parseParam)
-    .filter((p) => p !== null);
+    .flatMap(parseParams);
 
   for (const name of names) {
     if (EXCLUDED.has(name)) continue;
