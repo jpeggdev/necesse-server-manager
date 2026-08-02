@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ServerHeader } from "./ServerHeader";
 import { ModsPanel } from "./ModsPanel";
+import { PlayersPanel } from "./PlayersPanel";
 import { ConsolePanel } from "./ConsolePanel";
 import { ErrorBanner } from "./ErrorBanner";
 import { Splitter } from "./Splitter";
@@ -107,6 +108,7 @@ function ConnectedApp({
     modUpdates,
     updatesError,
     console: lines,
+    players,
     connected,
     error: daemonError,
     busy: taskBusy,
@@ -117,6 +119,7 @@ function ConnectedApp({
   useEffect(() => {
     if (unauthorized) onTokenRejected();
   }, [unauthorized, onTokenRejected]);
+  const [leftTab, setLeftTab] = useState<"mods" | "players">("mods");
   const [error, setError] = useState<string | null>(null);
   const [candidate, setCandidate] = useState<{ name: string; valid: boolean; exists: boolean } | null>(null);
   // Covers the click-to-response span only: from the moment a mutation is
@@ -374,6 +377,38 @@ function ConnectedApp({
       />
       <div className="body">
         <div className="mods-pane" style={{ width: modsWidth }}>
+          <div className="pane-tabs" role="tablist" aria-label="Left panel">
+            <button
+              role="tab"
+              aria-selected={leftTab === "mods"}
+              onClick={() => setLeftTab("mods")}
+            >
+              Mods
+            </button>
+            <button
+              role="tab"
+              aria-selected={leftTab === "players"}
+              onClick={() => setLeftTab("players")}
+            >
+              Players ({players.length})
+            </button>
+          </div>
+          {/* Hidden rather than unmounted: the mods panel holds a workshop
+              search, an in-progress mod set and upload state, none of which
+              should be thrown away by looking at who is online. */}
+          <div className="pane-body" hidden={leftTab !== "players"}>
+            <PlayersPanel
+              players={players}
+              running={running}
+              onRefresh={guard(async () => {
+                const r = await api.refreshPlayers();
+                // Answers ok:false rather than throwing when there is no server
+                // to ask, so the refusal has to be surfaced explicitly.
+                if (!r.ok) setError(r.error ?? "Could not ask the server who is online.");
+              })}
+            />
+          </div>
+          <div className="pane-body" hidden={leftTab !== "mods"}>
           <ModsPanel
             mods={mods}
             library={library ?? []}
@@ -395,6 +430,7 @@ function ConnectedApp({
             onRemove={(id) => guard(() => api.removeMod(id))()}
             onUpdateAll={guard(() => api.updateAllMods())}
           />
+          </div>
         </div>
         <Splitter
           width={modsWidth}
