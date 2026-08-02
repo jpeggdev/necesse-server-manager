@@ -9,6 +9,8 @@ import type { WorldSettingsFile } from "./world-settings-file.js";
 import { knownField, checkChange, isSameValue } from "./world-settings-schema.js";
 import type { LaunchOptions } from "./launch-options.js";
 import type { PlayerRoster } from "./player-roster.js";
+import { composeCommand } from "./command-line.js";
+import { SERVER_COMMANDS, SCHEMA_GAME_VERSION } from "./server-commands-schema.js";
 import {
   checkLaunchOption,
   effectiveOptions,
@@ -518,6 +520,63 @@ export function buildServer(deps: Deps): FastifyInstance {
   });
 
   app.addHook("onClose", async () => stopAsking());
+
+  /**
+   * The command table, plus both game versions so the client can say when they
+   * disagree. A table extracted from a different version is usually still
+   * mostly right, so this reports the mismatch rather than withholding it.
+   */
+  app.get("/api/commands", async () => ({
+    ok: true,
+    commands: SERVER_COMMANDS,
+    schemaGameVersion: SCHEMA_GAME_VERSION,
+    gameVersion: pm.status.gameVersion,
+  }));
+
+  /**
+   * Runs one of the game's own commands.
+   *
+   * The body names a command and its arguments; the daemon composes the line.
+   * The server's reply is not awaited and not interpreted - it goes to the
+   * console stream like everything else the game prints, and the game echoes
+   * the command itself, so nothing is echoed here. `sent` is deliberately the
+   * strongest claim in the response: measured on the real server, a command
+   * accepted during world initialisation is echoed and then silently does
+   * nothing, so "sent" is all that is ever known.
+   */
+  app.post("/api/command", async (req, reply) => {
+    const body = (req.body ?? {}) as { name?: unknown; args?: unknown };
+    if (typeof body.name !== "string") {
+      return reply.code(400).send({ ok: false, error: "A command name is required." });
+    }
+    const args =
+      body.args === undefined || body.args === null
+        ? {}
+        : (body.args as Record<string, unknown>);
+    const supplied: Record<string, string> = {};
+    for (const key of Object.keys(args)) {
+      const value = args[key];
+      if (typeof value !== "string") {
+        return reply
+          .code(400)
+          .send({ ok: false, error: `Argument "${key}" must be text, and it is not.` });
+      }
+      supplied[key] = value;
+    }
+
+    let line: string;
+    try {
+      line = composeCommand(body.name, supplied);
+    } catch (e) {
+      return reply.code(400).send({ ok: false, error: errorText(e) });
+    }
+    try {
+      pm.send(line);
+    } catch (e) {
+      return reply.code(409).send({ ok: false, error: errorText(e) });
+    }
+    return { ok: true, sent: line };
+  });
 
   app.get("/api/players", async () => ({ ok: true, players: playerRoster.snapshot() }));
 

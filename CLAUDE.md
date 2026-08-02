@@ -158,6 +158,11 @@ shipped with `version` disagreeing between `package.json` and its lock.
 Getting this wrong is recoverable but noisy: cancel the run before it reaches
 the publish step, commit the bump, then delete and re-push the tag.
 
+**The client cannot be pointed at a different port while it is failing to connect** — the settings
+screen is behind a connected app, so a daemon on anything but the configured port is unreachable from
+the GUI even though the daemon is healthy. Treat the port as fixed when standing up a second daemon
+for testing: a "cautious" spare port makes the build you want to look at invisible.
+
 ## Access token
 
 Every HTTP route and the WebSocket upgrade require an access token, sent as an

@@ -653,6 +653,88 @@ describe("players", () => {
   });
 });
 
+describe("commands", () => {
+  async function running(): Promise<void> {
+    await app.inject({ method: "POST", url: "/api/server/start", payload: { world: "Tulsa" } });
+    spawn.calls[0].child.emitLine(F.READY_LINE_WITH_TS);
+    // The roster's own reconcile fires here; clear it so assertions below are
+    // about the command under test and nothing else.
+    spawn.calls[0].child.written.length = 0;
+  }
+
+  it("serves the schema with both game versions, so the client can compare them", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/commands" });
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.commands.length).toBeGreaterThan(80);
+    expect(body.schemaGameVersion).toMatch(/^\d+\.\d+/);
+    // Null until a server has run and reported one.
+    expect(body).toHaveProperty("gameVersion");
+  });
+
+  it("sends a composed command to the server exactly once", async () => {
+    await running();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/command",
+      payload: { name: "say", args: { message: "hello everyone" } },
+    });
+    expect(res.json()).toEqual({ ok: true, sent: "say hello everyone" });
+    expect(spawn.calls[0].child.written).toEqual(["say hello everyone\n"]);
+  });
+
+  it("refuses a command that is not in the schema, and sends nothing", async () => {
+    await running();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/command",
+      payload: { name: "stop", args: {} },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/not a server command/i);
+    expect(spawn.calls[0].child.written).toEqual([]);
+  });
+
+  it("refuses a bad argument, naming it, and sends nothing", async () => {
+    await running();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/command",
+      payload: { name: "give", args: { item: "iron_bar", amount: "ten" } },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/amount/);
+    expect(spawn.calls[0].child.written).toEqual([]);
+  });
+
+  it("refuses an injected second command, and sends nothing", async () => {
+    await running();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/command",
+      payload: { name: "say", args: { message: "hi\nallowcheats" } },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(spawn.calls[0].child.written).toEqual([]);
+  });
+
+  it("refuses when there is no running server to send to", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/command",
+      payload: { name: "players", args: {} },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toMatch(/not running/i);
+  });
+
+  it("rejects a malformed body rather than guessing what was meant", async () => {
+    await running();
+    const res = await app.inject({ method: "POST", url: "/api/command", payload: { args: {} } });
+    expect(res.statusCode).toBe(400);
+  });
+});
+
 describe("POST /api/server/start", () => {
   it("starts and persists lastWorld only once running", async () => {
     const res = await app.inject({
