@@ -18,6 +18,7 @@ import { ModRegistry } from "../../daemon/src/mod-registry.js";
 import { ModLibrary } from "../../daemon/src/mod-library.js";
 import { ModSets } from "../../daemon/src/mod-sets.js";
 import { LaunchOptions } from "../../daemon/src/launch-options.js";
+import { PlayerRoster } from "../../daemon/src/player-roster.js";
 import { SteamCmd } from "../../daemon/src/steamcmd.js";
 import { SteamWorkshop } from "../../daemon/src/steam-workshop.js";
 import { makeTestConfig } from "../../daemon/test/fixtures/test-config.js";
@@ -105,6 +106,7 @@ let worldsDir: string;
 /** The daemon's own library and registry, so a test can arrange state the client API cannot reach. */
 let library: ModLibrary;
 let registry: ModRegistry;
+let playerRoster: PlayerRoster;
 /** What the daemon's SteamWorkshop calls. Refuses by default; a test can queue an answer. */
 let net: FakeFetch;
 
@@ -143,6 +145,7 @@ beforeEach(async () => {
   registry = new ModRegistry(join(root, "mods.json"));
   const installer = new ModInstaller(cfg, registry, steam, library, workshop);
   const launchOptions = new LaunchOptions(join(root, "launch-options.json"));
+  playerRoster = new PlayerRoster();
   app = buildServer({
     cfg,
     configFile,
@@ -154,6 +157,7 @@ beforeEach(async () => {
     steam,
     workshop,
     launchOptions,
+    playerRoster,
   });
   baseUrl = await app.listen({ port: 0, host: "127.0.0.1" });
 });

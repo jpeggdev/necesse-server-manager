@@ -517,7 +517,7 @@ export interface PlayerEntry {
 }
 
 export type WsMessage =
-  | { type: "backlog"; lines: ConsoleLine[]; status: StatusPayload }
+  | { type: "backlog"; lines: ConsoleLine[]; status: StatusPayload; players: PlayerEntry[] }
   | { type: "console"; line: string; ts: string }
   | { type: "players"; players: PlayerEntry[] }
   | { type: "status"; status: StatusPayload }

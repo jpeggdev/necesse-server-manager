@@ -8,6 +8,7 @@ import { openWorldSettings, WorldSettingsError } from "./world-settings.js";
 import type { WorldSettingsFile } from "./world-settings-file.js";
 import { knownField, checkChange, isSameValue } from "./world-settings-schema.js";
 import type { LaunchOptions } from "./launch-options.js";
+import type { PlayerRoster } from "./player-roster.js";
 import {
   checkLaunchOption,
   effectiveOptions,
@@ -57,6 +58,7 @@ export interface Deps {
   /** Non-fatal configuration problems, published so a client can surface them. */
   configWarnings: string[];
   launchOptions: LaunchOptions;
+  playerRoster: PlayerRoster;
 }
 
 const WORKSHOP_ID = /^\d+$/;
@@ -129,8 +131,19 @@ const errorText = (e: unknown): string =>
   e instanceof Error ? e.message : `Non-error thrown: ${String(e)}`;
 
 export function buildServer(deps: Deps): FastifyInstance {
-  const { cfg, configFile, pm, installer, library, sets, steam, workshop, configWarnings, launchOptions } =
-    deps;
+  const {
+    cfg,
+    configFile,
+    pm,
+    installer,
+    library,
+    sets,
+    steam,
+    workshop,
+    configWarnings,
+    launchOptions,
+    playerRoster,
+  } = deps;
   const app = Fastify({ logger: false });
   type Socket = { send(data: string): void };
   const sockets = new Set<Socket>();
@@ -169,8 +182,43 @@ export function buildServer(deps: Deps): FastifyInstance {
   const broadcastStatus = (): void => broadcast({ type: "status", status: statusPayload() });
 
   pm.on("line", (l) => broadcast({ type: "console", line: l.line, ts: l.ts }));
+
+  /**
+   * Asks the server who is actually on.
+   *
+   * Best effort by design. The roster asks whenever it sees something it cannot
+   * account for, and by then the server may already be gone - `send` throws
+   * only when there is no server to ask, which is not a condition an operator
+   * can act on, and a failed reconcile leaves the roster exactly as it was.
+   */
+  const askWhoIsOnline = (): void => {
+    try {
+      pm.send("/players");
+    } catch {
+      // See above: nothing to ask, nothing to report.
+    }
+  };
+
+  // The roster reads the same line stream the console panel is built from, so
+  // it costs no extra pipe out of the game process. Subscribed after the
+  // console broadcast so a parse failure could never cost the operator a log
+  // line.
+  pm.on("line", (l) => playerRoster.observe(l.line));
+  playerRoster.on("changed", () => broadcast({ type: "players", players: playerRoster.snapshot() }));
+  playerRoster.on("reconcile", askWhoIsOnline);
+
   pm.on("state", (status) => {
     broadcastStatus();
+    if (status.state === "running") {
+      // The server has just announced itself. Anyone already on - a daemon
+      // restarted against a live server - is invisible until it is asked.
+      askWhoIsOnline();
+    }
+    if (status.state !== "running" && status.state !== "starting") {
+      // No server, no roster. Keeping the last known list would show names
+      // that cannot possibly still be connected.
+      playerRoster.clear();
+    }
     if (status.state === "running" && status.world) {
       cfg.lastWorld = status.world;
       // Fire-and-forget from an event handler with no request to report to;
@@ -411,6 +459,10 @@ export function buildServer(deps: Deps): FastifyInstance {
           type: "backlog",
           lines: pm.backlog,
           status: statusPayload(),
+          // Sent with the backlog so a client connecting mid-session shows the
+          // roster immediately, rather than staying blank until somebody joins
+          // or leaves.
+          players: playerRoster.snapshot(),
         } satisfies WsMessage),
       );
       socket.on("close", () => sockets.delete(socket));
@@ -421,6 +473,24 @@ export function buildServer(deps: Deps): FastifyInstance {
   app.get("/api/status", async () => {
     pm.refreshUnmanaged();
     return statusPayload();
+  });
+
+  app.get("/api/players", async () => ({ ok: true, players: playerRoster.snapshot() }));
+
+  /**
+   * Asks the server for its own roster.
+   *
+   * Reports the refusal rather than swallowing it: this is the operator
+   * pressing a button, so unlike the internal reconcile there is somebody to
+   * tell when there is no server to ask.
+   */
+  app.post("/api/players/refresh", async (_req, reply) => {
+    try {
+      pm.send("/players");
+    } catch (e) {
+      return reply.send({ ok: false, error: errorText(e) });
+    }
+    return { ok: true };
   });
 
   app.get("/api/worlds", async (req) => {
