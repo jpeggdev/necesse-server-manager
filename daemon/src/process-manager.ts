@@ -280,6 +280,39 @@ export class ProcessManager extends EventEmitter {
     }
   }
 
+  /**
+   * Writes one line to the running server's stdin.
+   *
+   * The newline guard is not defensive padding: stdin is line-oriented, so a
+   * command carrying one runs as two commands, which is how a chat message
+   * like `hi\n/allowcheats` turns into an irreversible cheat toggle. Callers
+   * validate arguments before composing a command; this is the last gate
+   * before the wire, and it throws rather than returning a result so it cannot
+   * be ignored.
+   *
+   * `starting` is refused along with the rest: the game has not reached the
+   * point of reading its console, so a command sent then is silently lost.
+   */
+  send(command: string): void {
+    if (/[\r\n]/.test(command)) {
+      throw new Error(`A command must be a single line, and this one is not: ${JSON.stringify(command)}`);
+    }
+    if (this.state === "unmanaged") {
+      throw new Error(
+        `The running server (pid ${this.externalPid}) was not started by this daemon, ` +
+          `so there is no stdin pipe to send commands to.`,
+      );
+    }
+    if (!this.child || this.state !== "running") {
+      throw new Error(`Server is not running (state: ${this.state}).`);
+    }
+    try {
+      this.child.stdin.write(`${command}\n`);
+    } catch (e) {
+      throw new Error(`Failed to write to server stdin: ${(e as Error).message}`);
+    }
+  }
+
   stop(): Promise<void> {
     if (this.state === "unmanaged") {
       return Promise.reject(
