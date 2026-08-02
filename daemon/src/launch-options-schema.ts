@@ -125,6 +125,33 @@ export function fieldByName(name: string): LaunchOptionField | undefined {
 const RETOKENISED_BY_THE_GAME = /[-+"']/;
 
 /**
+ * Whitespace that ends a value early.
+ *
+ * A different failure from the one above, with the same root cause. The game
+ * joins its arguments into one string and then splits on whitespace, so a tab
+ * or a line break inside a value truncates it: `hello<TAB>world` arrives as
+ * `hello` and the rest is dropped, with nothing injected and nothing reported.
+ * The operator sets a message of the day, sees no error, and the server has a
+ * different one.
+ *
+ * An ordinary space is fine - the game keeps the rest of the line for a value.
+ * The two-character escape `\n` is fine too, and is what the motd field's own
+ * help tells the operator to type; the game expands it itself. Only real
+ * control characters are refused.
+ */
+const TRUNCATED_BY_THE_GAME = /[\t\r\n\f\v]/;
+
+/**
+ * The largest value the game can read.
+ *
+ * Everything numeric here lands in a Java int, and anything above this is
+ * silently ignored rather than clamped. JavaScript makes it easy to exceed:
+ * `Number.isInteger(1e21)` is true, and 1e21 serialises onto the command line
+ * as `1e+21`, which the game does not parse as a number at all.
+ */
+const GAME_INT_MAX = 2147483647;
+
+/**
  * Why this value cannot be stored for this option, or null if it can.
  *
  * An unknown name is refused rather than ignored: silently dropping a key means
@@ -149,6 +176,15 @@ export function checkLaunchOption(name: string, value: unknown): string | null {
         `like this cannot reach the server by any route.`
       );
     }
+    if (TRUNCATED_BY_THE_GAME.test(value)) {
+      return (
+        `"${name}" cannot contain a tab or a line break. The game splits its command line on ` +
+        `whitespace, so everything from that character onward is dropped: "hello<tab>world" ` +
+        `arrives as "hello". Nothing reports it, so the value on the server would quietly differ ` +
+        `from the one set here. A plain space is fine, and for a line break in the message of the ` +
+        `day type the two characters \\n, which the game expands itself.`
+      );
+    }
     return null;
   }
   if (field.type === "boolean") {
@@ -168,6 +204,16 @@ export function checkLaunchOption(name: string, value: unknown): string | null {
       `"${name}" cannot be negative. The game reads the leading - as the start of another ` +
       `option, so -1 arrives as an empty "${name}" plus an option called "1". Measured against ` +
       `Server.jar. Leave "${name}" unset to get the game's own default.`
+    );
+  }
+  // Before the per-field bounds: a field with no max of its own still cannot
+  // exceed what the game's int can hold, and the reason is the game's type
+  // rather than any limit this schema chose.
+  if (value > GAME_INT_MAX) {
+    return (
+      `"${name}" cannot be more than ${GAME_INT_MAX}. The game reads it into an integer of that ` +
+      `size and silently ignores anything larger, and a value big enough to be written in ` +
+      `exponent form (1e+21) is not read as a number at all.`
     );
   }
   const { min, max } = field;

@@ -431,6 +431,26 @@ A few things about how they work are easy to miss:
 
   This is a limitation of the game's command-line parser, not of this tool,
   and there is no way around it from here.
+- **Text options cannot contain a tab or a line break either**, for a
+  different reason from the one above: the game splits its command line on
+  whitespace, so everything from that character onward is dropped and
+  `hello<tab>world` arrives as `hello`. Nothing reports it, so the value on
+  the server would quietly differ from the one you set. A plain space is fine.
+  For a line break in the message of the day, type the two characters `\n`,
+  which the game expands itself.
+- **`password` is the join password**, and it has the same text limits as
+  every other text option, so it cannot contain `-`, `+`, `"`, `'`, a tab or
+  a line break. Leave it unset for an open server. It is sent on the game's
+  command line, so anyone who can list processes on the server box can read
+  it; it keeps strangers out of your world, it is not a secret.
+- **`ip` is the local address the server binds to**, not an address it
+  connects to. Leave it unset and the server binds every address on the box,
+  which is what you want unless it has more than one network and you need to
+  keep the game off one of them. If you set it, check the console on the next
+  start: binding is the game's own business and this tool only passes the
+  value through.
+- **Number options cannot be more than 2147483647.** The game reads them into
+  an integer of that size and silently ignores anything larger.
 - **Number options cannot be negative.** Same cause: the game reads the
   leading `-` as the start of another option, so `-1` arrives as an empty
   value plus an option called `1`. The game uses `-1` internally to mean
