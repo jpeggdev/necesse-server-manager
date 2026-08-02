@@ -118,6 +118,37 @@ describe("the extracted command schema", () => {
     ]);
   });
 
+  /*
+   * Values the jar states outright become a dropdown. These come from three
+   * different declarations: an inline preset list, a Java enum reached through
+   * PermissionLevelParameterHandler, and a MultiParameterHandler whose
+   * alternatives are all closed.
+   */
+  it("offers the real permission levels rather than a text box", () => {
+    const p = SERVER_COMMANDS.find((c) => c.name === "permissions")?.params.find(
+      (x) => x.name === "permissions",
+    );
+    expect(p?.type).toBe("enum");
+    expect(p?.values).toEqual(["user", "creativesettings", "moderator", "admin", "owner", "server"]);
+  });
+
+  it("unions the alternatives of a parameter that accepts several closed forms", () => {
+    const p = SERVER_COMMANDS.find((c) => c.name === "difficulty")?.params[0];
+    expect(p?.type).toBe("enum");
+    expect(p?.values).toEqual(["list", "casual", "adventure", "classic", "hard", "brutal"]);
+  });
+
+  /*
+   * The other half of that rule. `tp` accepts a player OR one of a few words,
+   * and a player name is not drawn from any list in the jar, so a dropdown
+   * would be a lie about what the parameter takes.
+   */
+  it("leaves a parameter open when any of its alternatives is open", () => {
+    const p = SERVER_COMMANDS.find((c) => c.name === "tp")?.params[1];
+    expect(p?.type).toBe("text");
+    expect(p?.values).toBeUndefined();
+  });
+
   it("covers the whole command set, not a handful", () => {
     expect(SERVER_COMMANDS.length).toBeGreaterThan(80);
   });

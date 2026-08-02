@@ -222,7 +222,7 @@ export const SERVER_COMMANDS: readonly CommandDef[] = [
     permission: "ADMIN",
     isCheat: false,
     params: [
-      { name: "list/penalty", type: "text", optional: false },
+      { name: "list/penalty", type: "enum", optional: false, values: ["list", "none", "drop_mats", "drop_main_inventory", "drop_full_inventory", "hardcore"] },
     ],
   },
   {
@@ -258,7 +258,7 @@ export const SERVER_COMMANDS: readonly CommandDef[] = [
     permission: "ADMIN",
     isCheat: false,
     params: [
-      { name: "list/difficulty", type: "text", optional: false },
+      { name: "list/difficulty", type: "enum", optional: false, values: ["list", "casual", "adventure", "classic", "hard", "brutal"] },
     ],
   },
   {
@@ -539,7 +539,7 @@ export const SERVER_COMMANDS: readonly CommandDef[] = [
     params: [
       { name: "list/set/get", type: "enum", optional: false, values: ["list", "set", "get"] },
       { name: "authentication/name", type: "player", optional: true },
-      { name: "permissions", type: "text", optional: true },
+      { name: "permissions", type: "enum", optional: true, values: ["user", "creativesettings", "moderator", "admin", "owner", "server"] },
     ],
   },
   {
@@ -589,7 +589,7 @@ export const SERVER_COMMANDS: readonly CommandDef[] = [
     permission: "ADMIN",
     isCheat: false,
     params: [
-      { name: "list/frequency", type: "text", optional: false },
+      { name: "list/frequency", type: "enum", optional: false, values: ["list", "often", "occasionally", "rarely", "never"] },
     ],
   },
   {
@@ -807,7 +807,7 @@ export const SERVER_COMMANDS: readonly CommandDef[] = [
     isCheat: true,
     params: [
       { name: "player", type: "player", optional: true },
-      { name: "direction", type: "text", optional: true },
+      { name: "direction", type: "enum", optional: true, values: ["northwest", "north", "northeast", "west", "east", "southwest", "south", "southeast"] },
       { name: "dontAttack", type: "bool", optional: true },
     ],
   },

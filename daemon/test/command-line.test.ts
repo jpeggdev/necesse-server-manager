@@ -89,20 +89,26 @@ describe("composeCommand", () => {
     expect(() => composeCommand("say", { message: "   " })).toThrow(/message/);
   });
 
-  /*
-   * Only the handlers that declare their values as literals become enums.
-   * `difficulty` uses the game's EnumParameterHandler, whose values live in an
-   * enum class rather than in the constructor, so it stays text and the server
-   * is what rejects a bad one.
-   */
   it("refuses a value outside an enum's declared set, naming the allowed ones", () => {
     expect(composeCommand("permissions", { "list/set/get": "list" })).toBe("permissions list");
     expect(() => composeCommand("permissions", { "list/set/get": "sideways" })).toThrow(/list/);
   });
 
-  it("leaves a value alone when the game did not declare the allowed set", () => {
-    expect(composeCommand("difficulty", { "list/difficulty": "anything" })).toBe(
-      "difficulty anything",
-    );
+  it("checks a level against the real PermissionLevel enum", () => {
+    expect(
+      composeCommand("permissions", { "list/set/get": "set", "authentication/name": "Jeff", permissions: "owner" }),
+    ).toBe("permissions set Jeff owner");
+    expect(() =>
+      composeCommand("permissions", { "list/set/get": "set", "authentication/name": "Jeff", permissions: "god" }),
+    ).toThrow(/owner/);
+  });
+
+  /*
+   * Registry-backed values are the ones that stay open: an item id exists only
+   * once the game has loaded its registries, so nothing in the jar states the
+   * set and the server is what rejects a bad one.
+   */
+  it("leaves a value alone when the game does not declare the allowed set", () => {
+    expect(composeCommand("give", { item: "anything_at_all" })).toBe("give anything_at_all");
   });
 });

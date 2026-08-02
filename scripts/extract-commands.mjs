@@ -149,6 +149,58 @@ function literalsIn(src) {
   return out;
 }
 
+/**
+ * The constants of a decompiled Java enum, lowercased.
+ *
+ * The game matches these with `equalsIgnoreCase` and its own autocomplete
+ * offers them lowercased, so that is the form to put in front of an operator.
+ *
+ * Enum-backed parameters are the ones whose values ARE knowable statically,
+ * unlike the registry-backed ones (items, buffs, tiles) that only exist once
+ * the game has loaded. Leaving these as free text made the operator guess at a
+ * closed set the jar states outright.
+ */
+const enumCache = new Map();
+function enumValues(className) {
+  if (enumCache.has(className)) return enumCache.get(className);
+  const files = [];
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.name.endsWith(".java")) files.push(full);
+    }
+  };
+  walk(join(SRC_ROOT, "necesse"));
+
+  // A top-level enum is a file of its own; a nested one (RaidDir inside
+  // SettlementRaidLevelEvent) is a declaration inside its outer class, so both
+  // shapes have to be looked for.
+  const declaration = new RegExp(`enum\\s+${className}\\s*(?:implements[^{]*)?\\{`);
+  const own = files.find((f) => f.endsWith(`${className}.java`));
+  const holder = own ?? files.find((f) => declaration.test(readFileSync(f, "utf8")));
+  if (holder === undefined) {
+    throw new Error(
+      `Could not find enum ${className} under the decompile. Decompile the class that declares it, or the form will offer no values for a closed set.`,
+    );
+  }
+
+  const src = readFileSync(holder, "utf8");
+  const at = declaration.exec(src);
+  const start = at === null ? src.indexOf("{") : at.index + at[0].length - 1;
+  // Constants run from the opening brace to the first semicolon after it.
+  const body = src.slice(start, src.indexOf(";", start));
+  const values = [];
+  // Mixed case, not just SCREAMING_CASE: RaidDir's constants are NorthWest,
+  // North, SouthEast and so on.
+  for (const m of body.matchAll(/^\s+([A-Z][A-Za-z0-9_]*)\s*[(,{]/gm)) values.push(m[1].toLowerCase());
+  if (values.length === 0) {
+    throw new Error(`Found enum ${className} but read no constants from it.`);
+  }
+  enumCache.set(className, values);
+  return values;
+}
+
 function parseHandler(expr) {
   const m = /^new\s+([A-Za-z0-9_]+)\s*\(/.exec(expr.trim());
   if (m === null) return { type: "text", values: [] };
@@ -161,10 +213,44 @@ function parseHandler(expr) {
       `Unrecognised parameter handler "${cls}". Add it to HANDLER_TYPES in scripts/extract-commands.mjs.`,
     );
   }
-  // A preset-string handler carries its allowed values as literals. Those are
-  // the only enums that can be listed without decompiling more of the game.
-  const values =
-    cls === "PresetStringParameterHandler" || cls === "StringParameterHandler" ? literalsIn(expr) : [];
+  // Several sources of a closed set, in order of how the game declares it.
+  let values = [];
+  if (cls === "MultiParameterHandler") {
+    /*
+     * A parameter that accepts any of several forms. Its values are a closed
+     * set only when EVERY alternative is closed: `difficulty` is
+     * Multi(Preset("list"), Enum(GameDifficulty)) and can be a dropdown, while
+     * `tp` is Multi(ServerClient, String("spawn","home","death")) and cannot,
+     * because a player name is not drawn from any list the jar states.
+     */
+    const inner = argsOf(expr, expr.indexOf("MultiParameterHandler"));
+    const children = splitArgs(inner ?? "")
+      .filter((a) => a.trim().startsWith("new "))
+      .map(parseHandler);
+    if (children.length > 0 && children.every((c) => c.values.length > 0)) {
+      const union = [];
+      for (const c of children) {
+        for (const v of c.values) if (!union.includes(v)) union.push(v);
+      }
+      values = union;
+    }
+  } else if (cls === "PresetStringParameterHandler" || cls === "StringParameterHandler") {
+    // Declared inline as string literals.
+    values = literalsIn(expr);
+  } else if (cls === "PermissionLevelParameterHandler") {
+    // Always the whole PermissionLevel enum: the handler's parse() walks
+    // values() and its autocomplete offers all of them unfiltered, reserved
+    // ones included, so listing fewer would disagree with the game.
+    values = enumValues("PermissionLevel");
+  } else if (cls === "EnumParameterHandler") {
+    // Always constructed as `(Enum[])SomeEnum.values()`; a nested enum arrives
+    // as `Outer.Inner.values()` and is filed under its own name.
+    const m = /(?:[A-Za-z0-9_]+\.)*([A-Za-z0-9_]+)\.values\(\)/.exec(expr);
+    if (m === null) {
+      throw new Error(`EnumParameterHandler with no resolvable enum: ${expr}`);
+    }
+    values = enumValues(m[1]);
+  }
   return { type: values.length > 0 ? "enum" : type, values };
 }
 
