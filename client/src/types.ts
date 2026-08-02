@@ -495,9 +495,65 @@ export interface InstallResult {
   skipped?: boolean;
 }
 
+/**
+ * One player currently on the server.
+ *
+ * Keyed by `auth` because that is the only identifier present on both the
+ * connect and the disconnect lines - `Client <name> connected on slot n/m`
+ * prints the numeric auth instead of a name for a first-time player.
+ *
+ * `latency` and `level` come only from a `/players` reconcile; the connect
+ * lines do not carry them. `joinedAt` is null when the daemon did not witness
+ * the join, which happens when it attached to a server that was already
+ * running. Dating that from daemon start would read as playtime and be wrong.
+ */
+export interface PlayerEntry {
+  auth: string;
+  name: string;
+  slot: number | null;
+  latency: number | null;
+  level: string | null;
+  joinedAt: string | null;
+}
+
+/**
+ * What control a command's argument needs.
+ *
+ * Coarse on purpose. The registry-backed values (items, buffs, biomes, tiles,
+ * teams, settlers, level identifiers) cannot be listed without shipping a copy
+ * of the game's registries, so they are `text` and the server rejects a bad one
+ * and says why. A dropdown that was missing half the game's items would be
+ * worse than a text box.
+ */
+export type CommandParamType = "int" | "float" | "bool" | "enum" | "player" | "text";
+
+export interface CommandParam {
+  name: string;
+  type: CommandParamType;
+  /** The game parses positionally, so an omitted optional may only be trailing. */
+  optional: boolean;
+  /** Allowed values, when the game declared them as literals. Only ever set for `enum`. */
+  values?: string[];
+}
+
+/** One command the game accepts on its console, as this daemon exposes it. */
+export interface CommandDef {
+  name: string;
+  description: string;
+  permission: "USER" | "MODERATOR" | "ADMIN" | "OWNER" | "SERVER";
+  /** The game's own flag. Cheat commands need cheats enabled on the world. */
+  isCheat: boolean;
+  params: CommandParam[];
+  /** Irreversible enough that the client makes you type the name first. */
+  destructive?: boolean;
+  /** Acts on the caller, and the console is not a player. Hidden by the client. */
+  playerOnly?: boolean;
+}
+
 export type WsMessage =
-  | { type: "backlog"; lines: ConsoleLine[]; status: StatusPayload }
+  | { type: "backlog"; lines: ConsoleLine[]; status: StatusPayload; players: PlayerEntry[] }
   | { type: "console"; line: string; ts: string }
+  | { type: "players"; players: PlayerEntry[] }
   | { type: "status"; status: StatusPayload }
   | { type: "task"; taskId: string; kind: TaskKind; line: string }
   | {

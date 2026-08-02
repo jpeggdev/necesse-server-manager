@@ -287,6 +287,66 @@ not configured, and the daemon recomputes all five every time it starts:
 A few other keys (`modUploadMaxBytes`, `serverAppId`, `workshopAppId`)
 exist with working defaults and normally don't need to be touched at all.
 
+## Players
+
+The **Players** tab, beside Mods, lists who is on the server right now: name,
+slot, how long they have been connected, latency and which level they are on.
+The count on the tab itself updates whether or not you are looking at it.
+
+The list is derived from the server's own console output, so a join or a quit
+shows up the moment the server prints it. Two consequences are worth knowing:
+
+- **It empties when the server stops.** The roster describes a running process,
+  so nothing is stored and nothing survives a restart. An empty list while the
+  server is up says nobody is connected; an empty list while it is stopped says
+  so in as many words, because those are different facts.
+- **A session length is only shown when the daemon saw the join.** If the
+  daemon was restarted while people were already playing, it learns who is on
+  by asking the server, which does not report when they arrived. Those rows
+  show a dash rather than a number that would read as playtime and be wrong.
+
+**Refresh** asks the server directly rather than trusting what the daemon
+inferred. That matters because only a clean quit prints a departure line: a
+timeout, a latency kick, a `/kick` or a shutdown do not, so a player who
+dropped out abruptly can linger in the list. The daemon already asks on its own
+whenever the server starts and whenever it sees a departure it cannot match to
+somebody, and Refresh is the manual version of the same question. It is
+disabled while the server is stopped, since there is nothing to ask.
+
+## Server commands
+
+**Run command** on the Players tab opens a form for any of the game's own
+server commands. The list is not hand-maintained: it is generated from the
+`Server.jar` the daemon runs, so it matches what your server actually
+supports, including each argument's type and whether it is optional. A
+command's output appears in the console panel, where the server prints it.
+
+Four things about it are deliberate:
+
+- **`stop`, `exit` and `quit` are not offered.** The daemon owns the server's
+  lifecycle, and its Stop deliberately never escalates to a kill because the
+  world is being saved. A second path to stopping the server would race that,
+  so those commands are absent from the table entirely rather than hidden in
+  the UI.
+- **Irreversible commands make you type their name first.** `allowcheats` is
+  documented as not reversible, `regen` rewrites a level, and `deleteplayer`
+  removes a player's files. One click should not reach them.
+- **Commands that act on the caller are not listed**, because the console is
+  not a player. `die`, `me` and `reveal` with no target have nothing to act on.
+- **It says a command was sent, never that it worked.** The server accepts a
+  command during world startup, echoes it, and silently does nothing with it.
+  Nothing in the output distinguishes that from a command that ran, so the only
+  honest report is what was sent, with the server's own reply in the console.
+
+Values like item ids, buffs and biomes are typed freely rather than picked from
+a list: those come from the game's registries, which the daemon does not carry a
+copy of. A wrong one is rejected by the server, which says why. Player arguments
+are the exception, and are chosen from whoever is currently online.
+
+The table records the game version it was generated from. If the running server
+reports a different one, the dialog says so rather than quietly offering
+commands that may no longer exist.
+
 ## Mods and Update All
 
 **Update All only downloads mods whose Workshop entry has changed since the

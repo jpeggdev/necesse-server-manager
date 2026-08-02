@@ -5,6 +5,7 @@ import type {
   ModLibraryEntry,
   ModListResponse,
   ModUpdateInfo,
+  PlayerEntry,
   StatusPayload,
   WsMessage,
 } from "./types";
@@ -63,6 +64,16 @@ export interface DaemonState {
    */
   updatesError: string | null;
   console: ConsoleEntry[];
+  /**
+   * Who is on the server right now, as the daemon last reported.
+   *
+   * Empty rather than null when nobody is on: the daemon clears the roster
+   * whenever the server exits, so "no players" and "no server" are both an
+   * empty list here and the panel distinguishes them from the status instead.
+   * Emptied when the socket closes, because this is the one piece of state
+   * that changes without this client asking.
+   */
+  players: PlayerEntry[];
   connected: boolean;
   error: string | null;
   /**
@@ -114,6 +125,7 @@ export function useDaemon(conn: Connection): DaemonState {
   const [modUpdates, setModUpdates] = useState<ModUpdateInfo[] | null>(null);
   const [updatesError, setUpdatesError] = useState<string | null>(null);
   const [lines, setLines] = useState<ConsoleEntry[]>([]);
+  const [players, setPlayers] = useState<PlayerEntry[]>([]);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -267,6 +279,11 @@ export function useDaemon(conn: Connection): DaemonState {
         // An unmount closes the socket itself; that is not a failed attempt.
         if (closed) return;
         setConnected(false);
+        // The roster is the one piece of state that goes stale the instant the
+        // socket does: it changes without any request from here, so a kept
+        // list would keep asserting names that may already have left. The
+        // reconnect's backlog carries the current one.
+        setPlayers([]);
         failures += 1;
         if (failures >= WS_FAILURE_THRESHOLD) void diagnoseConnectFailure(failures);
         // Nothing task-related to unwind here: the reconnect's backlog (and
@@ -292,6 +309,13 @@ export function useDaemon(conn: Connection): DaemonState {
         if (msg.type === "backlog") {
           setStatus(msg.status);
           setLines(msg.lines.map((l) => ({ line: l.line, ts: l.ts, kind: l.source })));
+          // `?? []` for the same reason activeTasks is read defensively below:
+          // a daemon still running an older build sends a backlog with no
+          // roster in it, and setting undefined here would crash the panel on
+          // its first render rather than showing an empty list.
+          setPlayers(msg.players ?? []);
+        } else if (msg.type === "players") {
+          setPlayers(msg.players);
         } else if (msg.type === "console") {
           append({ line: msg.line, ts: msg.ts, kind: "server" });
         } else if (msg.type === "status") {
@@ -345,6 +369,7 @@ export function useDaemon(conn: Connection): DaemonState {
     modUpdates,
     updatesError,
     console: lines,
+    players,
     connected,
     error,
     // The `?.` on a field the type declares as required guards exactly one

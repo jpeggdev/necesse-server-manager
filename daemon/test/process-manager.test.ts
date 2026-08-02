@@ -163,6 +163,46 @@ describe("start", () => {
   });
 });
 
+describe("send", () => {
+  it("writes the command as one line to stdin", () => {
+    pm.start("Tulsa", {});
+    child().child.emitLine(F.READY_LINE_WITH_TS);
+    pm.send("/players");
+    expect(child().child.written).toEqual(["/players\n"]);
+  });
+
+  it("refuses when the server is not running", () => {
+    expect(() => pm.send("/players")).toThrow(/not running/i);
+  });
+
+  it("refuses while the server is still starting, before it can read a command", () => {
+    pm.start("Tulsa", {});
+    expect(() => pm.send("/players")).toThrow(/not running/i);
+    expect(child().child.written).toEqual([]);
+  });
+
+  // The same distinction stop already draws: an adopted server has no stdin
+  // pipe at all, so this is not a transient failure and must not read like one.
+  it("refuses on a server this daemon did not start", () => {
+    const pm2 = new ProcessManager(cfg, spawn.spawn, alive);
+    pm2.markUnmanaged(9001);
+    expect(() => pm2.send("/players")).toThrow(/not started by this daemon/i);
+  });
+
+  /*
+   * stdin is line-oriented, so a command carrying a newline runs as two
+   * commands: `/say hi\n/allowcheats` would enable cheats irreversibly. Same
+   * class as the launch-option values that re-parsed as flags.
+   */
+  it("refuses a command containing a newline, writing nothing", () => {
+    pm.start("Tulsa", {});
+    child().child.emitLine(F.READY_LINE_WITH_TS);
+    expect(() => pm.send("/say hi\n/allowcheats")).toThrow(/single line/i);
+    expect(() => pm.send("/say hi\r/allowcheats")).toThrow(/single line/i);
+    expect(child().child.written).toEqual([]);
+  });
+});
+
 describe("stop", () => {
   it("writes stop to stdin and resolves when the process exits", async () => {
     pm.start("Tulsa", {});

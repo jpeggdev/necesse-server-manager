@@ -10,6 +10,7 @@ import { ModRegistry } from "../src/mod-registry.js";
 import { ModLibrary } from "../src/mod-library.js";
 import { ModSets } from "../src/mod-sets.js";
 import { LaunchOptions } from "../src/launch-options.js";
+import { PlayerRoster } from "../src/player-roster.js";
 import { SteamCmd } from "../src/steamcmd.js";
 import { SteamWorkshop } from "../src/steam-workshop.js";
 import { DEFAULT_CONFIG } from "../src/config.js";
@@ -43,6 +44,7 @@ let steam: SteamCmd;
 let net: FakeFetch;
 let workshop: SteamWorkshop;
 let launchOptions: LaunchOptions;
+let playerRoster: PlayerRoster;
 let app: ReturnType<typeof buildServer>;
 
 beforeEach(async () => {
@@ -81,6 +83,7 @@ beforeEach(async () => {
   workshop = new SteamWorkshop(cfg, net.fetch);
   installer = new ModInstaller(cfg, registry, steam, library, workshop);
   launchOptions = new LaunchOptions(join(root, "launch-options.json"));
+  playerRoster = new PlayerRoster();
   app = buildServer({
     cfg,
     configFile,
@@ -92,6 +95,7 @@ beforeEach(async () => {
     steam,
     workshop,
     launchOptions,
+    playerRoster,
   });
 });
 
@@ -121,6 +125,7 @@ describe("GET /api/status", () => {
       steam,
       workshop,
       launchOptions,
+      playerRoster,
     });
 
     const res = await selfHealApp.inject({ method: "GET", url: "/api/status" });
@@ -152,6 +157,7 @@ describe("configWarnings in the status payload", () => {
       steam,
       workshop,
       launchOptions,
+      playerRoster,
     });
 
     const res = await warnedApp.inject({ method: "GET", url: "/api/status" });
@@ -171,6 +177,7 @@ describe("configWarnings in the status payload", () => {
       steam,
       workshop,
       launchOptions,
+      playerRoster,
     });
     await warnedApp.ready();
 
@@ -246,6 +253,7 @@ describe("activeTasks in the status payload", () => {
       steam: throwingSteam,
       workshop,
       launchOptions,
+      playerRoster,
     });
 
     const launch = await rejectApp.inject({ method: "POST", url: "/api/server/update" });
@@ -516,6 +524,234 @@ describe("GET /api/worlds", () => {
     expect(b.json().candidate).toEqual({ name: "Brand New", exists: false, valid: true });
     const c = await app.inject({ method: "GET", url: "/api/worlds?name=bad%3Aname" });
     expect(c.json().candidate.valid).toBe(false);
+  });
+});
+
+describe("players", () => {
+  const TS = "[2026-08-01 21:31:04] ";
+  const AUTH = "76561198048435182";
+
+  /** Starts the server and drives it to running, which is where commands work. */
+  async function running(): Promise<void> {
+    await app.inject({ method: "POST", url: "/api/server/start", payload: { world: "Tulsa" } });
+    spawn.calls[0].child.emitLine(F.READY_LINE_WITH_TS);
+  }
+
+  function connect(auth: string, name: string, slot: number): void {
+    spawn.calls[0].child.emitLine(
+      `${TS}Client "${auth}" with address 192.168.1.50:52134 is connecting with version 1.3.1.`,
+    );
+    spawn.calls[0].child.emitLine(`${TS}Client "${name}" connected on slot ${slot}/5.`);
+  }
+
+  it("reports an empty roster before anyone joins", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/players" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true, players: [] });
+  });
+
+  it("reports a player the server said connected", async () => {
+    await running();
+    connect(AUTH, "Jeff", 1);
+    const res = await app.inject({ method: "GET", url: "/api/players" });
+    expect(res.json().players).toMatchObject([{ auth: AUTH, name: "Jeff", slot: 1 }]);
+  });
+
+  it("empties the roster when the server exits", async () => {
+    await running();
+    connect(AUTH, "Jeff", 1);
+    spawn.calls[0].child.exit(0);
+    await vi.waitFor(async () => {
+      const res = await app.inject({ method: "GET", url: "/api/players" });
+      expect(res.json().players).toEqual([]);
+    });
+  });
+
+  it("asks the server who is online as soon as it is running", async () => {
+    await running();
+    expect(spawn.calls[0].child.written).toContain("players\n");
+  });
+
+  it("asks the server for /players on refresh", async () => {
+    await running();
+    spawn.calls[0].child.written.length = 0;
+    const res = await app.inject({ method: "POST", url: "/api/players/refresh" });
+    expect(res.json()).toEqual({ ok: true });
+    expect(spawn.calls[0].child.written).toEqual(["players\n"]);
+  });
+
+  /*
+   * The manual path gets the same retry as the automatic one. Pressed during
+   * world startup, a single ask is accepted, echoed and silently ignored, and
+   * the operator would be told it worked while the panel never changed.
+   */
+  it("keeps asking after a refresh the server never answers", () => {
+    vi.useFakeTimers();
+    try {
+      runningNoHttp();
+      spawn.calls[0].child.written.length = 0;
+      void app.inject({ method: "POST", url: "/api/players/refresh" });
+      vi.advanceTimersByTime(0);
+      vi.advanceTimersByTime(2000);
+      vi.advanceTimersByTime(2000);
+      expect(spawn.calls[0].child.written.length).toBeGreaterThanOrEqual(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("refuses a refresh when the server is not running, saying why", async () => {
+    const res = await app.inject({ method: "POST", url: "/api/players/refresh" });
+    const body = res.json();
+    expect(body.ok).toBe(false);
+    expect(body.error).toMatch(/not running/i);
+  });
+
+  /*
+   * Measured on the real 1.3.1 server: a /players sent the instant the ready
+   * line appears is echoed to the console and then does nothing, because the
+   * world is still initialising. The same command moments later answers. The
+   * daemon cannot tell those apart from the output, so it asks again until the
+   * server replies.
+   */
+  /*
+   * These drive the ProcessManager directly rather than through the start
+   * route: the retry has to be created while the fake clock is installed, and
+   * installing it around an `app.inject()` stalls Fastify's own awaits.
+   */
+  function runningNoHttp(): void {
+    pm.start("Tulsa", {});
+    spawn.calls[0].child.emitLine(F.READY_LINE_WITH_TS);
+  }
+
+  it("keeps asking when the server accepts the command but never answers", () => {
+    vi.useFakeTimers();
+    try {
+      runningNoHttp();
+      expect(spawn.calls[0].child.written).toEqual(["players\n"]);
+      vi.advanceTimersByTime(2000);
+      vi.advanceTimersByTime(2000);
+      expect(spawn.calls[0].child.written.length).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops asking as soon as the server answers", () => {
+    vi.useFakeTimers();
+    try {
+      runningNoHttp();
+      spawn.calls[0].child.emitLine(`${TS}Players online: 0/5`);
+      spawn.calls[0].child.written.length = 0;
+      vi.advanceTimersByTime(30000);
+      expect(spawn.calls[0].child.written).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives up rather than asking a silent server forever", () => {
+    vi.useFakeTimers();
+    try {
+      runningNoHttp();
+      vi.advanceTimersByTime(120000);
+      expect(spawn.calls[0].child.written.length).toBe(5);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("replaces the roster from a /players block the server printed", async () => {
+    await running();
+    connect(AUTH, "Jeff", 1);
+    connect("7656119800", "eli", 2);
+    spawn.calls[0].child.emitLine(`${TS}Players online: 1/5`);
+    spawn.calls[0].child.emitLine(`${TS}Slot 1: ${AUTH} "Jeff", latency: 42, level: surface,conn: LOCAL`);
+
+    const res = await app.inject({ method: "GET", url: "/api/players" });
+    expect(res.json().players).toMatchObject([{ auth: AUTH, latency: 42, level: "surface" }]);
+  });
+});
+
+describe("commands", () => {
+  async function running(): Promise<void> {
+    await app.inject({ method: "POST", url: "/api/server/start", payload: { world: "Tulsa" } });
+    spawn.calls[0].child.emitLine(F.READY_LINE_WITH_TS);
+    // The roster's own reconcile fires here; clear it so assertions below are
+    // about the command under test and nothing else.
+    spawn.calls[0].child.written.length = 0;
+  }
+
+  it("serves the schema with both game versions, so the client can compare them", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/commands" });
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.commands.length).toBeGreaterThan(80);
+    expect(body.schemaGameVersion).toMatch(/^\d+\.\d+/);
+    // Null until a server has run and reported one.
+    expect(body).toHaveProperty("gameVersion");
+  });
+
+  it("sends a composed command to the server exactly once", async () => {
+    await running();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/command",
+      payload: { name: "say", args: { message: "hello everyone" } },
+    });
+    expect(res.json()).toEqual({ ok: true, sent: "say hello everyone" });
+    expect(spawn.calls[0].child.written).toEqual(["say hello everyone\n"]);
+  });
+
+  it("refuses a command that is not in the schema, and sends nothing", async () => {
+    await running();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/command",
+      payload: { name: "stop", args: {} },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/not a server command/i);
+    expect(spawn.calls[0].child.written).toEqual([]);
+  });
+
+  it("refuses a bad argument, naming it, and sends nothing", async () => {
+    await running();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/command",
+      payload: { name: "give", args: { item: "iron_bar", amount: "ten" } },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/amount/);
+    expect(spawn.calls[0].child.written).toEqual([]);
+  });
+
+  it("refuses an injected second command, and sends nothing", async () => {
+    await running();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/command",
+      payload: { name: "say", args: { message: "hi\nallowcheats" } },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(spawn.calls[0].child.written).toEqual([]);
+  });
+
+  it("refuses when there is no running server to send to", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/command",
+      payload: { name: "players", args: {} },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toMatch(/not running/i);
+  });
+
+  it("rejects a malformed body rather than guessing what was meant", async () => {
+    await running();
+    const res = await app.inject({ method: "POST", url: "/api/command", payload: { args: {} } });
+    expect(res.statusCode).toBe(400);
   });
 });
 
@@ -2072,6 +2308,7 @@ describe("access token", () => {
       steam,
       workshop,
       launchOptions,
+      playerRoster,
     });
   });
 
@@ -2142,6 +2379,7 @@ describe("access token", () => {
       steam,
       workshop,
       launchOptions,
+      playerRoster,
     });
 
     const status = await whitespaceApp.inject({ method: "GET", url: "/api/status" });
@@ -2357,6 +2595,7 @@ describe("launch options", () => {
       steam,
       workshop,
       launchOptions: broken,
+      playerRoster,
     });
 
     const res = await brokenApp.inject({

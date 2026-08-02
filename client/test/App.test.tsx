@@ -273,6 +273,39 @@ async function settle() {
   });
 }
 
+describe("App players tab", () => {
+  it("shows the roster the daemon pushed, without losing the mods panel", async () => {
+    const ws = await mountConnected();
+    await act(async () => {
+      ws.onmessage?.({
+        data: JSON.stringify({
+          type: "players",
+          players: [
+            {
+              auth: "76561198048435182",
+              name: "Jeff",
+              slot: 1,
+              latency: 42,
+              level: "surface",
+              joinedAt: null,
+            },
+          ],
+        }),
+      });
+    });
+
+    // The count is visible from the Mods tab, so the operator sees somebody
+    // join without having to be looking at the right panel.
+    const tab = await screen.findByRole("tab", { name: /players \(1\)/i });
+    fireEvent.click(tab);
+    expect(await screen.findByText("Jeff")).toBeInTheDocument();
+
+    // Switching back must not have thrown away the mods panel's own state.
+    fireEvent.click(screen.getByRole("tab", { name: /^mods$/i }));
+    expect(screen.getByRole("heading", { name: /^mods$/i })).toBeVisible();
+  });
+});
+
 describe("App busy continuity", () => {
   it("keeps the task buttons disabled from click, through the response, until the daemon reports the task done", async () => {
     const ws = await mountConnected();

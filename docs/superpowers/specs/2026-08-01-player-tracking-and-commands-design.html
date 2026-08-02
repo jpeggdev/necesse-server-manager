@@ -1,0 +1,501 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Player tracking and server commands - design</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfbfa; --fg: #1a1a1a; --muted: #5c5c5c; --rule: #dcdcd8;
+    --card: #fff; --accent: #7a4f01; --code-bg: #f2f1ee;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16171a; --fg: #e6e6e3; --muted: #9a9a96; --rule: #2e3035;
+      --card: #1d1f23; --accent: #e0a33a; --code-bg: #24262b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2.5rem 1.25rem 5rem; background: var(--bg); color: var(--fg);
+    font: 16px/1.65 -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  main { max-width: 46rem; margin: 0 auto; }
+  h1 { font-size: 1.75rem; line-height: 1.25; margin: 0 0 .35rem; }
+  h2 {
+    font-size: 1.15rem; margin: 2.75rem 0 .75rem; padding-top: .85rem;
+    border-top: 1px solid var(--rule);
+  }
+  h3 { font-size: 1rem; margin: 1.75rem 0 .5rem; }
+  .sub { color: var(--muted); margin: 0 0 2rem; }
+  code, pre { font-family: "Cascadia Code", Consolas, ui-monospace, monospace; font-size: .875em; }
+  code { background: var(--code-bg); padding: .12em .35em; border-radius: 3px; }
+  pre {
+    background: var(--code-bg); padding: .85rem 1rem; border-radius: 6px;
+    overflow-x: auto; border: 1px solid var(--rule);
+  }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  .wrap { overflow-x: auto; }
+  .note {
+    background: var(--card); border: 1px solid var(--rule); border-left: 3px solid var(--accent);
+    padding: .85rem 1rem; border-radius: 0 6px 6px 0; margin: 1.25rem 0;
+  }
+  .note strong { color: var(--accent); }
+  ul, ol { padding-left: 1.35rem; }
+  li { margin: .3rem 0; }
+  footer { margin-top: 3.5rem; padding-top: 1rem; border-top: 1px solid var(--rule); color: var(--muted); font-size: .875rem; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Player tracking and server commands</h1>
+<p class="sub">Design, 2026-08-01. Necesse Server Manager.</p>
+
+<h2>What this adds</h2>
+
+<p>Two features that share a seam. A <strong>players panel</strong> showing who is
+on the server right now, derived from the console output the daemon already
+streams. And a way to <strong>send the game's own commands</strong> from the
+client, as generated forms rather than a text box.</p>
+
+<p>They meet at one point: the game's "online player" parameter type becomes a
+dropdown fed by the live roster, so <code>/kick</code>, <code>/give</code> and
+<code>/tp</code> pick from real names instead of asking the operator to type
+one correctly.</p>
+
+<h2>Ground truth</h2>
+
+<p>Everything below was read out of the game rather than the wiki. The
+decompiled tree in <code>necesse-projects/decompiled</code> is 1.2.0 while the
+server runs 1.3.1, so the formats are treated as a starting point and the
+implementation captures real 1.3.1 output as fixtures before trusting any
+parser.</p>
+
+<h3>Lines the server prints</h3>
+
+<div class="wrap">
+<table>
+<tr><th>Event</th><th>Line</th><th>Source</th></tr>
+<tr>
+  <td>Connecting</td>
+  <td><code>Client "&lt;auth&gt;" with address &lt;addr&gt; is connecting with version &lt;v&gt;.</code></td>
+  <td><code>Server.addClient</code></td>
+</tr>
+<tr>
+  <td>Connected</td>
+  <td><code>Client &lt;consoleName&gt; connected on slot &lt;n&gt;/&lt;slots&gt;.</code></td>
+  <td><code>Server.addClient</code></td>
+</tr>
+<tr>
+  <td>New player</td>
+  <td><code>Creating new player: &lt;auth&gt;</code></td>
+  <td><code>Server.addClient</code></td>
+</tr>
+<tr>
+  <td>Clean quit</td>
+  <td><code>Player &lt;auth&gt; ("&lt;name&gt;") disconnected with message: &lt;reason&gt;</code></td>
+  <td><code>PacketDisconnect.processServer</code></td>
+</tr>
+<tr>
+  <td>Timeout</td>
+  <td><code>Resetting connection for "&lt;name&gt;" due to no packets received for &lt;ms&gt; ms.</code></td>
+  <td><code>ServerClient</code></td>
+</tr>
+<tr>
+  <td>Latency kick</td>
+  <td><code>Ping threshold for "&lt;name&gt;" reached, resulting in kick. Limit is &lt;n&gt; seconds.</code></td>
+  <td><code>ServerClient</code></td>
+</tr>
+</table>
+</div>
+
+<div class="note">
+<p><strong>The disconnect line is not universal.</strong>
+<code>Player &lt;auth&gt; ("&lt;name&gt;") disconnected with message: Quit</code> is printed by
+<code>PacketDisconnect.processServer</code>, and only on a clean
+<code>CLIENT_DISCONNECT</code>. Every other way a player leaves reaches
+<code>Server.disconnectClient</code> directly, which prints nothing per player:
+timeouts, latency kicks, <code>/kick</code>, missing appearance, and server
+shutdown. A roster built only by matching connects to that one line will hold
+ghosts after a crash-out. This is the single fact that shapes the design.</p>
+</div>
+
+<h3>The console name is not always a name</h3>
+
+<p>In <code>Server.addClient</code>, <code>consoleName</code> is the stored player
+name only when the world already knows that authentication. For a first-time
+player it is the numeric auth. So <code>connected on slot</code> cannot be
+relied on for the display name, and the auth is the only identifier present on
+both the connect and the disconnect lines. <strong>The roster is keyed by
+auth.</strong></p>
+
+<h3>/players is a complete snapshot</h3>
+
+<p>Run from the console (<code>serverClient == null</code>), the command prints
+the plain name rather than a teleport parse string:</p>
+
+<pre><code>Players online: 2/5
+Slot 1: 76561198048435182 "Jeff", latency: 42, level: surface,conn: 1.2.3.4:5678
+Slot 2: 76561198000000000 "eli", latency: 31, level: cave,conn: 1.2.3.5:5678</code></pre>
+
+<p>Auth, name, slot, latency and level in one place. This is the authority the
+event parsing is checked against, and the only source of latency and level.</p>
+
+<h3>Every command has a machine-readable definition</h3>
+
+<p>All 90 classes in <code>necesse/engine/commands/serverCommands</code> extend
+<code>ModularChatCommand</code>. None hand-parse their arguments.</p>
+
+<pre><code>ModularChatCommand(String name, String action, PermissionLevel level,
+                   boolean isCheat, CmdParameter... parameters)
+
+CmdParameter(String name, ParameterHandler&lt;?&gt; handler, boolean optional,
+             boolean partOfUsage, CmdParameter... extraParams)</code></pre>
+
+<p>For example <code>GiveServerCommand</code>:</p>
+
+<pre><code>super("give", "Gives item to player", PermissionLevel.ADMIN, true,
+      new CmdParameter("player", new ServerClientParameterHandler(true, false), true),
+      new CmdParameter("item",   new ItemParameterHandler()),
+      new CmdParameter("amount", new IntParameterHandler(1), true));</code></pre>
+
+<p>Name, description, permission level, cheat flag, and per-parameter type and
+optionality. The wiki's "(cheats)" annotations are this <code>isCheat</code>
+boolean. There are 26 parameter handler types.</p>
+
+<h2>Decisions taken</h2>
+
+<div class="wrap">
+<table>
+<tr><th>Decision</th><th>Why</th></tr>
+<tr>
+  <td>Live roster only. No history, playtime or persistence.</td>
+  <td>No new state file, nothing to migrate, and the roster is a fact about a
+  running process. It empties when the server stops.</td>
+</tr>
+<tr>
+  <td>Roster keyed by authentication, not name.</td>
+  <td>The auth is on both the connect and disconnect lines; the name is not
+  reliably on the connect side for a first-time player.</td>
+</tr>
+<tr>
+  <td>Console events for immediacy, <code>/players</code> for truth.</td>
+  <td>Events show a join the moment it happens. <code>/players</code> is the
+  server stating its own roster, which is what clears a ghost.</td>
+</tr>
+<tr>
+  <td>Reconcile on events, never on a timer.</td>
+  <td>Each <code>/players</code> writes its output to the console panel the
+  operator is reading. Triggered on server ready, on an unattributable
+  disconnect line, and on an explicit Refresh.</td>
+</tr>
+<tr>
+  <td>A generated form per command, for all 90.</td>
+  <td>Chosen over a raw command box. The definitions are already structured, so
+  the forms can be too.</td>
+</tr>
+<tr>
+  <td>Schema extracted from SERVER's <code>Server.jar</code>, checked in.</td>
+  <td>The artifact that will receive the commands, not the workstation's
+  <code>Necesse.jar</code> and not the wiki. One source of truth, in the spirit
+  of <code>LAUNCH_OPTION_FIELDS</code>.</td>
+</tr>
+<tr>
+  <td>The API takes a command name and named arguments, never a raw line.</td>
+  <td>A raw string endpoint is arbitrary command execution on the game server,
+  behind a token that is allowed to be empty. Structured input means the daemon
+  can only emit commands that exist.</td>
+</tr>
+<tr>
+  <td><code>/stop</code>, <code>/exit</code>, <code>/quit</code> are excluded.</td>
+  <td>The daemon owns the lifecycle and its stop deliberately never escalates to
+  a kill. Same reasoning that keeps <code>nogui</code>, <code>datadir</code> and
+  <code>world</code> out of launch options.</td>
+</tr>
+<tr>
+  <td>Irreversible commands require a typed confirmation.</td>
+  <td><code>/allowcheats</code> is documented as not reversible;
+  <code>/regen</code> rewrites a level; <code>/deleteplayer</code> removes player
+  files. One click should not reach them.</td>
+</tr>
+<tr>
+  <td>Player-context commands are hidden.</td>
+  <td><code>/die</code>, <code>/me</code>, <code>/copyitem</code> and
+  <code>/reveal</code> with no target act on the caller. There is no caller when
+  the console sends them.</td>
+</tr>
+<tr>
+  <td>Roster ships as its own WebSocket message, not inside <code>StatusPayload</code>.</td>
+  <td>Status is pushed on state changes; the roster changes on different ones.
+  Merging them repaints the header on every join.</td>
+</tr>
+<tr>
+  <td>Players panel is a tab beside Mods.</td>
+  <td>Neither list is squeezed and the console keeps its full height.</td>
+</tr>
+</table>
+</div>
+
+<h2>Architecture</h2>
+
+<h3>Daemon</h3>
+
+<ul>
+<li><code>src/player-roster.ts</code> - the roster and its parsers. Subscribes to
+<code>ProcessManager</code>'s existing <code>"line"</code> event, so it adds no new
+plumbing. Holds a <code>Map</code> keyed by auth. Cleared whenever the process
+exits.</li>
+<li><code>src/server-commands-schema.ts</code> - the generated, checked-in command
+table plus the policy flags. The single source of truth for what may be sent.</li>
+<li><code>src/process-manager.ts</code> - gains <code>send(command: string)</code>,
+which writes one line to the child's stdin exactly as the existing stop path
+does, and refuses on the two cases stop already handles.</li>
+<li><code>src/http.ts</code> - <code>GET /api/players</code>,
+<code>POST /api/players/refresh</code>, <code>GET /api/commands</code> (the schema
+the client renders forms from), and <code>POST /api/command</code>.</li>
+<li><code>src/types.ts</code> - <code>PlayerEntry</code>, <code>CommandDef</code>,
+<code>CommandParam</code>, and a <code>players</code> member on
+<code>WsMessage</code>. Copied byte-identical into the client.</li>
+</ul>
+
+<h3>Client</h3>
+
+<ul>
+<li><code>src/PlayersPanel.tsx</code> - the roster list and a Refresh control,
+in a tab strip with the existing mods panel.</li>
+<li><code>src/CommandDialog.tsx</code> - command picker, generated fields, and
+the typed confirmation for destructive commands. Dialogs are how this app does
+form-heavy work already.</li>
+<li><code>src/useDaemon.ts</code> - handles the new <code>players</code> message.</li>
+</ul>
+
+<h3>Data flow</h3>
+
+<pre><code>game stdout
+  -&gt; ProcessManager ingest (splits lines, strips nothing)
+  -&gt; "line" event
+       -&gt; existing console broadcast  (unchanged)
+       -&gt; PlayerRoster.observe(line)  (new)
+            -&gt; roster changed? broadcast { type: "players", players: [...] }
+
+client form submit
+  -&gt; POST /api/command { name, args }
+  -&gt; validate against schema, render one line, ProcessManager.send
+  -&gt; game prints its CommandLog to stdout, which is already streaming back</code></pre>
+
+<h2>The roster</h2>
+
+<h3>Entry shape</h3>
+
+<pre><code>interface PlayerEntry {
+  auth: string;          // the join key, present on both connect and disconnect
+  name: string;          // "" until known
+  slot: number | null;
+  latency: number | null;   // only from /players
+  level: string | null;     // only from /players
+  joinedAt: string | null;  // null when the daemon did not see the join
+}</code></pre>
+
+<h3>What opens and closes an entry</h3>
+
+<ul>
+<li><strong>Opens:</strong> the <code>is connecting with version</code> line, keyed by
+its auth. The <code>connected on slot</code> line then fills in the slot, and the
+name if it was a name rather than an auth.</li>
+<li><strong>Closes by auth:</strong> the <code>disconnected with message</code> line.</li>
+<li><strong>Closes by name:</strong> the timeout and latency-kick lines, which carry
+only a quoted name. If no entry matches that name, the line is treated as an
+unattributable disconnect and triggers a <code>/players</code> reconcile.</li>
+<li><strong>Replaced wholesale:</strong> a parsed <code>/players</code> block. This is the
+only path that sets latency and level.</li>
+<li><strong>Emptied:</strong> process exit, for any reason.</li>
+</ul>
+
+<div class="note">
+<p><strong>Session duration is only shown when the daemon saw the join.</strong> A
+player discovered through <code>/players</code> (daemon restarted against a running
+server, or a missed connect line) has no join time. That row shows a dash. The
+alternative, dating it from daemon start, would be a number the operator would
+reasonably read as playtime and it would be wrong.</p>
+</div>
+
+<h2>Sending commands</h2>
+
+<h3>Request</h3>
+
+<pre><code>POST /api/command
+{ "name": "give", "args": { "player": "eli", "item": "iron_bar", "amount": 10 } }</code></pre>
+
+<p>The daemon looks the name up in the schema, checks each argument against its
+parameter type, renders <code>/give eli iron_bar 10</code>, and writes it. The
+client never composes the line.</p>
+
+<h3>Validation, in order</h3>
+
+<ol>
+<li>The server is running and was spawned by this daemon. An adopted process has
+no stdin pipe, the same reason stop already gives.</li>
+<li>The command exists in the schema and is not <code>excluded</code>. An excluded
+command is absent from the table, so this is a lookup failure rather than a
+special case.</li>
+<li>Every required parameter is present, and no unknown argument is supplied.</li>
+<li>No argument contains a newline, carriage return or tab.</li>
+<li>Typed arguments parse: int, float and bool are checked; registry-backed
+values are passed through for the game to accept or reject.</li>
+</ol>
+
+<div class="note">
+<p><strong>Rule 4 is the security-relevant one.</strong> stdin is line-oriented, so a
+value containing a newline smuggles a second command onto the wire:
+<code>/say hello\n/allowcheats</code> would run both. This is the same class of
+defect as the launch-option values that re-parsed as flags, and it gets the same
+treatment: rejected at the boundary, with a test that feeds a real control
+character through and fails when the guard is removed.</p>
+</div>
+
+<h3>Output</h3>
+
+<p>No new channel. The game prints its <code>CommandLog</code> to stdout, which
+already streams to the console panel. The daemon echoes the line it sent
+immediately before sending it, so the console reads as a transcript of what was
+run and what came back.</p>
+
+<h2>Schema extraction</h2>
+
+<ol>
+<li>Copy <code>C:\necesseserver\Server.jar</code> from SERVER to the scratchpad.
+That is the artifact that receives these commands. The workstation's
+<code>Necesse.jar</code> is a different build.</li>
+<li>Run CFR over it once into the scratchpad, filtered to
+<code>necesse.engine.commands.*</code>.</li>
+<li>Parse the single <code>super(...)</code> call in each
+<code>*ServerCommand.java</code> into a schema entry: name, description,
+permission level, <code>isCheat</code>, and each parameter's name, handler type
+and optionality.</li>
+<li>Apply the policy flags: <code>excluded</code> for the three lifecycle
+commands, <code>destructive</code> for the irreversible ones,
+<code>playerOnly</code> for the ones that act on the caller.</li>
+<li>Emit <code>daemon/src/server-commands-schema.ts</code>, and record the game
+version it came from in the same file.</li>
+<li>Verify by sending <code>/help</code> to the live server once and diffing the
+command names it reports against the schema.</li>
+</ol>
+
+<h3>Parameter types to form controls</h3>
+
+<div class="wrap">
+<table>
+<tr><th>Group</th><th>Handlers</th><th>Control</th></tr>
+<tr>
+  <td>Enumerable</td>
+  <td>Bool, Enum, PermissionLevel</td>
+  <td>Select with the real values</td>
+</tr>
+<tr>
+  <td>Numeric</td>
+  <td>Int, Float, RelativeInt</td>
+  <td>Number input, seeded with the handler's own default</td>
+</tr>
+<tr>
+  <td>Online player</td>
+  <td>ServerClient</td>
+  <td>Select fed by the live roster</td>
+</tr>
+<tr>
+  <td>Registry-backed</td>
+  <td>Item, Buff, Enchantment, Biome, Tile, Team, Settler, StoredPlayer, and the rest</td>
+  <td>Free text. Their valid values are game registries that cannot be listed
+  statically; the server rejects a bad one and says why</td>
+</tr>
+</table>
+</div>
+
+<div class="note">
+<p><strong>The schema is about the game's version, not ours.</strong> A game update can
+add or change commands, leaving a checked-in schema quietly wrong.
+<code>GET /api/status</code> already reports the running server's
+<code>gameVersion</code>, so the daemon compares it against the version stamped in
+the schema and surfaces a warning when they differ. Offering a command that no
+longer exists is a worse failure than saying the table may be stale.</p>
+</div>
+
+<h2>Errors</h2>
+
+<p>Consistent with the rest of this daemon: nothing is swallowed, and a failure
+says what to do about it.</p>
+
+<ul>
+<li>Server not running, or running but not ours: refused with the same
+distinction stop already draws.</li>
+<li>Unknown or excluded command: 400 naming the command.</li>
+<li>Bad argument: 400 naming the parameter and what was wrong with it.</li>
+<li>A <code>/players</code> reconcile that produces no parseable block: the roster
+is left as it was and the failure is reported, rather than silently emptying the
+panel.</li>
+</ul>
+
+<h2>Testing</h2>
+
+<div class="note">
+<p><strong>Fixtures must be captured, not composed.</strong> This repo already treats
+<code>daemon/test/fixtures/log-fixtures.ts</code> as evidence, because the game
+emits ANSI colour before the timestamp and that broke shutdown detection while
+every unit test passed. The connect, disconnect and <code>/players</code> lines get
+the same treatment: captured verbatim from a real 1.3.1 session before any
+parser is trusted. That needs a couple of minutes of the operator joining and
+quitting a world during implementation.</p>
+</div>
+
+<ul>
+<li>Parsers run on normalised lines and are tested with the ANSI prefix present.</li>
+<li>The roster is tested as a sequence: connect, connect, unattributable
+disconnect, reconcile. Including the first-time-player case where
+<code>connected on slot</code> carries an auth rather than a name.</li>
+<li>An argument containing a newline is rejected. An excluded command cannot be
+sent by name. Both proved by deleting the guard and confirming red.</li>
+<li><code>ProcessManager.send</code> refuses on a stopped server and on an adopted
+one.</li>
+<li>A seam test in <code>client/test/api.integration.test.ts</code> drives
+<code>POST /api/command</code> through the real client transport against a real
+daemon. New shapes crossing the wire are exactly why that file exists.</li>
+<li>Daemon sources stay ES2020-compatible, since the client typechecks them a
+second time.</li>
+<li><code>daemon/src/types.ts</code> and <code>client/src/types.ts</code> hashed after
+editing.</li>
+</ul>
+
+<h2>Out of scope</h2>
+
+<ul>
+<li>Playtime, session history, last-seen, or any persistence of who was on.</li>
+<li>A raw command box. The forms are the interface.</li>
+<li>Chat relay, or reading player chat out of the console.</li>
+<li>Client-side autocomplete of item, buff or biome identifiers.</li>
+<li>Anything that changes how the daemon starts or stops the server.</li>
+</ul>
+
+<h2>Known limits</h2>
+
+<ul>
+<li>A ghost survives until the next reconcile trigger or a manual Refresh. This
+is the accepted cost of not polling.</li>
+<li>The schema is a snapshot of one game version and is only as current as its
+last extraction. The version warning makes that visible rather than silent.</li>
+<li>Registry-backed arguments are validated by the game, not by the form, so a
+typo is reported after sending rather than before.</li>
+</ul>
+
+<footer>
+Necesse Server Manager. Design written 2026-08-01, from
+<code>necesse.engine.commands</code>, <code>Server.addClient</code> and
+<code>PacketDisconnect.processServer</code>.
+</footer>
+
+</main>
+</body>
+</html>

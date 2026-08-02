@@ -30,3 +30,55 @@ export const REAL_DEBUG =
   "\u001b[34m[2026-07-27 03:27:26] (DEBUG) Initializing DesktopPlatform";
 export const REAL_WARN =
   "\u001b[33m[2026-07-27 03:27:28] (WARN) Invalid mod jar located at C:\\Users\\jeffp\\AppData\\Roaming\\Necesse\\mods\\torvians-qol.cfg";
+
+/*
+ * A real join and a real quit, captured from the live server's
+ * latest-server-log.txt on 2026-08-01, game version 1.3.1. The player joined
+ * at 21:23:18 and quit fifteen seconds later.
+ *
+ * Evidence, not illustration: these are the exact formats
+ * Server.addClient and PacketDisconnect.processServer produce, and the auth on
+ * the connect line is what the roster keys off. Do not tidy the address, the
+ * quoting or the punctuation.
+ *
+ * Note what is NOT here. A normal quit is the ONLY departure that prints the
+ * "disconnected with message" line - timeouts, latency kicks, /kick and
+ * shutdown all reach Server.disconnectClient, which prints nothing per player.
+ * That absence is why the roster reconciles against /players rather than
+ * trusting a connect/disconnect pairing.
+ *
+ * These come from the log file rather than stdout, so they carry no SGR colour
+ * escape. The live stdout does (see REAL_READY above), which is why the
+ * parsers normalize rather than matching a bare timestamp.
+ */
+export const REAL_CONNECTING =
+  '[2026-08-01 21:23:18] Client "76561198048435182" with address 192.168.1.64:64832 is connecting with version 1.3.1.';
+export const REAL_CONNECTED = '[2026-08-01 21:23:18] Client "Jeff" connected on slot 1/5.';
+export const REAL_DISCONNECTED =
+  '[2026-08-01 21:23:33] Player 76561198048435182 ("Jeff") disconnected with message: Quit';
+
+/*
+ * A real /players answer, captured 2026-08-02 04:08:50 from the live 1.3.1
+ * server with nobody connected.
+ *
+ * The echo line matters as much as the answer. Sent moments earlier, at the
+ * instant the ready line appeared, the identical command produced the echo and
+ * NOTHING else: the world was still initialising, so it parsed and silently did
+ * nothing. That is why the daemon asks again until the server answers, rather
+ * than assuming a sent command ran.
+ */
+export const REAL_PLAYERS_ECHO = "[2026-08-02 04:08:50] > players";
+export const REAL_PLAYERS_EMPTY = "[2026-08-02 04:08:50] Players online: 0/5";
+
+/*
+ * A real /players answer with somebody on it, captured 2026-08-02 04:11:52,
+ * and the line the game prints once that player is actually in the world.
+ *
+ * `latency: 0` is not a placeholder - that is what the server reported for a
+ * client on the same LAN, and it is why the roster treats 0 as a value rather
+ * than as "unknown".
+ */
+export const REAL_PLAYERS_ONE = "[2026-08-02 04:11:52] Players online: 1/5";
+export const REAL_PLAYERS_ROW =
+  '[2026-08-02 04:11:52] Slot 1: 76561198048435182 "Jeff", latency: 0, level: surface,conn: 192.168.1.64:51802';
+export const REAL_PLAYER_LOADED = "[2026-08-02 04:11:01] Loaded player: 76561198048435182";

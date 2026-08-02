@@ -18,6 +18,7 @@ import { ModRegistry } from "../../daemon/src/mod-registry.js";
 import { ModLibrary } from "../../daemon/src/mod-library.js";
 import { ModSets } from "../../daemon/src/mod-sets.js";
 import { LaunchOptions } from "../../daemon/src/launch-options.js";
+import { PlayerRoster } from "../../daemon/src/player-roster.js";
 import { SteamCmd } from "../../daemon/src/steamcmd.js";
 import { SteamWorkshop } from "../../daemon/src/steam-workshop.js";
 import { makeTestConfig } from "../../daemon/test/fixtures/test-config.js";
@@ -105,6 +106,9 @@ let worldsDir: string;
 /** The daemon's own library and registry, so a test can arrange state the client API cannot reach. */
 let library: ModLibrary;
 let registry: ModRegistry;
+let playerRoster: PlayerRoster;
+let spawn: ReturnType<typeof makeFakeSpawn>;
+let pm: ProcessManager;
 /** What the daemon's SteamWorkshop calls. Refuses by default; a test can queue an answer. */
 let net: FakeFetch;
 
@@ -128,8 +132,8 @@ beforeEach(async () => {
   modsDir = cfg.modsDir;
   worldsDir = cfg.worldsDir;
   const configFile = join(root, "config.json");
-  const spawn = makeFakeSpawn();
-  const pm = new ProcessManager(cfg, spawn.spawn);
+  spawn = makeFakeSpawn();
+  pm = new ProcessManager(cfg, spawn.spawn);
   const steam = new SteamCmd(cfg, spawn.spawn);
   library = new ModLibrary(cfg.modLibraryFile, cfg.modLibraryDir);
   const sets = new ModSets(cfg.modSetsFile);
@@ -143,6 +147,7 @@ beforeEach(async () => {
   registry = new ModRegistry(join(root, "mods.json"));
   const installer = new ModInstaller(cfg, registry, steam, library, workshop);
   const launchOptions = new LaunchOptions(join(root, "launch-options.json"));
+  playerRoster = new PlayerRoster();
   app = buildServer({
     cfg,
     configFile,
@@ -154,6 +159,7 @@ beforeEach(async () => {
     steam,
     workshop,
     launchOptions,
+    playerRoster,
   });
   baseUrl = await app.listen({ port: 0, host: "127.0.0.1" });
 });
@@ -187,6 +193,92 @@ describe("makeApi against a real daemon instance", () => {
     const res = await makeApi(baseUrl, TOKEN).updateAllMods();
     expect(res.ok).toBe(true);
     expect(typeof res.taskId).toBe("string");
+  });
+
+  /*
+   * The roster over a real socket and a real HTTP round trip.
+   *
+   * PlayerEntry is a new shape crossing the wire, and refreshPlayers() is a
+   * bodyless POST - the exact combination that once shipped five broken
+   * actions, because the daemon's inject() tests never set a content-type and
+   * the client's mocked fetch never reached Fastify.
+   */
+  it("players() reports what the real daemon parsed out of real console lines", async () => {
+    const TS = "[2026-08-01 21:31:04] ";
+    await makeApi(baseUrl, TOKEN).start("Tulsa");
+    const child = spawn.calls[0].child;
+    child.emitLine(
+      `${TS}Started server using port 14159 with 5 slots on world "Tulsa.zip", game version 1.3.1.`,
+    );
+    child.emitLine(`${TS}Client "76561198048435182" with address 192.168.1.50:52134 is connecting with version 1.3.1.`);
+    child.emitLine(`${TS}Client "Jeff" connected on slot 1/5.`);
+
+    const res = await makeApi(baseUrl, TOKEN).players();
+    expect(res.ok).toBe(true);
+    expect(res.players).toMatchObject([{ auth: "76561198048435182", name: "Jeff", slot: 1 }]);
+  });
+
+  it("refreshPlayers() answers rather than throwing when there is no server to ask", async () => {
+    const res = await makeApi(baseUrl, TOKEN).refreshPlayers();
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/not running/i);
+  });
+
+  it("refreshPlayers() puts players on the real server's stdin", async () => {
+    await makeApi(baseUrl, TOKEN).start("Tulsa");
+    const child = spawn.calls[0].child;
+    child.emitLine(
+      `[2026-08-01 21:31:04] Started server using port 14159 with 5 slots on world "Tulsa.zip", game version 1.3.1.`,
+    );
+    child.written.length = 0;
+
+    const res = await makeApi(baseUrl, TOKEN).refreshPlayers();
+    expect(res.ok).toBe(true);
+    expect(child.written).toEqual(["players\n"]);
+  });
+
+  /*
+   * Commands over a real HTTP round trip. The request body is a new shape
+   * crossing the wire, and the failure path is a 400/409 the client has to read
+   * rather than a thrown transport error.
+   */
+  it("commands() serves the real schema, with both game versions", async () => {
+    const res = await makeApi(baseUrl, TOKEN).commands();
+    expect(res.ok).toBe(true);
+    expect(res.commands.length).toBeGreaterThan(80);
+    expect(res.commands.find((c) => c.name === "stop")).toBeUndefined();
+    expect(res.schemaGameVersion).toMatch(/^\d+\.\d+/);
+  });
+
+  it("runCommand() composes on the daemon and reaches the server's stdin", async () => {
+    await makeApi(baseUrl, TOKEN).start("Tulsa");
+    const child = spawn.calls[0].child;
+    child.emitLine(
+      `[2026-08-02 04:11:00] Started server using port 14159 with 5 slots on world "Tulsa.zip", game version 1.3.1.`,
+    );
+    child.written.length = 0;
+
+    const res = await makeApi(baseUrl, TOKEN).runCommand("say", { message: "back in five" });
+    expect(res).toEqual({ ok: true, sent: "say back in five" });
+    expect(child.written).toEqual(["say back in five\n"]);
+  });
+
+  it("runCommand() surfaces a refusal rather than a transport error", async () => {
+    await expect(makeApi(baseUrl, TOKEN).runCommand("players", {})).rejects.toThrow(/not running/i);
+  });
+
+  it("runCommand() refuses an injected second command across the wire", async () => {
+    await makeApi(baseUrl, TOKEN).start("Tulsa");
+    const child = spawn.calls[0].child;
+    child.emitLine(
+      `[2026-08-02 04:11:00] Started server using port 14159 with 5 slots on world "Tulsa.zip", game version 1.3.1.`,
+    );
+    child.written.length = 0;
+
+    await expect(
+      makeApi(baseUrl, TOKEN).runCommand("say", { message: "hi\nallowcheats" }),
+    ).rejects.toThrow();
+    expect(child.written).toEqual([]);
   });
 
   it("removeMod() (bodyless DELETE) reaches the route handler instead of 400ing", async () => {

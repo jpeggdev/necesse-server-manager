@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { resolveBootConfig } from "./config.js";
 import { buildServer } from "./http.js";
 import { LaunchOptions } from "./launch-options.js";
+import { PlayerRoster } from "./player-roster.js";
 import { runOwnerMigration } from "./launch-options-migration.js";
 import { ModInstaller } from "./mod-installer.js";
 import { ModLibrary } from "./mod-library.js";
@@ -93,6 +94,12 @@ const installer = new ModInstaller(cfg, registry, steam, library, workshop);
 
 const launchOptions = new LaunchOptions(stateFile("launch-options.json"));
 
+// Fed from the same "line" stream the console panel is built from, so tracking
+// who is online costs no extra pipe out of the game process. In memory only:
+// the roster is a fact about a running server, so it has no state file and
+// nothing to migrate.
+const playerRoster = new PlayerRoster();
+
 // Guarded the same way migrateModSets is below: a corrupt config.json or
 // launch-options.json must not take the whole daemon down - a daemon that
 // cannot read its launch options can still list worlds, manage mods and
@@ -151,6 +158,7 @@ const app = buildServer({
   steam,
   workshop,
   launchOptions,
+  playerRoster,
 });
 await app.listen({ host: "0.0.0.0", port: cfg.port });
 // A refusal log that outlived the problem it described would send the next

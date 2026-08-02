@@ -8,6 +8,9 @@ import { openWorldSettings, WorldSettingsError } from "./world-settings.js";
 import type { WorldSettingsFile } from "./world-settings-file.js";
 import { knownField, checkChange, isSameValue } from "./world-settings-schema.js";
 import type { LaunchOptions } from "./launch-options.js";
+import type { PlayerRoster } from "./player-roster.js";
+import { composeCommand } from "./command-line.js";
+import { SERVER_COMMANDS, SCHEMA_GAME_VERSION } from "./server-commands-schema.js";
 import {
   checkLaunchOption,
   effectiveOptions,
@@ -57,9 +60,19 @@ export interface Deps {
   /** Non-fatal configuration problems, published so a client can surface them. */
   configWarnings: string[];
   launchOptions: LaunchOptions;
+  playerRoster: PlayerRoster;
 }
 
 const WORKSHOP_ID = /^\d+$/;
+
+/**
+ * How long to wait for the server to answer a `/players`, and how many times to
+ * ask before giving up. Five attempts two seconds apart covers the startup
+ * window measured on the real server, where the command is accepted but does
+ * nothing until the world has finished initialising.
+ */
+const RECONCILE_RETRY_MS = 2000;
+const RECONCILE_ATTEMPTS = 5;
 
 /**
  * How long a task may sit in `activeTasks` before the daemon gives up on it.
@@ -129,8 +142,19 @@ const errorText = (e: unknown): string =>
   e instanceof Error ? e.message : `Non-error thrown: ${String(e)}`;
 
 export function buildServer(deps: Deps): FastifyInstance {
-  const { cfg, configFile, pm, installer, library, sets, steam, workshop, configWarnings, launchOptions } =
-    deps;
+  const {
+    cfg,
+    configFile,
+    pm,
+    installer,
+    library,
+    sets,
+    steam,
+    workshop,
+    configWarnings,
+    launchOptions,
+    playerRoster,
+  } = deps;
   const app = Fastify({ logger: false });
   type Socket = { send(data: string): void };
   const sockets = new Set<Socket>();
@@ -169,8 +193,96 @@ export function buildServer(deps: Deps): FastifyInstance {
   const broadcastStatus = (): void => broadcast({ type: "status", status: statusPayload() });
 
   pm.on("line", (l) => broadcast({ type: "console", line: l.line, ts: l.ts }));
+
+  /**
+   * Asks the server who is actually on, and keeps asking until it answers.
+   *
+   * The retry is not defensive padding. Measured against the real server: a
+   * `/players` sent the instant the ready line appears is echoed to the console
+   * as `> players` and then does nothing - the world is still initialising, so
+   * the command parses and silently no-ops. The same command twenty seconds
+   * later prints the roster. Nothing in the output distinguishes the two, so
+   * the only reliable signal is the answer itself, and the only fix is to ask
+   * again until it comes.
+   *
+   * Best effort throughout: `send` throws when there is no server to ask, which
+   * is not a condition an operator can act on, and a failed ask leaves the
+   * roster exactly as it was.
+   */
+  let reconcileTimer: NodeJS.Timeout | null = null;
+  const stopAsking = (): void => {
+    if (reconcileTimer !== null) {
+      clearInterval(reconcileTimer);
+      reconcileTimer = null;
+    }
+  };
+  playerRoster.on("reconciled", stopAsking);
+
+  /**
+   * Sends the first ask, then keeps asking on a timer until the server answers.
+   *
+   * Rethrows the FIRST failure so a caller with somebody to report to can say
+   * why nothing happened; later failures have no audience and stop the loop.
+   * Bare `players`, not `/players`: the slash is chat syntax, and this is the
+   * same form `composeCommand` and `stop` use.
+   */
+  const askWhoIsOnline = (): void => {
+    stopAsking();
+    let attemptsLeft = RECONCILE_ATTEMPTS - 1;
+    // Deliberately outside the try below: a refusal here is the caller's to
+    // handle, and there is nothing to retry when there is no server to ask.
+    pm.send("players");
+    const attempt = (): void => {
+      if (attemptsLeft <= 0) {
+        stopAsking();
+        return;
+      }
+      attemptsLeft -= 1;
+      try {
+        pm.send("players");
+      } catch {
+        // The server went away mid-retry. Nothing to report to and nothing a
+        // further attempt would change.
+        stopAsking();
+      }
+    };
+    if (attemptsLeft > 0) {
+      reconcileTimer = setInterval(attempt, RECONCILE_RETRY_MS);
+      // Never hold the process open for a question about who is playing.
+      reconcileTimer.unref();
+    }
+  };
+
+  /** The same ask, for the paths that have nobody to report a refusal to. */
+  const askWhoIsOnlineQuietly = (): void => {
+    try {
+      askWhoIsOnline();
+    } catch {
+      // No server to ask, which is not a condition an operator can act on.
+    }
+  };
+
+  // The roster reads the same line stream the console panel is built from, so
+  // it costs no extra pipe out of the game process. Subscribed after the
+  // console broadcast so a parse failure could never cost the operator a log
+  // line.
+  pm.on("line", (l) => playerRoster.observe(l.line));
+  playerRoster.on("changed", () => broadcast({ type: "players", players: playerRoster.snapshot() }));
+  playerRoster.on("reconcile", askWhoIsOnlineQuietly);
+
   pm.on("state", (status) => {
     broadcastStatus();
+    if (status.state === "running") {
+      // The server has just announced itself. Anyone already on - a daemon
+      // restarted against a live server - is invisible until it is asked.
+      askWhoIsOnlineQuietly();
+    }
+    if (status.state !== "running" && status.state !== "starting") {
+      // No server, no roster. Keeping the last known list would show names
+      // that cannot possibly still be connected.
+      stopAsking();
+      playerRoster.clear();
+    }
     if (status.state === "running" && status.world) {
       cfg.lastWorld = status.world;
       // Fire-and-forget from an event handler with no request to report to;
@@ -411,6 +523,10 @@ export function buildServer(deps: Deps): FastifyInstance {
           type: "backlog",
           lines: pm.backlog,
           status: statusPayload(),
+          // Sent with the backlog so a client connecting mid-session shows the
+          // roster immediately, rather than staying blank until somebody joins
+          // or leaves.
+          players: playerRoster.snapshot(),
         } satisfies WsMessage),
       );
       socket.on("close", () => sockets.delete(socket));
@@ -421,6 +537,86 @@ export function buildServer(deps: Deps): FastifyInstance {
   app.get("/api/status", async () => {
     pm.refreshUnmanaged();
     return statusPayload();
+  });
+
+  app.addHook("onClose", async () => stopAsking());
+
+  /**
+   * The command table, plus both game versions so the client can say when they
+   * disagree. A table extracted from a different version is usually still
+   * mostly right, so this reports the mismatch rather than withholding it.
+   */
+  app.get("/api/commands", async () => ({
+    ok: true,
+    commands: SERVER_COMMANDS,
+    schemaGameVersion: SCHEMA_GAME_VERSION,
+    gameVersion: pm.status.gameVersion,
+  }));
+
+  /**
+   * Runs one of the game's own commands.
+   *
+   * The body names a command and its arguments; the daemon composes the line.
+   * The server's reply is not awaited and not interpreted - it goes to the
+   * console stream like everything else the game prints, and the game echoes
+   * the command itself, so nothing is echoed here. `sent` is deliberately the
+   * strongest claim in the response: measured on the real server, a command
+   * accepted during world initialisation is echoed and then silently does
+   * nothing, so "sent" is all that is ever known.
+   */
+  app.post("/api/command", async (req, reply) => {
+    const body = (req.body ?? {}) as { name?: unknown; args?: unknown };
+    if (typeof body.name !== "string") {
+      return reply.code(400).send({ ok: false, error: "A command name is required." });
+    }
+    const args =
+      body.args === undefined || body.args === null
+        ? {}
+        : (body.args as Record<string, unknown>);
+    const supplied: Record<string, string> = {};
+    for (const key of Object.keys(args)) {
+      const value = args[key];
+      if (typeof value !== "string") {
+        return reply
+          .code(400)
+          .send({ ok: false, error: `Argument "${key}" must be text, and it is not.` });
+      }
+      supplied[key] = value;
+    }
+
+    let line: string;
+    try {
+      line = composeCommand(body.name, supplied);
+    } catch (e) {
+      return reply.code(400).send({ ok: false, error: errorText(e) });
+    }
+    try {
+      pm.send(line);
+    } catch (e) {
+      return reply.code(409).send({ ok: false, error: errorText(e) });
+    }
+    return { ok: true, sent: line };
+  });
+
+  app.get("/api/players", async () => ({ ok: true, players: playerRoster.snapshot() }));
+
+  /**
+   * Asks the server for its own roster.
+   *
+   * Reports the refusal rather than swallowing it: this is the operator
+   * pressing a button, so unlike the internal reconcile there is somebody to
+   * tell when there is no server to ask.
+   */
+  app.post("/api/players/refresh", async (_req, reply) => {
+    try {
+      // Retries like the automatic path: pressed during world startup, a single
+      // ask is accepted, echoed and silently ignored, and the operator would be
+      // told it worked while the panel never changed.
+      askWhoIsOnline();
+    } catch (e) {
+      return reply.send({ ok: false, error: errorText(e) });
+    }
+    return { ok: true };
   });
 
   app.get("/api/worlds", async (req) => {
