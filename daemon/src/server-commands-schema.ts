@@ -128,6 +128,7 @@ export const SERVER_COMMANDS: readonly CommandDef[] = [
     isCheat: true,
     params: [
       { name: "global", type: "bool", optional: true },
+      { name: "type", type: "text", optional: true },
     ],
   },
   {
@@ -138,6 +139,7 @@ export const SERVER_COMMANDS: readonly CommandDef[] = [
     destructive: true,
     params: [
       { name: "global", type: "bool", optional: true },
+      { name: "type", type: "text", optional: true },
     ],
   },
   {
@@ -148,6 +150,7 @@ export const SERVER_COMMANDS: readonly CommandDef[] = [
     destructive: true,
     params: [
       { name: "global", type: "bool", optional: true },
+      { name: "type", type: "text", optional: true },
     ],
   },
   {
@@ -367,6 +370,7 @@ export const SERVER_COMMANDS: readonly CommandDef[] = [
       { name: "slot", type: "int", optional: true },
       { name: "set/get/clear", type: "enum", optional: false, values: ["set", "get", "clear"] },
       { name: "key", type: "text", optional: true },
+      { name: "value", type: "text", optional: true },
     ],
   },
   {
@@ -535,6 +539,7 @@ export const SERVER_COMMANDS: readonly CommandDef[] = [
     params: [
       { name: "list/set/get", type: "enum", optional: false, values: ["list", "set", "get"] },
       { name: "authentication/name", type: "player", optional: true },
+      { name: "permissions", type: "text", optional: true },
     ],
   },
   {
@@ -594,6 +599,8 @@ export const SERVER_COMMANDS: readonly CommandDef[] = [
     isCheat: true,
     params: [
       { name: "islandX", type: "int", optional: true },
+      { name: "islandY", type: "int", optional: true },
+      { name: "dimension", type: "int", optional: true },
       { name: "start/clear", type: "enum", optional: false, values: ["start", "clear"] },
     ],
   },
@@ -775,6 +782,8 @@ export const SERVER_COMMANDS: readonly CommandDef[] = [
     isCheat: true,
     params: [
       { name: "tileX", type: "int", optional: true },
+      { name: "tileY", type: "int", optional: true },
+      { name: "level", type: "text", optional: true },
       { name: "settler", type: "text", optional: false },
       { name: "recruited", type: "bool", optional: true },
     ],
@@ -786,6 +795,8 @@ export const SERVER_COMMANDS: readonly CommandDef[] = [
     isCheat: true,
     params: [
       { name: "tileX", type: "int", optional: true },
+      { name: "tileY", type: "int", optional: true },
+      { name: "level", type: "text", optional: true },
       { name: "visitor", type: "text", optional: true },
     ],
   },

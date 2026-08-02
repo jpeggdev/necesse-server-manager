@@ -93,6 +93,31 @@ describe("the extracted command schema", () => {
     ]);
   });
 
+  /*
+   * A CmdParameter's trailing varargs are FURTHER PARAMETERS, nested inside the
+   * one they follow - what the wiki renders as
+   * `[<authentication/name> [<permissions>]]`. An extractor that reads only the
+   * top-level constructor arguments drops them, and the form then has no field
+   * for an argument the command needs: `permissions set Jeff` was accepted and
+   * answered by the real server with "Missing permissions" on 2026-08-02.
+   */
+  it("includes parameters the game nests inside another parameter", () => {
+    expect(SERVER_COMMANDS.find((c) => c.name === "permissions")?.params.map((p) => p.name)).toEqual([
+      "list/set/get",
+      "authentication/name",
+      "permissions",
+    ]);
+  });
+
+  it("flattens a chain of nested parameters in command-line order", () => {
+    expect(SERVER_COMMANDS.find((c) => c.name === "rain")?.params.map((p) => p.name)).toEqual([
+      "islandX",
+      "islandY",
+      "dimension",
+      "start/clear",
+    ]);
+  });
+
   it("covers the whole command set, not a handful", () => {
     expect(SERVER_COMMANDS.length).toBeGreaterThan(80);
   });
