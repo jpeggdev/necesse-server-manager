@@ -218,9 +218,20 @@ export function buildServer(deps: Deps): FastifyInstance {
   };
   playerRoster.on("reconciled", stopAsking);
 
+  /**
+   * Sends the first ask, then keeps asking on a timer until the server answers.
+   *
+   * Rethrows the FIRST failure so a caller with somebody to report to can say
+   * why nothing happened; later failures have no audience and stop the loop.
+   * Bare `players`, not `/players`: the slash is chat syntax, and this is the
+   * same form `composeCommand` and `stop` use.
+   */
   const askWhoIsOnline = (): void => {
     stopAsking();
-    let attemptsLeft = RECONCILE_ATTEMPTS;
+    let attemptsLeft = RECONCILE_ATTEMPTS - 1;
+    // Deliberately outside the try below: a refusal here is the caller's to
+    // handle, and there is nothing to retry when there is no server to ask.
+    pm.send("players");
     const attempt = (): void => {
       if (attemptsLeft <= 0) {
         stopAsking();
@@ -228,17 +239,26 @@ export function buildServer(deps: Deps): FastifyInstance {
       }
       attemptsLeft -= 1;
       try {
-        pm.send("/players");
+        pm.send("players");
       } catch {
-        // No server to ask. Nothing will change that on a retry.
+        // The server went away mid-retry. Nothing to report to and nothing a
+        // further attempt would change.
         stopAsking();
       }
     };
-    attempt();
-    if (reconcileTimer === null && attemptsLeft > 0) {
+    if (attemptsLeft > 0) {
       reconcileTimer = setInterval(attempt, RECONCILE_RETRY_MS);
       // Never hold the process open for a question about who is playing.
       reconcileTimer.unref();
+    }
+  };
+
+  /** The same ask, for the paths that have nobody to report a refusal to. */
+  const askWhoIsOnlineQuietly = (): void => {
+    try {
+      askWhoIsOnline();
+    } catch {
+      // No server to ask, which is not a condition an operator can act on.
     }
   };
 
@@ -248,14 +268,14 @@ export function buildServer(deps: Deps): FastifyInstance {
   // line.
   pm.on("line", (l) => playerRoster.observe(l.line));
   playerRoster.on("changed", () => broadcast({ type: "players", players: playerRoster.snapshot() }));
-  playerRoster.on("reconcile", askWhoIsOnline);
+  playerRoster.on("reconcile", askWhoIsOnlineQuietly);
 
   pm.on("state", (status) => {
     broadcastStatus();
     if (status.state === "running") {
       // The server has just announced itself. Anyone already on - a daemon
       // restarted against a live server - is invisible until it is asked.
-      askWhoIsOnline();
+      askWhoIsOnlineQuietly();
     }
     if (status.state !== "running" && status.state !== "starting") {
       // No server, no roster. Keeping the last known list would show names
@@ -589,7 +609,10 @@ export function buildServer(deps: Deps): FastifyInstance {
    */
   app.post("/api/players/refresh", async (_req, reply) => {
     try {
-      pm.send("/players");
+      // Retries like the automatic path: pressed during world startup, a single
+      // ask is accepted, echoed and silently ignored, and the operator would be
+      // told it worked while the panel never changed.
+      askWhoIsOnline();
     } catch (e) {
       return reply.send({ ok: false, error: errorText(e) });
     }

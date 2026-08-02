@@ -569,7 +569,7 @@ describe("players", () => {
 
   it("asks the server who is online as soon as it is running", async () => {
     await running();
-    expect(spawn.calls[0].child.written).toContain("/players\n");
+    expect(spawn.calls[0].child.written).toContain("players\n");
   });
 
   it("asks the server for /players on refresh", async () => {
@@ -577,7 +577,27 @@ describe("players", () => {
     spawn.calls[0].child.written.length = 0;
     const res = await app.inject({ method: "POST", url: "/api/players/refresh" });
     expect(res.json()).toEqual({ ok: true });
-    expect(spawn.calls[0].child.written).toEqual(["/players\n"]);
+    expect(spawn.calls[0].child.written).toEqual(["players\n"]);
+  });
+
+  /*
+   * The manual path gets the same retry as the automatic one. Pressed during
+   * world startup, a single ask is accepted, echoed and silently ignored, and
+   * the operator would be told it worked while the panel never changed.
+   */
+  it("keeps asking after a refresh the server never answers", () => {
+    vi.useFakeTimers();
+    try {
+      runningNoHttp();
+      spawn.calls[0].child.written.length = 0;
+      void app.inject({ method: "POST", url: "/api/players/refresh" });
+      vi.advanceTimersByTime(0);
+      vi.advanceTimersByTime(2000);
+      vi.advanceTimersByTime(2000);
+      expect(spawn.calls[0].child.written.length).toBeGreaterThanOrEqual(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("refuses a refresh when the server is not running, saying why", async () => {
@@ -608,7 +628,7 @@ describe("players", () => {
     vi.useFakeTimers();
     try {
       runningNoHttp();
-      expect(spawn.calls[0].child.written).toEqual(["/players\n"]);
+      expect(spawn.calls[0].child.written).toEqual(["players\n"]);
       vi.advanceTimersByTime(2000);
       vi.advanceTimersByTime(2000);
       expect(spawn.calls[0].child.written.length).toBe(3);

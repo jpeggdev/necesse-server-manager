@@ -224,7 +224,7 @@ describe("makeApi against a real daemon instance", () => {
     expect(res.error).toMatch(/not running/i);
   });
 
-  it("refreshPlayers() puts /players on the real server's stdin", async () => {
+  it("refreshPlayers() puts players on the real server's stdin", async () => {
     await makeApi(baseUrl, TOKEN).start("Tulsa");
     const child = spawn.calls[0].child;
     child.emitLine(
@@ -234,7 +234,7 @@ describe("makeApi against a real daemon instance", () => {
 
     const res = await makeApi(baseUrl, TOKEN).refreshPlayers();
     expect(res.ok).toBe(true);
-    expect(child.written).toEqual(["/players\n"]);
+    expect(child.written).toEqual(["players\n"]);
   });
 
   /*
