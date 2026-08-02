@@ -1,5 +1,6 @@
 # Tasks
 
+- [~] Player tracking panel: derive the online roster from the server's connect/disconnect console lines (auth id is on both sides), plus a way to send the wiki's server/chat commands from the client
 - [ ] Launch-option residuals parked by the final review, all Minor and measured against the real Server.jar: (1) a tab or newline inside a text value silently truncates it at the game (`hello<TAB>world` arrives as `hello`) - the validation rejects dashes and quotes but not control whitespace; (2) the unbounded int fields accept `1e21`, which serialises as `1e+21`, and values above INT_MAX, which the game silently ignores; (3) README's launch-option list omits `password` and `ip`
 - [ ] mod-sets.ts has the same `__proto__` world-name hole the launch-options store just fixed: a world named `__proto__` reports a save that did not happen. Pre-existing, found while reviewing feat/launch-options, deliberately left out of that branch's scope. Fix is the same shape - null-prototype object or a Map for the per-world record
 - [x] Build v1 Necesse server GUI (Node/TS daemon on SERVER + Tauri client) per docs/superpowers/specs/2026-07-26-necesse-server-gui-design.html
