@@ -9,6 +9,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderHook, act, waitFor } from "@testing-library/react";
 import { useDaemon, WS_FAILURE_THRESHOLD } from "../src/useDaemon";
+import type { PlayerEntry } from "../src/types";
 
 class FakeWebSocket {
   static instances: FakeWebSocket[] = [];
@@ -96,6 +97,66 @@ function pushBacklog(ws: FakeWebSocket, ids: string[]) {
     ws.onmessage?.({ data: JSON.stringify({ type: "backlog", lines: [], status: statusPayload() }) });
   });
 }
+
+/** The daemon's `players` broadcast, sent whenever the roster changes. */
+function pushPlayers(ws: FakeWebSocket, players: PlayerEntry[]) {
+  act(() => {
+    ws.onmessage?.({ data: JSON.stringify({ type: "players", players }) });
+  });
+}
+
+const jeff: PlayerEntry = {
+  auth: "76561198048435182",
+  name: "Jeff",
+  slot: 1,
+  latency: 42,
+  level: "surface",
+  joinedAt: "2026-08-01T21:31:04.000Z",
+};
+
+describe("players", () => {
+  it("starts empty, before the daemon has said anything", async () => {
+    const { result } = await openConnection();
+    expect(result.current.players).toEqual([]);
+  });
+
+  it("takes the roster from a players broadcast", async () => {
+    const { result, ws } = await openConnection();
+    pushPlayers(ws, [jeff]);
+    expect(result.current.players.map((p) => p.name)).toEqual(["Jeff"]);
+  });
+
+  it("takes the roster from the opening backlog", async () => {
+    const { result, ws } = await openConnection();
+    act(() => {
+      ws.onmessage?.({
+        data: JSON.stringify({ type: "backlog", lines: [], status: statusPayload(), players: [jeff] }),
+      });
+    });
+    expect(result.current.players.map((p) => p.name)).toEqual(["Jeff"]);
+  });
+
+  // The roster changes without this client asking, so once the socket is gone
+  // a kept list keeps asserting names that may already have left.
+  it("drops the roster when the socket closes", async () => {
+    const { result, ws } = await openConnection();
+    pushPlayers(ws, [jeff]);
+    expect(result.current.players).toHaveLength(1);
+    act(() => {
+      ws.onclose?.();
+    });
+    expect(result.current.players).toEqual([]);
+  });
+
+  it("survives a backlog from an older daemon that carries no roster", async () => {
+    const { result, ws } = await openConnection();
+    pushPlayers(ws, [jeff]);
+    act(() => {
+      ws.onmessage?.({ data: JSON.stringify({ type: "backlog", lines: [], status: statusPayload() }) });
+    });
+    expect(result.current.players).toEqual([]);
+  });
+});
 
 /** Drops the socket and runs the hook's 2s auto-retry, returning the new socket. */
 function dropAndReconnect(ws: FakeWebSocket): FakeWebSocket {

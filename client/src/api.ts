@@ -5,6 +5,7 @@ import type {
   ModListResponse,
   ModUpdatesResponse,
   ModUploadResponse,
+  PlayerEntry,
   ReconcileResponse,
   StatusPayload,
   WorkshopSearchResponse,
@@ -116,6 +117,19 @@ export function makeApi(base: string, token: string) {
     stop: () => post<{ ok: true }>("/api/server/stop"),
     kill: () => post<{ ok: true }>("/api/server/kill"),
     updateServer: () => post<{ ok: true; taskId: string }>("/api/server/update"),
+    /**
+     * Who is on the server right now, as the daemon last saw it. The roster is
+     * also pushed over the websocket on every change, so this is only needed
+     * for a first load.
+     */
+    players: () => get<{ ok: true; players: PlayerEntry[] }>("/api/players"),
+    /**
+     * Asks the server itself who is online, rather than trusting what the
+     * daemon inferred from the console. Answers `ok: false` with a reason when
+     * there is no running server to ask, so it does not throw on the ordinary
+     * case of the operator pressing this while the server is stopped.
+     */
+    refreshPlayers: () => post<{ ok: boolean; error?: string }>("/api/players/refresh"),
     mods: () => get<ModListResponse>("/api/mods"),
     /**
      * Which managed mods have a newer workshop entry. A separate call from
