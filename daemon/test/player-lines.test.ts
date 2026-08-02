@@ -7,6 +7,7 @@ import {
   parsePlayersHeader,
   parsePlayersRow,
 } from "../src/player-lines.js";
+import * as F from "./fixtures/log-fixtures.js";
 
 // Every input carries the timestamp prefix, because that is how the lines
 // really arrive: ProcessManager strips ANSI before recording, but not this.
@@ -99,6 +100,39 @@ describe("parsePlayerDropped", () => {
 
   it("is null for an unrelated line", () => {
     expect(parsePlayerDropped(`${TS}Server has stopped`)).toBeNull();
+  });
+});
+
+/*
+ * The parsers above were written from the game's format strings. These run
+ * them against output the live 1.3.1 server actually produced, which is the
+ * only thing that proves the two agree.
+ */
+describe("captured 1.3.1 output", () => {
+  it("reads the real connecting line", () => {
+    expect(parsePlayerConnecting(F.REAL_CONNECTING)).toEqual({ auth: "76561198048435182" });
+  });
+
+  it("reads the real connected line", () => {
+    expect(parsePlayerConnected(F.REAL_CONNECTED)).toEqual({
+      consoleName: "Jeff",
+      slot: 1,
+      slots: 5,
+    });
+  });
+
+  it("reads the real disconnect line, whose reason is the word Quit", () => {
+    expect(parsePlayerDisconnected(F.REAL_DISCONNECTED)).toEqual({
+      auth: "76561198048435182",
+      name: "Jeff",
+      reason: "Quit",
+    });
+  });
+
+  it("pairs the real join and the real quit on the same auth", () => {
+    const joined = parsePlayerConnecting(F.REAL_CONNECTING);
+    const left = parsePlayerDisconnected(F.REAL_DISCONNECTED);
+    expect(joined?.auth).toBe(left?.auth);
   });
 });
 

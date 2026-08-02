@@ -287,6 +287,32 @@ not configured, and the daemon recomputes all five every time it starts:
 A few other keys (`modUploadMaxBytes`, `serverAppId`, `workshopAppId`)
 exist with working defaults and normally don't need to be touched at all.
 
+## Players
+
+The **Players** tab, beside Mods, lists who is on the server right now: name,
+slot, how long they have been connected, latency and which level they are on.
+The count on the tab itself updates whether or not you are looking at it.
+
+The list is derived from the server's own console output, so a join or a quit
+shows up the moment the server prints it. Two consequences are worth knowing:
+
+- **It empties when the server stops.** The roster describes a running process,
+  so nothing is stored and nothing survives a restart. An empty list while the
+  server is up says nobody is connected; an empty list while it is stopped says
+  so in as many words, because those are different facts.
+- **A session length is only shown when the daemon saw the join.** If the
+  daemon was restarted while people were already playing, it learns who is on
+  by asking the server, which does not report when they arrived. Those rows
+  show a dash rather than a number that would read as playtime and be wrong.
+
+**Refresh** asks the server directly rather than trusting what the daemon
+inferred. That matters because only a clean quit prints a departure line: a
+timeout, a latency kick, a `/kick` or a shutdown do not, so a player who
+dropped out abruptly can linger in the list. The daemon already asks on its own
+whenever the server starts and whenever it sees a departure it cannot match to
+somebody, and Refresh is the manual version of the same question. It is
+disabled while the server is stopped, since there is nothing to ask.
+
 ## Mods and Update All
 
 **Update All only downloads mods whose Workshop entry has changed since the
