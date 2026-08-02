@@ -495,9 +495,31 @@ export interface InstallResult {
   skipped?: boolean;
 }
 
+/**
+ * One player currently on the server.
+ *
+ * Keyed by `auth` because that is the only identifier present on both the
+ * connect and the disconnect lines - `Client <name> connected on slot n/m`
+ * prints the numeric auth instead of a name for a first-time player.
+ *
+ * `latency` and `level` come only from a `/players` reconcile; the connect
+ * lines do not carry them. `joinedAt` is null when the daemon did not witness
+ * the join, which happens when it attached to a server that was already
+ * running. Dating that from daemon start would read as playtime and be wrong.
+ */
+export interface PlayerEntry {
+  auth: string;
+  name: string;
+  slot: number | null;
+  latency: number | null;
+  level: string | null;
+  joinedAt: string | null;
+}
+
 export type WsMessage =
   | { type: "backlog"; lines: ConsoleLine[]; status: StatusPayload }
   | { type: "console"; line: string; ts: string }
+  | { type: "players"; players: PlayerEntry[] }
   | { type: "status"; status: StatusPayload }
   | { type: "task"; taskId: string; kind: TaskKind; line: string }
   | {
