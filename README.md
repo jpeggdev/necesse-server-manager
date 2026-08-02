@@ -17,6 +17,8 @@ It's two pieces:
 
 They can be the same machine or two different ones on the same network.
 
+![The main window: mod list on the left, live server console on the right](assets/main-window.png)
+
 ## Requirements
 
 - **Server box:** 64-bit Windows, with a Necesse dedicated server already
@@ -109,6 +111,8 @@ the daemon didn't see the player actually join (e.g. it restarted while
 they were already connected). **Refresh** asks the server directly, useful
 since not every disconnect (timeouts, kicks) prints a departure line.
 
+![The Players tab](assets/players.png)
+
 **Server commands** — "Run command" opens a form for any of the game's
 server commands, generated from your server's own jar so it always matches
 what your version actually supports. A few things are deliberate: `stop`,
@@ -118,12 +122,26 @@ typing the command name to confirm; and the dialog reports that a command
 was *sent*, not that it *succeeded* — check the console for the server's
 reply.
 
+![Picking a command from the generated list](assets/command-list.png)
+
+![Filling in a command's arguments; player fields pick from whoever is online](assets/command-form.png)
+
 **Mods** — install and search from the Steam Workshop, or upload a jar by
 hand. **Update All** only re-downloads a mod if its Workshop entry has
 actually changed since you installed it, so a run with nothing to do
 finishes in seconds. The first Update All after upgrading this app
 reinstalls everything once (nothing has a recorded baseline yet); every run
 after that is fast.
+
+![Searching the Steam Workshop from inside the app](assets/workshop-search.png)
+
+**World settings** — edit a world's `worldSettings.cfg` (difficulty, death
+penalty, raid frequency, PvP, and the rest) through a typed form instead of
+unzipping the world by hand. Saving backs the world zip up first, then
+rewrites it in place, and only touches the lines you actually changed —
+anything a mod wrote is left exactly as it was.
+
+![The world settings editor](assets/world-settings.png)
 
 **Launch options** — per-world overrides of the server's command-line
 options (owner, password, slots, world border, etc.), with daemon-wide
@@ -138,6 +156,8 @@ defaults underneath. A few limits worth knowing:
 - Numbers can't be negative (same cause) or larger than `2147483647`.
 - `owner` holds one name — the game itself only supports one, however many
   you set.
+
+![The launch options editor, showing which values are inherited from the defaults](assets/launch-options.png)
 
 ## Security
 
