@@ -78,6 +78,78 @@ describe("checkLaunchOption", () => {
    * option, reaching `dev`, `settings` and `logs` on a process running as
    * SYSTEM. These pin the boundary refusal.
    */
+  /*
+   * A different failure from the injection above, with the same cause. The
+   * game splits its joined command line on whitespace, so a tab or a newline
+   * inside a value TRUNCATES it: `hello<TAB>world` arrives as `hello` and the
+   * rest is dropped. Nothing is injected and nothing is reported - the
+   * operator sets a message of the day, sees no error, and the server has a
+   * different one.
+   *
+   * Same class as the two guards already in this codebase: ProcessManager.send
+   * refuses a command carrying a line break, and composeCommand refuses one in
+   * an argument.
+   */
+  describe("text a value the game would truncate", () => {
+    it("refuses a tab, naming the option", () => {
+      const bad = checkLaunchOption("motd", "hello\tworld");
+      expect(bad).not.toBeNull();
+      expect(bad).toContain('"motd"');
+      expect(bad).toMatch(/truncat|cut short|whitespace/i);
+    });
+
+    it("refuses a newline or a carriage return", () => {
+      expect(checkLaunchOption("motd", "hello\nworld")).not.toBeNull();
+      expect(checkLaunchOption("motd", "hello\r\nworld")).not.toBeNull();
+      expect(checkLaunchOption("owner", "Je\tff")).not.toBeNull();
+      expect(checkLaunchOption("password", "hunter2\n")).not.toBeNull();
+    });
+
+    /*
+     * The motd help tells the operator that `\n` becomes a line break - that
+     * is the TWO CHARACTER escape they type, which the game turns into a break
+     * itself. Refusing it would contradict the field's own documentation.
+     */
+    it("still accepts the two-character escape the game expands itself", () => {
+      expect(checkLaunchOption("motd", "line one\\nline two")).toBeNull();
+    });
+
+    it("still accepts an ordinary space", () => {
+      expect(checkLaunchOption("motd", "server going down at 9")).toBeNull();
+    });
+  });
+
+  /*
+   * The game reads these into a Java int. A value above INT_MAX is silently
+   * ignored, and JavaScript makes the hole easy to fall into: Number.isInteger
+   * is true for 1e21, which then serialises onto the command line as "1e+21"
+   * and is not a number the game parses at all.
+   */
+  describe("numbers the game cannot read", () => {
+    it("refuses a value above the game's own integer limit", () => {
+      expect(checkLaunchOption("worldborder", 2147483648)).toMatch(/2147483647/);
+      expect(checkLaunchOption("maxsettlers", 1e21)).not.toBeNull();
+    });
+
+    it("refuses a number that would serialise in exponent form", () => {
+      const bad = checkLaunchOption("itemslife", 1e21);
+      expect(bad).not.toBeNull();
+      // Whatever the wording, it must not be silently accepted: `1e+21` on the
+      // command line is not a number the game reads.
+      expect(String(1e21)).toBe("1e+21");
+    });
+
+    it("still accepts the largest value the game can actually take", () => {
+      expect(checkLaunchOption("worldborder", 2147483647)).toBeNull();
+      expect(checkLaunchOption("itemslife", 0)).toBeNull();
+    });
+
+    it("leaves a field with its own tighter bound alone", () => {
+      expect(checkLaunchOption("slots", 250)).toBeNull();
+      expect(checkLaunchOption("slots", 251)).toMatch(/1 and 250/);
+    });
+  });
+
   describe("text a value the game would re-tokenize", () => {
     it("refuses the exact -settings injection, naming the option", () => {
       const bad = checkLaunchOption("owner", "-settings C:/evil.cfg");
