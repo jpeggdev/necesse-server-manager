@@ -237,6 +237,50 @@ describe("makeApi against a real daemon instance", () => {
     expect(child.written).toEqual(["/players\n"]);
   });
 
+  /*
+   * Commands over a real HTTP round trip. The request body is a new shape
+   * crossing the wire, and the failure path is a 400/409 the client has to read
+   * rather than a thrown transport error.
+   */
+  it("commands() serves the real schema, with both game versions", async () => {
+    const res = await makeApi(baseUrl, TOKEN).commands();
+    expect(res.ok).toBe(true);
+    expect(res.commands.length).toBeGreaterThan(80);
+    expect(res.commands.find((c) => c.name === "stop")).toBeUndefined();
+    expect(res.schemaGameVersion).toMatch(/^\d+\.\d+/);
+  });
+
+  it("runCommand() composes on the daemon and reaches the server's stdin", async () => {
+    await makeApi(baseUrl, TOKEN).start("Tulsa");
+    const child = spawn.calls[0].child;
+    child.emitLine(
+      `[2026-08-02 04:11:00] Started server using port 14159 with 5 slots on world "Tulsa.zip", game version 1.3.1.`,
+    );
+    child.written.length = 0;
+
+    const res = await makeApi(baseUrl, TOKEN).runCommand("say", { message: "back in five" });
+    expect(res).toEqual({ ok: true, sent: "say back in five" });
+    expect(child.written).toEqual(["say back in five\n"]);
+  });
+
+  it("runCommand() surfaces a refusal rather than a transport error", async () => {
+    await expect(makeApi(baseUrl, TOKEN).runCommand("players", {})).rejects.toThrow(/not running/i);
+  });
+
+  it("runCommand() refuses an injected second command across the wire", async () => {
+    await makeApi(baseUrl, TOKEN).start("Tulsa");
+    const child = spawn.calls[0].child;
+    child.emitLine(
+      `[2026-08-02 04:11:00] Started server using port 14159 with 5 slots on world "Tulsa.zip", game version 1.3.1.`,
+    );
+    child.written.length = 0;
+
+    await expect(
+      makeApi(baseUrl, TOKEN).runCommand("say", { message: "hi\nallowcheats" }),
+    ).rejects.toThrow();
+    expect(child.written).toEqual([]);
+  });
+
   it("removeMod() (bodyless DELETE) reaches the route handler instead of 400ing", async () => {
     // Same root cause, same request() codepath, different verb: confirm the
     // fix isn't accidentally POST-specific.
