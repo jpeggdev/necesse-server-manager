@@ -56,3 +56,29 @@ export const REAL_CONNECTING =
 export const REAL_CONNECTED = '[2026-08-01 21:23:18] Client "Jeff" connected on slot 1/5.';
 export const REAL_DISCONNECTED =
   '[2026-08-01 21:23:33] Player 76561198048435182 ("Jeff") disconnected with message: Quit';
+
+/*
+ * A real /players answer, captured 2026-08-02 04:08:50 from the live 1.3.1
+ * server with nobody connected.
+ *
+ * The echo line matters as much as the answer. Sent moments earlier, at the
+ * instant the ready line appeared, the identical command produced the echo and
+ * NOTHING else: the world was still initialising, so it parsed and silently did
+ * nothing. That is why the daemon asks again until the server answers, rather
+ * than assuming a sent command ran.
+ */
+export const REAL_PLAYERS_ECHO = "[2026-08-02 04:08:50] > players";
+export const REAL_PLAYERS_EMPTY = "[2026-08-02 04:08:50] Players online: 0/5";
+
+/*
+ * A real /players answer with somebody on it, captured 2026-08-02 04:11:52,
+ * and the line the game prints once that player is actually in the world.
+ *
+ * `latency: 0` is not a placeholder - that is what the server reported for a
+ * client on the same LAN, and it is why the roster treats 0 as a value rather
+ * than as "unknown".
+ */
+export const REAL_PLAYERS_ONE = "[2026-08-02 04:11:52] Players online: 1/5";
+export const REAL_PLAYERS_ROW =
+  '[2026-08-02 04:11:52] Slot 1: 76561198048435182 "Jeff", latency: 0, level: surface,conn: 192.168.1.64:51802';
+export const REAL_PLAYER_LOADED = "[2026-08-02 04:11:01] Loaded player: 76561198048435182";

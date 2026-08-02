@@ -59,6 +59,22 @@ export function parsePlayerDropped(line: string): { name: string } | null {
   return ping ? { name: ping[1] } : null;
 }
 
+/**
+ * `Loaded player: <auth>`
+ *
+ * Printed once the player is actually in the world, after the connect lines.
+ * The roster treats this as confirmation of presence rather than as a join,
+ * because a single act of joining can produce more than one connection: the
+ * client connects to check mods, and connects again once a character has been
+ * chosen. If the first connection's disconnect line arrives after the second
+ * connection is up, a roster keyed by authentication would drop somebody who
+ * is on. This line puts them back.
+ */
+export function parsePlayerLoaded(line: string): { auth: string } | null {
+  const m = /^Loaded player: (\d+)$/.exec(normalize(line));
+  return m ? { auth: m[1] } : null;
+}
+
 /** `Players online: <online>/<slots>` */
 export function parsePlayersHeader(line: string): { online: number; slots: number } | null {
   const m = /^Players online: (\d+)\/(\d+)$/.exec(normalize(line));

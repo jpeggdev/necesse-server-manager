@@ -64,6 +64,15 @@ export interface Deps {
 const WORKSHOP_ID = /^\d+$/;
 
 /**
+ * How long to wait for the server to answer a `/players`, and how many times to
+ * ask before giving up. Five attempts two seconds apart covers the startup
+ * window measured on the real server, where the command is accepted but does
+ * nothing until the world has finished initialising.
+ */
+const RECONCILE_RETRY_MS = 2000;
+const RECONCILE_ATTEMPTS = 5;
+
+/**
  * How long a task may sit in `activeTasks` before the daemon gives up on it.
  *
  * Sized to be unreachable by any legitimate run rather than tuned close to
@@ -184,18 +193,50 @@ export function buildServer(deps: Deps): FastifyInstance {
   pm.on("line", (l) => broadcast({ type: "console", line: l.line, ts: l.ts }));
 
   /**
-   * Asks the server who is actually on.
+   * Asks the server who is actually on, and keeps asking until it answers.
    *
-   * Best effort by design. The roster asks whenever it sees something it cannot
-   * account for, and by then the server may already be gone - `send` throws
-   * only when there is no server to ask, which is not a condition an operator
-   * can act on, and a failed reconcile leaves the roster exactly as it was.
+   * The retry is not defensive padding. Measured against the real server: a
+   * `/players` sent the instant the ready line appears is echoed to the console
+   * as `> players` and then does nothing - the world is still initialising, so
+   * the command parses and silently no-ops. The same command twenty seconds
+   * later prints the roster. Nothing in the output distinguishes the two, so
+   * the only reliable signal is the answer itself, and the only fix is to ask
+   * again until it comes.
+   *
+   * Best effort throughout: `send` throws when there is no server to ask, which
+   * is not a condition an operator can act on, and a failed ask leaves the
+   * roster exactly as it was.
    */
+  let reconcileTimer: NodeJS.Timeout | null = null;
+  const stopAsking = (): void => {
+    if (reconcileTimer !== null) {
+      clearInterval(reconcileTimer);
+      reconcileTimer = null;
+    }
+  };
+  playerRoster.on("reconciled", stopAsking);
+
   const askWhoIsOnline = (): void => {
-    try {
-      pm.send("/players");
-    } catch {
-      // See above: nothing to ask, nothing to report.
+    stopAsking();
+    let attemptsLeft = RECONCILE_ATTEMPTS;
+    const attempt = (): void => {
+      if (attemptsLeft <= 0) {
+        stopAsking();
+        return;
+      }
+      attemptsLeft -= 1;
+      try {
+        pm.send("/players");
+      } catch {
+        // No server to ask. Nothing will change that on a retry.
+        stopAsking();
+      }
+    };
+    attempt();
+    if (reconcileTimer === null && attemptsLeft > 0) {
+      reconcileTimer = setInterval(attempt, RECONCILE_RETRY_MS);
+      // Never hold the process open for a question about who is playing.
+      reconcileTimer.unref();
     }
   };
 
@@ -217,6 +258,7 @@ export function buildServer(deps: Deps): FastifyInstance {
     if (status.state !== "running" && status.state !== "starting") {
       // No server, no roster. Keeping the last known list would show names
       // that cannot possibly still be connected.
+      stopAsking();
       playerRoster.clear();
     }
     if (status.state === "running" && status.world) {
@@ -474,6 +516,8 @@ export function buildServer(deps: Deps): FastifyInstance {
     pm.refreshUnmanaged();
     return statusPayload();
   });
+
+  app.addHook("onClose", async () => stopAsking());
 
   app.get("/api/players", async () => ({ ok: true, players: playerRoster.snapshot() }));
 

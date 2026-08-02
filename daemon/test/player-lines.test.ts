@@ -4,6 +4,7 @@ import {
   parsePlayerConnected,
   parsePlayerDisconnected,
   parsePlayerDropped,
+  parsePlayerLoaded,
   parsePlayersHeader,
   parsePlayersRow,
 } from "../src/player-lines.js";
@@ -127,6 +128,33 @@ describe("captured 1.3.1 output", () => {
       name: "Jeff",
       reason: "Quit",
     });
+  });
+
+  it("reads the real /players answer for an empty server", () => {
+    expect(parsePlayersHeader(F.REAL_PLAYERS_EMPTY)).toEqual({ online: 0, slots: 5 });
+  });
+
+  // The console echoes the command back before answering. It must not be
+  // mistaken for part of the answer.
+  it("reads nothing out of the console's echo of the command", () => {
+    expect(parsePlayersHeader(F.REAL_PLAYERS_ECHO)).toBeNull();
+    expect(parsePlayersRow(F.REAL_PLAYERS_ECHO)).toBeNull();
+    expect(parsePlayerConnecting(F.REAL_PLAYERS_ECHO)).toBeNull();
+  });
+
+  it("reads the real /players row, latency 0 and all", () => {
+    expect(parsePlayersHeader(F.REAL_PLAYERS_ONE)).toEqual({ online: 1, slots: 5 });
+    expect(parsePlayersRow(F.REAL_PLAYERS_ROW)).toEqual({
+      slot: 1,
+      auth: "76561198048435182",
+      name: "Jeff",
+      latency: 0,
+      level: "surface",
+    });
+  });
+
+  it("reads the real loaded-player line", () => {
+    expect(parsePlayerLoaded(F.REAL_PLAYER_LOADED)).toEqual({ auth: "76561198048435182" });
   });
 
   it("pairs the real join and the real quit on the same auth", () => {

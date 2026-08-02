@@ -587,6 +587,60 @@ describe("players", () => {
     expect(body.error).toMatch(/not running/i);
   });
 
+  /*
+   * Measured on the real 1.3.1 server: a /players sent the instant the ready
+   * line appears is echoed to the console and then does nothing, because the
+   * world is still initialising. The same command moments later answers. The
+   * daemon cannot tell those apart from the output, so it asks again until the
+   * server replies.
+   */
+  /*
+   * These drive the ProcessManager directly rather than through the start
+   * route: the retry has to be created while the fake clock is installed, and
+   * installing it around an `app.inject()` stalls Fastify's own awaits.
+   */
+  function runningNoHttp(): void {
+    pm.start("Tulsa", {});
+    spawn.calls[0].child.emitLine(F.READY_LINE_WITH_TS);
+  }
+
+  it("keeps asking when the server accepts the command but never answers", () => {
+    vi.useFakeTimers();
+    try {
+      runningNoHttp();
+      expect(spawn.calls[0].child.written).toEqual(["/players\n"]);
+      vi.advanceTimersByTime(2000);
+      vi.advanceTimersByTime(2000);
+      expect(spawn.calls[0].child.written.length).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops asking as soon as the server answers", () => {
+    vi.useFakeTimers();
+    try {
+      runningNoHttp();
+      spawn.calls[0].child.emitLine(`${TS}Players online: 0/5`);
+      spawn.calls[0].child.written.length = 0;
+      vi.advanceTimersByTime(30000);
+      expect(spawn.calls[0].child.written).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives up rather than asking a silent server forever", () => {
+    vi.useFakeTimers();
+    try {
+      runningNoHttp();
+      vi.advanceTimersByTime(120000);
+      expect(spawn.calls[0].child.written.length).toBe(5);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("replaces the roster from a /players block the server printed", async () => {
     await running();
     connect(AUTH, "Jeff", 1);

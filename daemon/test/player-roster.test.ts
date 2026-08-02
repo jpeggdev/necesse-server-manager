@@ -159,6 +159,40 @@ describe("reconcile", () => {
   });
 });
 
+/*
+ * One act of joining can produce more than one connection: the client connects
+ * to check mods, then connects again once a character is chosen. If the first
+ * connection's disconnect arrives after the second is up, a roster keyed by
+ * authentication drops somebody who is on. "Loaded player" is the game saying
+ * they are in the world, and it is what puts them back.
+ */
+describe("a join that connects more than once", () => {
+  it("stays listed when a stale disconnect lands after the real connection", () => {
+    join(AUTH, "Jeff", 1);
+    roster.observe(`${TS}Player ${AUTH} ("Jeff") disconnected with message: Quit`);
+    expect(roster.snapshot()).toEqual([]);
+
+    roster.observe(`${TS}Loaded player: ${AUTH}`);
+    expect(roster.snapshot().map((p) => p.auth)).toEqual([AUTH]);
+  });
+
+  it("does not disturb a player it already knows about", () => {
+    join(AUTH, "Jeff", 1);
+    const before = roster.snapshot()[0];
+    roster.observe(`${TS}Loaded player: ${AUTH}`);
+    expect(roster.snapshot()).toEqual([before]);
+  });
+
+  it("treats a repeated connect for the same auth as the same player", () => {
+    join(AUTH, "Jeff", 1);
+    const first = roster.snapshot()[0].joinedAt;
+    join(AUTH, "Jeff", 1);
+    const after = roster.snapshot();
+    expect(after).toHaveLength(1);
+    expect(after[0].joinedAt).toBe(first);
+  });
+});
+
 describe("clear", () => {
   it("empties on demand, for when the process exits", () => {
     join(AUTH, "Jeff", 1);

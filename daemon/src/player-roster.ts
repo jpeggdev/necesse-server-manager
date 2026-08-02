@@ -4,6 +4,7 @@ import {
   parsePlayerConnected,
   parsePlayerDisconnected,
   parsePlayerDropped,
+  parsePlayerLoaded,
   parsePlayersHeader,
   parsePlayersRow,
 } from "./player-lines.js";
@@ -70,6 +71,14 @@ export class PlayerRoster extends EventEmitter {
     const connected = parsePlayerConnected(line);
     if (connected !== null) {
       this.applyConnected(connected.consoleName, connected.slot);
+      return;
+    }
+
+    const loaded = parsePlayerLoaded(line);
+    if (loaded !== null) {
+      // Confirmation, not a join: re-opens an entry that a stale disconnect
+      // removed, and leaves an existing one (including its join time) alone.
+      if (!this.players.has(loaded.auth)) this.open(loaded.auth);
       return;
     }
 
@@ -150,5 +159,10 @@ export class PlayerRoster extends EventEmitter {
     this.incoming = null;
     this.players = new Map(rows.map((r) => [r.auth, r]));
     this.emit("changed");
+    // Distinct from "changed": this fires only when the SERVER answered, which
+    // is what tells a caller its question landed. A command sent while the
+    // world is still initialising is echoed to the console and then does
+    // nothing at all, so "we sent it" is not evidence that it ran.
+    this.emit("reconciled");
   }
 }
