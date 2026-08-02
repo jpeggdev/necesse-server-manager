@@ -516,6 +516,40 @@ export interface PlayerEntry {
   joinedAt: string | null;
 }
 
+/**
+ * What control a command's argument needs.
+ *
+ * Coarse on purpose. The registry-backed values (items, buffs, biomes, tiles,
+ * teams, settlers, level identifiers) cannot be listed without shipping a copy
+ * of the game's registries, so they are `text` and the server rejects a bad one
+ * and says why. A dropdown that was missing half the game's items would be
+ * worse than a text box.
+ */
+export type CommandParamType = "int" | "float" | "bool" | "enum" | "player" | "text";
+
+export interface CommandParam {
+  name: string;
+  type: CommandParamType;
+  /** The game parses positionally, so an omitted optional may only be trailing. */
+  optional: boolean;
+  /** Allowed values, when the game declared them as literals. Only ever set for `enum`. */
+  values?: string[];
+}
+
+/** One command the game accepts on its console, as this daemon exposes it. */
+export interface CommandDef {
+  name: string;
+  description: string;
+  permission: "USER" | "MODERATOR" | "ADMIN" | "OWNER" | "SERVER";
+  /** The game's own flag. Cheat commands need cheats enabled on the world. */
+  isCheat: boolean;
+  params: CommandParam[];
+  /** Irreversible enough that the client makes you type the name first. */
+  destructive?: boolean;
+  /** Acts on the caller, and the console is not a player. Hidden by the client. */
+  playerOnly?: boolean;
+}
+
 export type WsMessage =
   | { type: "backlog"; lines: ConsoleLine[]; status: StatusPayload; players: PlayerEntry[] }
   | { type: "console"; line: string; ts: string }
