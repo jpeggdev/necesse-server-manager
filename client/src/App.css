@@ -11,14 +11,46 @@ button.danger { background: #5a2020; border-color: #7a2a2a; }
 .pill-starting, .pill-stopping { background: #5a4a1a; }
 .pill-crashed, .pill-unmanaged { background: #5a2020; }
 .hint { font-size: .85rem; color: #9aa6b2; } .hint-warn { color: #e0b25c; } .hint-bad { color: #e07c7c; }
-.body { display: flex; flex: 1; min-height: 0; }
-.mods-pane { flex: 0 0 auto; min-width: 0; display: flex; flex-direction: column; }
-.pane-tabs { display: flex; gap: .25rem; padding: .5rem .5rem 0; flex: 0 0 auto; }
+/* Two layouts over one fixed DOM order, so no panel is ever reparented (which
+   would remount it and lose the mods panel's search, unsaved set and upload).
+   Only the grid areas change:
+
+     .with-console    tabs  | splitter | console      Mods and Players share
+                      panes |          |              one column, tabs arbitrate
+
+     .no-console      players | splitter | mods       both on screen at once  */
+.body { display: grid; flex: 1; min-height: 0; }
+.body.with-console {
+  grid-template-columns: var(--left-width) 6px minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-areas:
+    "tabs  split console"
+    "panes split console";
+}
+.with-console .pane-tabs { grid-area: tabs; }
+.with-console .pane-players, .with-console .pane-mods { grid-area: panes; }
+.with-console .splitter { grid-area: split; }
+.with-console .console { grid-area: console; }
+.body.no-console {
+  grid-template-columns: var(--left-width) 6px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  grid-template-areas: "players split mods";
+}
+.no-console .pane-players { grid-area: players; }
+.no-console .pane-mods { grid-area: mods; }
+.no-console .splitter { grid-area: split; }
+.pane-tabs { display: flex; gap: .25rem; padding: .5rem .5rem 0; }
 .pane-tabs button { background: none; border: none; border-bottom: 2px solid transparent; color: #9aa7b4; padding: .4rem .7rem; cursor: pointer; }
 .pane-tabs button[aria-selected="true"] { color: #e6edf3; border-bottom-color: #4a7fb5; }
-/* The hidden tab keeps its state; only its box is taken out of the layout. */
-.pane-body { flex: 1; min-height: 0; display: flex; }
-.pane-body[hidden] { display: none; }
+/* The hidden pane keeps its state; only its box is taken out of the layout.
+   The explicit rule is needed because `display` is set above and would
+   otherwise beat the [hidden] default. */
+.pane-players, .pane-mods { min-width: 0; min-height: 0; display: flex; }
+.pane-players[hidden], .pane-mods[hidden], .pane-tabs[hidden] { display: none; }
+/* Sits with the gear at the far end rather than trailing the world controls. */
+.console-toggle { margin-left: auto; }
+.console-toggle + .settings-btn { margin-left: 0; }
+.header button[aria-pressed="true"] { background: #2b4a6b; border-color: #3d6a97; }
 .players { flex: 1; min-width: 0; padding: 1rem; overflow-y: auto; }
 .players-empty { color: #9aa7b4; }
 .players-table { width: 100%; border-collapse: collapse; margin-top: .5rem; }
@@ -106,7 +138,9 @@ button.danger { background: #5a2020; border-color: #7a2a2a; }
 .workshop-blurb { font-size: .72rem; color: #9aa6b2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .workshop-subs { flex: 0 0 auto; font-size: .75rem; color: #9aa6b2; }
 .workshop-more { margin-top: .6rem; width: 100%; }
-.console { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+/* min-height:0 so the scrolling body is bounded by the grid row rather than
+   growing the row to fit every line. */
+.console { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .console-body { flex: 1; overflow-y: auto; padding: .6rem 1rem; font-family: Consolas, monospace; font-size: .8rem; }
 .line { white-space: pre-wrap; } .line-task { color: #6fd39b; }
 .error { background: #4a1c1c; border-bottom: 1px solid #7a2a2a; padding: .5rem 1rem; display: flex; justify-content: space-between; gap: 1rem; }

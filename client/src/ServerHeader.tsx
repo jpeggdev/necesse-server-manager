@@ -28,6 +28,14 @@ export interface ServerHeaderProps {
    * launch options at the next start.
    */
   onEditLaunchOptions?: (world: string) => void;
+  /**
+   * Whether the server console is on screen. Owned by App, which owns the
+   * layout the toggle switches between. Only meaningful alongside
+   * onToggleConsole; absent means the toggle is not offered at all, the same
+   * convention as the two editors above.
+   */
+  consoleVisible?: boolean;
+  onToggleConsole?: () => void;
   /** True while a mod/server task is streaming, independent of the server's own run state. */
   busy?: boolean;
   /**
@@ -244,6 +252,21 @@ export function ServerHeader(props: ServerHeaderProps) {
       )}
 
       {status.lastError && <span className="hint hint-bad">{status.lastError}</span>}
+
+      {props.onToggleConsole !== undefined && (
+        <button
+          className="console-toggle"
+          onClick={props.onToggleConsole}
+          aria-pressed={props.consoleVisible ?? true}
+          title={
+            props.consoleVisible ?? true
+              ? "Hide the console and give the space to the mods panel"
+              : "Show the server console"
+          }
+        >
+          Console
+        </button>
+      )}
 
       <button
         className="settings-btn"

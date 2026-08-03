@@ -9,7 +9,7 @@
 // covers the rest - so the only way to show they overlap rather than abut is
 // to hold the launching response open and step through it.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, act, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, act, waitFor, fireEvent, cleanup } from "@testing-library/react";
 import App from "../src/App";
 
 class FakeWebSocket {
@@ -131,6 +131,9 @@ function jsonResponse(body: unknown) {
 }
 
 beforeEach(() => {
+  // Cleared, not just overwritten: the console toggle and the two pane widths
+  // persist, so without this one test's layout would leak into the next.
+  localStorage.clear();
   localStorage.setItem(
     "necesse.connection",
     JSON.stringify({ host: "127.0.0.1", port: 8710, token: "" }),
@@ -303,6 +306,93 @@ describe("App players tab", () => {
     // Switching back must not have thrown away the mods panel's own state.
     fireEvent.click(screen.getByRole("tab", { name: /^mods$/i }));
     expect(screen.getByRole("heading", { name: /^mods$/i })).toBeVisible();
+  });
+});
+
+describe("App console toggle", () => {
+  const toggle = () => screen.getByRole("button", { name: /^console$/i });
+
+  it("starts with the console up and Mods and Players sharing the left column as tabs", async () => {
+    await mountConnected();
+    expect(toggle()).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("tab", { name: /^mods$/i })).toBeInTheDocument();
+    expect(screen.getByRole("separator")).toHaveAccessibleName("Resize mods panel");
+  });
+
+  it("hides the console and puts both panels on screen at once", async () => {
+    await mountConnected();
+    fireEvent.click(toggle());
+
+    expect(toggle()).toHaveAttribute("aria-pressed", "false");
+    // The tabs are gone because there is nothing left to arbitrate...
+    expect(screen.queryByRole("tab")).not.toBeInTheDocument();
+    // ...and both panels are visible together, which is the whole point.
+    expect(screen.getByRole("heading", { name: /^mods$/i })).toBeVisible();
+    expect(screen.getByRole("heading", { name: /^players \(\d+\)$/i })).toBeVisible();
+    // The splitter now sizes the players pane, so it must say so.
+    expect(screen.getByRole("separator")).toHaveAccessibleName("Resize players panel");
+  });
+
+  it("puts the console back, with the tabs, when toggled again", async () => {
+    await mountConnected();
+    fireEvent.click(toggle());
+    fireEvent.click(toggle());
+
+    expect(toggle()).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("tab", { name: /^mods$/i })).toBeInTheDocument();
+    expect(screen.getByRole("separator")).toHaveAccessibleName("Resize mods panel");
+  });
+
+  it("keeps the mods panel's unsaved state across the toggle, rather than remounting it", async () => {
+    const ws = await mountConnected();
+    await settle();
+
+    // Untick a mod so the panel is holding an edit that only exists in its own
+    // state - a remount is exactly what would silently discard it.
+    const tick = await screen.findByRole("checkbox", { name: /safe haven qol/i });
+    await waitFor(() => expect(tick).toBeChecked());
+    fireEvent.click(tick);
+    expect(tick).not.toBeChecked();
+
+    fireEvent.click(toggle());
+    await settle();
+
+    // The layout genuinely changed. Without this the assertion below would hold
+    // trivially for a toggle that did nothing at all.
+    expect(screen.queryByRole("tab")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /^mods$/i })).toBeVisible();
+
+    // Still unticked after changing columns. The naive implementation - moving
+    // ModsPanel to a different parent - remounts it, which reloads the saved
+    // set and silently re-ticks this box.
+    expect(screen.getByRole("checkbox", { name: /safe haven qol/i })).not.toBeChecked();
+    // And the app around it did not remount either.
+    expect(ws).toBe(FakeWebSocket.instances[FakeWebSocket.instances.length - 1]);
+  });
+
+  it("remembers the choice for the next launch", async () => {
+    await mountConnected();
+    fireEvent.click(toggle());
+    expect(localStorage.getItem("necesse.consoleVisible")).toBe("false");
+
+    cleanup();
+    await mountConnected();
+    expect(screen.getByRole("button", { name: /^console$/i })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(screen.queryByRole("tab")).not.toBeInTheDocument();
+  });
+
+  it("sizes each layout's left pane from its own remembered width", async () => {
+    localStorage.setItem("necesse.modsWidth", "500");
+    localStorage.setItem("necesse.playersWidth", "260");
+    await mountConnected();
+
+    expect(screen.getByRole("separator")).toHaveAttribute("aria-valuenow", "500");
+    fireEvent.click(toggle());
+    // Not 500: dragging the mods pane wide must not widen the players table.
+    expect(screen.getByRole("separator")).toHaveAttribute("aria-valuenow", "260");
   });
 });
 

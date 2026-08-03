@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { ServerHeader } from "./ServerHeader";
 import { ModsPanel } from "./ModsPanel";
 import { PlayersPanel } from "./PlayersPanel";
@@ -20,6 +20,26 @@ const MODS_WIDTH_KEY = "necesse.modsWidth";
 const MODS_WIDTH_DEFAULT = 432;
 const MODS_WIDTH_MIN = 300;
 const MODS_WIDTH_MAX = 900;
+
+/**
+ * The left column holds different things in the two layouts - the tabbed
+ * Mods/Players pane while the console is up, the players table alone once it is
+ * hidden - so each remembers its own width. Sharing one number would drag the
+ * 432px a mod list needs onto a table of five short columns, and dragging it
+ * back would then widen the mods pane on the next toggle.
+ */
+const PLAYERS_WIDTH_KEY = "necesse.playersWidth";
+const PLAYERS_WIDTH_DEFAULT = 320;
+const PLAYERS_WIDTH_MIN = 220;
+const PLAYERS_WIDTH_MAX = 700;
+
+/** Absent means visible: the console has been the default view since v1. */
+const CONSOLE_VISIBLE_KEY = "necesse.consoleVisible";
+
+const savedWidth = (key: string, fallback: number) => {
+  const saved = Number(localStorage.getItem(key));
+  return Number.isFinite(saved) && saved > 0 ? saved : fallback;
+};
 
 /**
  * Shown on the connection screen when the app sent itself there. The daemon's
@@ -146,14 +166,34 @@ function ConnectedApp({
   // stopped, so it must not share that dialog's lifecycle.
   const [launchOptionsWorld, setLaunchOptionsWorld] = useState<string | null>(null);
 
-  const [modsWidth, setModsWidth] = useState(() => {
-    const saved = Number(localStorage.getItem(MODS_WIDTH_KEY));
-    return Number.isFinite(saved) && saved > 0 ? saved : MODS_WIDTH_DEFAULT;
-  });
-  const resizeMods = useCallback((w: number) => {
-    setModsWidth(w);
-    localStorage.setItem(MODS_WIDTH_KEY, String(w));
-  }, []);
+  const [modsWidth, setModsWidth] = useState(() => savedWidth(MODS_WIDTH_KEY, MODS_WIDTH_DEFAULT));
+  const [playersWidth, setPlayersWidth] = useState(() =>
+    savedWidth(PLAYERS_WIDTH_KEY, PLAYERS_WIDTH_DEFAULT),
+  );
+  const [consoleVisible, setConsoleVisible] = useState(
+    () => localStorage.getItem(CONSOLE_VISIBLE_KEY) !== "false",
+  );
+  const toggleConsole = useCallback(() => setConsoleVisible((v) => !v), []);
+  // Written from an effect rather than inside the updater above: an updater has
+  // to stay pure, and StrictMode calls it twice.
+  useEffect(() => {
+    localStorage.setItem(CONSOLE_VISIBLE_KEY, String(consoleVisible));
+  }, [consoleVisible]);
+
+  // One splitter drives whichever pane is on the left in the current layout.
+  const leftWidth = consoleVisible ? modsWidth : playersWidth;
+  const resizeLeft = useCallback(
+    (w: number) => {
+      if (consoleVisible) {
+        setModsWidth(w);
+        localStorage.setItem(MODS_WIDTH_KEY, String(w));
+      } else {
+        setPlayersWidth(w);
+        localStorage.setItem(PLAYERS_WIDTH_KEY, String(w));
+      }
+    },
+    [consoleVisible],
+  );
 
   // Cleared the moment the daemon leaves `stopping`, however it got there: the
   // server finally finished saving, the kill landed, or a new run started. A
@@ -376,42 +416,53 @@ function ConnectedApp({
         onUpdateServer={guard(() => api.updateServer())}
         onEditWorldSettings={(w) => setSettingsWorld(w)}
         onEditLaunchOptions={(w) => setLaunchOptionsWorld(w)}
+        consoleVisible={consoleVisible}
+        onToggleConsole={toggleConsole}
       />
-      <div className="body">
-        <div className="mods-pane" style={{ width: modsWidth }}>
-          <div className="pane-tabs" role="tablist" aria-label="Left panel">
-            <button
-              role="tab"
-              aria-selected={leftTab === "mods"}
-              onClick={() => setLeftTab("mods")}
-            >
-              Mods
-            </button>
-            <button
-              role="tab"
-              aria-selected={leftTab === "players"}
-              onClick={() => setLeftTab("players")}
-            >
-              Players ({players.length})
-            </button>
-          </div>
-          {/* Hidden rather than unmounted: the mods panel holds a workshop
-              search, an in-progress mod set and upload state, none of which
-              should be thrown away by looking at who is online. */}
-          <div className="pane-body" hidden={leftTab !== "players"}>
-            <PlayersPanel
-              players={players}
-              running={running}
-              onRunCommand={() => setRunningCommand(true)}
-              onRefresh={guard(async () => {
-                const r = await api.refreshPlayers();
-                // Answers ok:false rather than throwing when there is no server
-                // to ask, so the refusal has to be surfaced explicitly.
-                if (!r.ok) setError(r.error ?? "Could not ask the server who is online.");
-              })}
-            />
-          </div>
-          <div className="pane-body" hidden={leftTab !== "mods"}>
+      {/*
+        Two layouts over ONE fixed child order. With the console up, Mods and
+        Players are tabs sharing the left column; with it hidden, Players keeps
+        the left column and Mods takes the space the console had. Only the grid
+        areas differ - no panel is ever moved to a different parent, because
+        that would remount it, and the mods panel holds a workshop search, an
+        unsaved mod set and upload state that must survive both the tab switch
+        and the toggle.
+      */}
+      <div
+        className={`body ${consoleVisible ? "with-console" : "no-console"}`}
+        style={{ "--left-width": `${leftWidth}px` } as CSSProperties}
+      >
+        {/* Hidden, not unmounted, so the panes below keep their child slots.
+            `hidden` also takes the tablist out of the accessibility tree, which
+            is right: with the console gone there is nothing left to tab. */}
+        <div className="pane-tabs" role="tablist" aria-label="Left panel" hidden={!consoleVisible}>
+          <button role="tab" aria-selected={leftTab === "mods"} onClick={() => setLeftTab("mods")}>
+            Mods
+          </button>
+          <button
+            role="tab"
+            aria-selected={leftTab === "players"}
+            onClick={() => setLeftTab("players")}
+          >
+            Players ({players.length})
+          </button>
+        </div>
+        {/* The tabs only arbitrate while the console is up. Once it is hidden
+            both panes are on screen at once, so neither may be hidden. */}
+        <div className="pane-players" hidden={consoleVisible && leftTab !== "players"}>
+          <PlayersPanel
+            players={players}
+            running={running}
+            onRunCommand={() => setRunningCommand(true)}
+            onRefresh={guard(async () => {
+              const r = await api.refreshPlayers();
+              // Answers ok:false rather than throwing when there is no server
+              // to ask, so the refusal has to be surfaced explicitly.
+              if (!r.ok) setError(r.error ?? "Could not ask the server who is online.");
+            })}
+          />
+        </div>
+        <div className="pane-mods" hidden={consoleVisible && leftTab !== "mods"}>
           <ModsPanel
             mods={mods}
             library={library ?? []}
@@ -433,15 +484,20 @@ function ConnectedApp({
             onRemove={(id) => guard(() => api.removeMod(id))()}
             onUpdateAll={guard(() => api.updateAllMods())}
           />
-          </div>
         </div>
         <Splitter
-          width={modsWidth}
-          min={MODS_WIDTH_MIN}
-          max={MODS_WIDTH_MAX}
-          onResize={resizeMods}
+          width={leftWidth}
+          min={consoleVisible ? MODS_WIDTH_MIN : PLAYERS_WIDTH_MIN}
+          max={consoleVisible ? MODS_WIDTH_MAX : PLAYERS_WIDTH_MAX}
+          onResize={resizeLeft}
+          label={consoleVisible ? "Resize mods panel" : "Resize players panel"}
         />
-        <ConsolePanel lines={lines} />
+        {/* Unmounted rather than hidden, unlike the panes: the console can hold
+            thousands of lines, it owns no state worth keeping (the lines live
+            in useDaemon), and coming back scrolled to the latest is what you
+            want anyway. Conditional children keep their slot, so the panes
+            above are unaffected. */}
+        {consoleVisible && <ConsolePanel lines={lines} />}
       </div>
       {runningCommand && (
         <CommandDialog api={api} players={players} onClose={() => setRunningCommand(false)} />

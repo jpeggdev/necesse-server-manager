@@ -5,6 +5,11 @@ export interface SplitterProps {
   min: number;
   max: number;
   onResize: (width: number) => void;
+  /**
+   * What this handle resizes. The pane on its left changes with the layout, so
+   * a fixed label would name the wrong panel half the time.
+   */
+  label?: string;
 }
 
 const KEYBOARD_STEP = 16;
@@ -14,7 +19,7 @@ const KEYBOARD_STEP = 16;
  * the cursor leaves the 6px handle, and releases automatically if the pointer
  * is lost, so there is no global listener left behind to leak.
  */
-export function Splitter({ width, min, max, onResize }: SplitterProps) {
+export function Splitter({ width, min, max, onResize, label }: SplitterProps) {
   const startX = useRef(0);
   const startWidth = useRef(0);
 
@@ -53,7 +58,7 @@ export function Splitter({ width, min, max, onResize }: SplitterProps) {
       className="splitter"
       role="separator"
       aria-orientation="vertical"
-      aria-label="Resize mods panel"
+      aria-label={label ?? "Resize mods panel"}
       aria-valuenow={Math.round(width)}
       aria-valuemin={min}
       aria-valuemax={max}
