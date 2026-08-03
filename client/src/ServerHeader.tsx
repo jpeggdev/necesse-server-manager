@@ -207,7 +207,15 @@ export function ServerHeader(props: ServerHeaderProps) {
       )}
 
       {live ? (
-        <button onClick={props.onStop} disabled={status.state === "stopping"}>
+        <button
+          onClick={props.onStop}
+          disabled={status.state === "stopping" && !stopStalled}
+          title={
+            stopStalled
+              ? "Ask the server to save and shut down again. Far safer than the force kill beside it, but not free: if the server is still saving, a second stop restarts that save from the beginning rather than letting it finish."
+              : undefined
+          }
+        >
           Stop
         </button>
       ) : (

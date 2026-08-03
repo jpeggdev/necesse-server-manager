@@ -227,6 +227,103 @@ describe("stop", () => {
     await expect(pm.stop()).rejects.toThrow(/not running/i);
   });
 
+  /*
+   * The 2026-08-03 wedge, end to end.
+   *
+   * A stop issued while the server is still `starting` IS read - the command
+   * scanner runs from launch - but `ServerLoader.handleCommand` drops any
+   * command while its `server` field is null, and that field is assigned only
+   * when `startServer` RETURNS. So the command is echoed to the console and
+   * then does nothing. Before the fix the daemon had already moved to
+   * `stopping`, which made `inspect` discard the ready line (it only promotes
+   * out of `starting`), so the server finished booting and sat there playable
+   * while the daemon believed it was shutting down: start, stop, send and
+   * every mod mutation refused from then on, and only kill - the one action
+   * that risks the save - still worked.
+   *
+   * The ready line is NOT the signal to re-send on: the game prints it from
+   * INSIDE `startServer`, three statements before that return, so a re-send
+   * there is dropped exactly like the first one. Verified live on 2026-08-03,
+   * where the daemon's own `players` probe was echoed at the ready line and
+   * silently ignored. `Type help for list of commands.` is the last line
+   * `startServer` prints before returning, which is why it is the trigger.
+   */
+  it("re-sends a stop issued during startup once the game will act on one", async () => {
+    pm.start("Tulsa", {});
+    const done = pm.stop();
+    expect(pm.status.state).toBe("stopping");
+
+    // Still too early - this one is printed from inside startServer.
+    child().child.emitLine(F.REAL_READY);
+    expect(child().child.written).toEqual(["stop\n"]);
+
+    child().child.emitLine(F.REAL_COMMANDS_HINT);
+
+    expect(child().child.written).toEqual(["stop\n", "stop\n"]);
+    child().child.exit(0);
+    await done;
+    expect(pm.status.state).toBe("stopped");
+  });
+
+  /*
+   * `Server.stop` calls `startFullSave(forced=true)`, and `forced` bypasses the
+   * in-progress guard: it discards the running save handler and starts a new
+   * one, firing onSaveInterrupted on the old. So a second stop reaching a
+   * server that is already saving aborts the save this whole graceful path
+   * exists to protect. The hint line is printed once per launch and never
+   * during a shutdown, which is what makes re-sending on it safe - but a
+   * daemon that had already delivered its stop must not re-send anyway.
+   */
+  it("does not re-send when the first stop was delivered normally", async () => {
+    pm.start("Tulsa", {});
+    child().child.emitLine(F.REAL_READY);
+    child().child.emitLine(F.REAL_COMMANDS_HINT);
+    const done = pm.stop();
+
+    child().child.emitLine(F.REAL_COMMANDS_HINT);
+
+    expect(child().child.written).toEqual(["stop\n"]);
+    child().child.exit(0);
+    await done;
+  });
+
+  /*
+   * The backstop for the same wedge. `stopping` used to be terminal: the
+   * timeout nulls the waiter and rejects but deliberately leaves the process
+   * running, and a second stop was then refused as "not running", so the
+   * operator who had just been told the process was left alive had no way to
+   * ask again. Kill was the only exit, and kill is what the graceful path
+   * exists to avoid.
+   */
+  it("accepts a second stop after the first one timed out", async () => {
+    pm.start("Tulsa", {});
+    child().child.emitLine(F.READY_LINE_WITH_TS);
+    await expect(pm.stop()).rejects.toThrow(/did not exit/i);
+    expect(pm.status.state).toBe("stopping");
+
+    const retry = pm.stop();
+
+    expect(child().child.written).toEqual(["stop\n", "stop\n"]);
+    child().child.exit(0);
+    await retry;
+    expect(pm.status.state).toBe("stopped");
+  });
+
+  /* Retrying is only for a stop nobody is waiting on any more. Two waiters on
+   * one shutdown would mean the timeout of whichever was armed second decides
+   * the outcome for both. */
+  it("refuses a second stop while the first is still in flight", async () => {
+    pm.start("Tulsa", {});
+    child().child.emitLine(F.READY_LINE_WITH_TS);
+    const first = pm.stop();
+
+    await expect(pm.stop()).rejects.toThrow(/already/i);
+
+    expect(child().child.written).toEqual(["stop\n"]);
+    child().child.exit(0);
+    await first;
+  });
+
   it("still records an abnormal exit after the stop timeout already rejected", async () => {
     pm.start("Tulsa", {});
     child().child.emitLine(F.READY_LINE_WITH_TS);

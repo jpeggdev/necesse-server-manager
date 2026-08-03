@@ -235,6 +235,29 @@ call `stateFile()` on import, which throws wherever `PROGRAMDATA` is unset.
 - **`stop` never escalates to a kill on timeout.** The server saves the world
   during shutdown; killing it risks the save. `kill` is a separate endpoint so
   it can never happen implicitly.
+- **The game silently discards every console command until `startServer` has
+  returned, and its output cannot tell you that happened.** Its command scanner
+  reads stdin from launch, so the write always succeeds and the command is even
+  echoed as `> whatever` — but `ServerLoader.handleCommand` drops it while its
+  `server` field is null, and that field is assigned only when `startServer`
+  returns. **The ready line is printed from three statements INSIDE
+  `startServer`, so it is too early to send anything on.** This cost a
+  wedged daemon: a Stop pressed during startup was accepted, lost, and left the
+  state machine in `stopping` for the life of a fully booted, playable server,
+  where start, stop, send and every mod mutation refuse and only `kill` works.
+  The last line `startServer` prints before returning is `Type help for list of
+  commands.` (`isCommandsHint`), which is why `ProcessManager` re-sends a
+  swallowed stop on that and not on the ready line. `askWhoIsOnline` in
+  `http.ts` predates this and solves the same problem for `players` by retrying
+  until it gets an answer.
+- **Never re-send `stop` to a server that may already be shutting down.**
+  `Server.stop` calls `startFullSave(forced = true)`, and `forced` bypasses the
+  in-progress guard: it discards the running save handler and starts a new one,
+  firing `onSaveInterrupted` on the old. A retry-on-a-timer would abort the very
+  world save the graceful path exists to protect. The re-send above is safe only
+  because it is gated on a stop known to have been discarded and fires on a line
+  the game prints exactly once per launch, during startup, never during a
+  shutdown.
 
 ## Launch options
 

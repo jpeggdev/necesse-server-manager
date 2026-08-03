@@ -32,6 +32,21 @@ export const REAL_WARN =
   "\u001b[33m[2026-07-27 03:27:28] (WARN) Invalid mod jar located at C:\\Users\\jeffp\\AppData\\Roaming\\Necesse\\mods\\torvians-qol.cfg";
 
 /*
+ * The last line the game prints before `startServer` returns and
+ * `ServerLoader.server` stops being null - which is what makes it the earliest
+ * point a stop command is acted on rather than echoed and discarded.
+ *
+ * Captured on 2026-08-03 off the live server (v1.3.1) through the daemon's own
+ * console stream, which is why this one carries no colour escape: `ingest`
+ * strips it before recording. The surrounding lines in that capture were, in
+ * order: the ready line, "Found 1 saved players.", a `> players` that was
+ * echoed and then silently ignored, "Local address: 192.168.1.106:14159", and
+ * this. That ignored `players` is the daemon's own startup probe, and it is the
+ * live evidence that the ready line is too early to send anything on.
+ */
+export const REAL_COMMANDS_HINT = "[2026-08-03 13:19:12] Type help for list of commands.";
+
+/*
  * A real join and a real quit, captured from the live server's
  * latest-server-log.txt on 2026-08-01, game version 1.3.1. The player joined
  * at 21:23:18 and quit fifteen seconds later.

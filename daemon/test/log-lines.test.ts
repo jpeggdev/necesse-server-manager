@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { stripTimestamp, stripAnsi, normalize, parseReady, isStopped } from "../src/log-lines.js";
+import {
+  stripTimestamp,
+  stripAnsi,
+  normalize,
+  parseReady,
+  isStopped,
+  isCommandsHint,
+} from "../src/log-lines.js";
 import * as F from "./fixtures/log-fixtures.js";
 
 describe("stripTimestamp", () => {
@@ -43,6 +50,38 @@ describe("isStopped", () => {
   it("does not match the save line or the stop echo", () => {
     expect(isStopped(F.SAVE_COMPLETE)).toBe(false);
     expect(isStopped(F.STOP_ECHO)).toBe(false);
+  });
+});
+
+describe("isCommandsHint", () => {
+  it("matches the line the game prints once its commands take effect", () => {
+    expect(isCommandsHint(F.REAL_COMMANDS_HINT)).toBe(true);
+  });
+
+  /*
+   * The ready line is the one that matters here. The game prints it from
+   * inside `startServer`, three statements before the return that makes
+   * commands take effect, so treating it as the hint is exactly the mistake
+   * this parser exists to avoid - and one the daemon's own startup `players`
+   * probe was observed making live on 2026-08-03.
+   */
+  it("does not match the ready line or anything else in the startup burst", () => {
+    expect(isCommandsHint(F.REAL_READY)).toBe(false);
+    expect(isCommandsHint(F.READY_LINE_WITH_TS)).toBe(false);
+    expect(isCommandsHint(F.STOPPED_LINE)).toBe(false);
+    expect(isCommandsHint(F.MOD_FOUND)).toBe(false);
+  });
+
+  /*
+   * The captured fixture came through the daemon's console stream, which had
+   * already stripped the escape, so this rebuilds the raw stdout form. Built
+   * with fromCharCode rather than written as a literal for the reason
+   * log-lines.ts gives: an ESC in a literal is either an invisible control
+   * byte or an escape the tooling in the path eats before it reaches disk.
+   */
+  it("matches through the colour escape stdout puts before the timestamp", () => {
+    const esc = String.fromCharCode(27);
+    expect(isCommandsHint(`${esc}[39m${F.REAL_COMMANDS_HINT}`)).toBe(true);
   });
 });
 

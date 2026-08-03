@@ -178,8 +178,9 @@ describe("ServerHeader", () => {
       expect(btn).toBeEnabled();
       expect(btn.className).toMatch(/danger/);
       expect(btn.getAttribute("title")).toMatch(/world/i);
-      // ...and it is not mistakable for the ordinary Stop, which stays put and disabled.
-      expect(screen.getByRole("button", { name: /^stop$/i })).toBeDisabled();
+      // ...and it is not mistakable for the ordinary Stop, which stays put and,
+      // since the daemon accepts a retry once the waiter is released, usable.
+      expect(screen.getByRole("button", { name: /^stop$/i })).toBeEnabled();
       expect(screen.getByText(/timed out/i)).toBeTruthy();
     });
 
@@ -198,6 +199,22 @@ describe("ServerHeader", () => {
     it("stays hidden while the server is running, even if a previous stop timed out", () => {
       setup({ status: running, stopTimedOut: true });
       expect(screen.queryByRole("button", { name: /force kill/i })).toBeNull();
+    });
+
+    /*
+     * The timeout releases the daemon's stop waiter but leaves the process
+     * running, and `pm.stop` now accepts a second attempt in exactly that
+     * state - so the button has to agree with the route it talks to, the same
+     * rule the launch-options buttons above follow. Retrying the graceful
+     * shutdown must stay the easier reach than the kill beside it: this is the
+     * only path back that does not risk the save.
+     */
+    it("re-enables Stop so the graceful shutdown can be retried", async () => {
+      const props = setup({ status: stopping, stopTimedOut: true });
+      const stop = screen.getByRole("button", { name: /^stop$/i });
+      expect(stop).toBeEnabled();
+      await userEvent.click(stop);
+      expect(props.onStop).toHaveBeenCalledTimes(1);
     });
   });
 

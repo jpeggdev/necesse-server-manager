@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { parseReady, isStopped, stripAnsi } from "./log-lines.js";
+import { parseReady, isStopped, isCommandsHint, stripAnsi, type ReadyInfo } from "./log-lines.js";
 import type { ConsoleLine, DaemonConfig, LaunchOptionValue, ServerState, ServerStatus } from "./types.js";
 
 const BACKLOG_LIMIT = 2000;
@@ -52,6 +52,14 @@ export class ProcessManager extends EventEmitter {
   private pending = { out: "", err: "" };
   private externalPid: number | null = null;
   private stopWaiter: { resolve: () => void; reject: (e: Error) => void; timer: NodeJS.Timeout } | null = null;
+  /**
+   * Whether this launch has reached the point where the game acts on a command
+   * instead of echoing it and throwing it away. False from `start` until the
+   * "Type help for list of commands." line; see `isCommandsHint`.
+   */
+  private commandsAccepted = false;
+  /** A stop was written while `commandsAccepted` was false, so the game discarded it and it still has to be delivered. */
+  private stopSwallowed = false;
 
   constructor(
     private cfg: DaemonConfig,
@@ -184,6 +192,8 @@ export class ProcessManager extends EventEmitter {
     this.gameVersion = null;
     this.lastError = null;
     this.pending = { out: "", err: "" };
+    this.commandsAccepted = false;
+    this.stopSwallowed = false;
     this.startedAt = new Date().toISOString();
 
     const child = this.spawnFn(this.cfg.javaExe, this.buildArgs(world, options), { cwd: this.cfg.serverRoot });
@@ -220,14 +230,53 @@ export class ProcessManager extends EventEmitter {
     this.emit("line", entry);
   }
 
+  private applyReady(ready: ReadyInfo): void {
+    this.port = ready.port;
+    this.slots = ready.slots;
+    this.gameVersion = ready.gameVersion;
+    this.world = ready.world;
+  }
+
   private inspect(line: string): void {
     const ready = parseReady(line);
     if (ready && this.state === "starting") {
-      this.port = ready.port;
-      this.slots = ready.slots;
-      this.gameVersion = ready.gameVersion;
-      this.world = ready.world;
+      this.applyReady(ready);
       this.setState("running");
+      return;
+    }
+    // The ready line still carries the only copy of these, even when the
+    // daemon is already on its way down: it is `stopping` here because a stop
+    // was issued during startup, and the launch it describes did happen.
+    if (ready && this.state === "stopping") {
+      this.applyReady(ready);
+      return;
+    }
+    /*
+     * The game will act on a command from here on, so this is where a stop it
+     * silently discarded gets delivered.
+     *
+     * Deliberately gated on `stopSwallowed` rather than on `stopping` alone. A
+     * second stop reaching a server that is already shutting down is not
+     * harmless: `Server.stop` calls `startFullSave(forced = true)`, and forced
+     * bypasses the in-progress guard - it drops the running save handler and
+     * starts a new one. That would abort the world save this whole graceful
+     * path exists to protect. So only a stop known to have been discarded is
+     * ever re-sent, and only once.
+     */
+    if (isCommandsHint(line)) {
+      this.commandsAccepted = true;
+      if (this.stopSwallowed && this.child) {
+        this.stopSwallowed = false;
+        try {
+          this.writeStop(this.child);
+        } catch (e) {
+          // Only reachable if the pipe died between the child emitting this
+          // line and us answering it, in which case its exit is already on its
+          // way and settles the waiting stop. Recorded rather than thrown: this
+          // runs in a stdout handler, where an exception takes the daemon down.
+          this.lastError = (e as Error).message;
+        }
+      }
       return;
     }
     if (isStopped(line) && this.state === "running") this.setState("stopping");
@@ -313,6 +362,27 @@ export class ProcessManager extends EventEmitter {
     }
   }
 
+  /** The one place the stop command reaches the wire, so the hint-line repair in `inspect` re-sends exactly what `stop` sent. */
+  private writeStop(child: ChildLike): void {
+    try {
+      child.stdin.write("stop\n");
+    } catch (e) {
+      throw new Error(`Failed to write to server stdin: ${(e as Error).message}`);
+    }
+  }
+
+  /**
+   * Asks the server to save and shut down, resolving when it has exited.
+   *
+   * `stopping` is an accepted starting state, but only with no waiter in
+   * flight. That combination means the previous stop's timeout has already
+   * fired and rejected, leaving the process running on purpose - and refusing
+   * there made `stopping` terminal, so the operator who had just been told the
+   * process was left alive had nothing to ask again with short of kill. A stop
+   * that IS still in flight is refused instead of arming a second waiter: one
+   * shutdown settled by whichever timer happened to be armed later is a race,
+   * not a retry.
+   */
   stop(): Promise<void> {
     if (this.state === "unmanaged") {
       return Promise.reject(
@@ -322,15 +392,28 @@ export class ProcessManager extends EventEmitter {
         ),
       );
     }
-    if (!this.child || (this.state !== "running" && this.state !== "starting")) {
+    if (this.state === "stopping" && this.stopWaiter !== null) {
+      return Promise.reject(
+        new Error(
+          `A stop was already sent and is still in flight; the server is saving the world. ` +
+            `Wait for it to finish rather than sending a second one.`,
+        ),
+      );
+    }
+    if (!this.child || (this.state !== "running" && this.state !== "starting" && this.state !== "stopping")) {
       return Promise.reject(new Error(`Server is not running (state: ${this.state}).`));
     }
     const child = this.child;
     this.setState("stopping");
+    // The write below always succeeds - the scanner reads stdin from launch -
+    // but the game discards what it reads until `startServer` has returned, and
+    // nothing in its output distinguishes that from having acted on it. So the
+    // daemon records the fact and re-sends when the hint line says it will land.
+    if (!this.commandsAccepted) this.stopSwallowed = true;
     try {
-      child.stdin.write("stop\n");
+      this.writeStop(child);
     } catch (e) {
-      return Promise.reject(new Error(`Failed to write to server stdin: ${(e as Error).message}`));
+      return Promise.reject(e as Error);
     }
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {

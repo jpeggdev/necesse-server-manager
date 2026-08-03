@@ -61,3 +61,18 @@ export function parseReady(line: string): ReadyInfo | null {
 export function isStopped(line: string): boolean {
   return normalize(line) === "Server has stopped";
 }
+
+/**
+ * The game's "Type help for list of commands." line, which marks the first
+ * moment a command sent to it is acted on rather than echoed and discarded.
+ *
+ * The command scanner reads stdin from launch, but `ServerLoader.handleCommand`
+ * drops everything while its `server` field is null, and that field is assigned
+ * only once `startServer` RETURNS. This is the last line `startServer` prints
+ * before returning, so it is the closest observable to that assignment - closer
+ * than the ready line, which the game prints from three statements earlier and
+ * which is therefore still too early to send anything on.
+ */
+export function isCommandsHint(line: string): boolean {
+  return normalize(line) === "Type help for list of commands.";
+}
