@@ -1,6 +1,5 @@
 # Tasks
 
-- [ ] mod-sets.ts has the same `__proto__` world-name hole the launch-options store just fixed: a world named `__proto__` reports a save that did not happen. Pre-existing, found while reviewing feat/launch-options, deliberately left out of that branch's scope. Fix is the same shape - null-prototype object or a Map for the per-world record
 - [x] Build v1 Necesse server GUI (Node/TS daemon on SERVER + Tauri client) per docs/superpowers/specs/2026-07-26-necesse-server-gui-design.html
 - [x] v2: world settings editor - stop server, unzip world, edit worldSettings.cfg via typed GUI form, rezip atomically with backup, restart
 - [x] Make daemon location/run-mode configurable and publish as a public repo per docs/superpowers/specs/2026-07-29-shareable-release-design.html
@@ -11,3 +10,4 @@
 - [x] Player tracking panel: online roster derived from the server's console lines and reconciled against `players`, plus generated forms for the game's 94 server commands extracted from the live Server.jar, per docs/superpowers/specs/2026-08-01-player-tracking-and-commands-design.html
 - [x] Launch-option residuals parked by the final review, all Minor and measured against the real Server.jar: (1) a tab or newline inside a text value silently truncates it at the game (`hello<TAB>world` arrives as `hello`) - the validation rejects dashes and quotes but not control whitespace; (2) the unbounded int fields accept `1e21`, which serialises as `1e+21`, and values above INT_MAX, which the game silently ignores; (3) README's launch-option list omits `password` and `ip`
 - [x] Replace the default-looking Tauri app icon with an N monogram, and let the console panel be toggled hidden - with the mods panel taking its place and the players panel keeping the left column
+- [x] mod-sets.ts had the same `__proto__` world-name hole the launch-options store fixed. Wider than first recorded: `set` replaced the prototype and reported a save that never reached disk, `get` handed back Object.prototype (not undefined, so http.ts's setFor and mod-migration's seeding both took their "already has a set" branch and read .modIds as undefined), and `remove` reported a removal it never made. Fixed with a null-prototype record, same shape as launch-options' emptyWorlds

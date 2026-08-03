@@ -88,3 +88,71 @@ describe("reading and writing", () => {
     await expect(sets.load()).rejects.toThrow(file);
   });
 });
+
+/*
+ * `__proto__` is a legal Windows filename, so it is a possible world name, and
+ * `normaliseWorld` only lowercases it - it survives to the key unchanged. On a
+ * plain object every operation in this class is then wrong, and silently:
+ * `all["__proto__"] = entry` runs Object.prototype's setter and replaces the
+ * prototype rather than storing anything (so `set` returns an entry the route
+ * reports as saved while nothing reaches disk), reading it back hands out
+ * Object.prototype, which is not undefined and so passes the "already has a
+ * set" checks in http.ts's setFor and mod-migration's seeding loop, and delete
+ * removes nothing while reporting a removal.
+ */
+describe("a world named __proto__", () => {
+  it("stores its set and reads it back off disk", async () => {
+    const written = await sets.set("__proto__", ["a.one", "b.two"]);
+    expect(written.modIds).toEqual(["a.one", "b.two"]);
+    expect((await sets.get("__proto__"))?.modIds).toEqual(["a.one", "b.two"]);
+
+    // Reopened, because the in-memory record and the file are two separate
+    // claims: a prototype assignment is not serialised by JSON.stringify at
+    // all, so only a reload proves the save actually landed.
+    const reopened = new ModSets(file);
+    expect((await reopened.get("__proto__"))?.modIds).toEqual(["a.one", "b.two"]);
+    expect(Object.keys(await reopened.load())).toEqual(["__proto__"]);
+  });
+
+  it("reports no set before one is stored, rather than handing back Object.prototype", async () => {
+    // The bug this pins is not visible to toEqual: Object.prototype has no
+    // enumerable own properties, so it looks empty. Its danger is that it is
+    // not undefined, so `existing !== undefined` wrongly passes and the caller
+    // then reads `.modIds` off it as undefined.
+    await sets.set("Tulsa", ["a.one"]);
+    const got = await sets.get("__proto__");
+    expect(got).toBeUndefined();
+    expect(got).not.toBe(Object.prototype);
+  });
+
+  it("reports nothing removed when it had no set", async () => {
+    expect(await sets.remove("__proto__")).toBeUndefined();
+  });
+
+  it("removes its set once it has one", async () => {
+    await sets.set("__proto__", ["a.one"]);
+    expect((await sets.remove("__proto__"))?.modIds).toEqual(["a.one"]);
+    expect(await sets.get("__proto__")).toBeUndefined();
+  });
+
+  it("keeps it apart from other worlds, and pollutes nothing", async () => {
+    await sets.set("__proto__", ["a.one"]);
+    await sets.set("Tulsa", ["b.two"]);
+
+    expect((await sets.get("__proto__"))?.modIds).toEqual(["a.one"]);
+    expect((await sets.get("Tulsa"))?.modIds).toEqual(["b.two"]);
+    // Nothing leaked onto every object in the process.
+    expect((({}) as Record<string, unknown>).modIds).toBeUndefined();
+  });
+});
+
+describe("a stored file whose contents are valid JSON but not a record", () => {
+  // Object.assign ignores a null source, where the previous `JSON.parse(raw)`
+  // cast returned it and made every read throw on property access instead.
+  it("reads as no sets rather than throwing on the next get", async () => {
+    await sets.set("Tulsa", []);
+    await writeFile(file, "null");
+    expect(await sets.load()).toEqual({});
+    expect(await sets.get("Tulsa")).toBeUndefined();
+  });
+});

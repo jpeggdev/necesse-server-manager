@@ -25,6 +25,29 @@ export function normaliseWorld(world: string): string {
   return world.trim().toLowerCase();
 }
 
+/**
+ * World keys are caller-supplied, and `__proto__` is a legal Windows filename,
+ * so it is a possible world name and `normaliseWorld` only lowercases it - it
+ * reaches the key unchanged. On an ordinary object every operation here is
+ * then wrong, and all of them quietly:
+ *
+ * - `all["__proto__"] = entry` runs Object.prototype's inherited setter and
+ *   replaces the PROTOTYPE instead of storing anything. `JSON.stringify` does
+ *   not serialise a prototype, so nothing is written, while `set` still
+ *   returns the entry and the route answers 200 with it.
+ * - `all["__proto__"]` reads back Object.prototype, which is not `undefined`,
+ *   so `setFor` and `migrate` both take their "this world already has a set"
+ *   branch and then read `.modIds` off it as undefined.
+ * - `delete all["__proto__"]` removes nothing but is reported as a removal.
+ *
+ * A null-prototype record has neither the setter nor anything to inherit, so
+ * the key behaves like any other. This is the same fix, for the same reason,
+ * as `emptyWorlds` in launch-options.ts.
+ */
+function emptySets(): Record<string, ModSet> {
+  return Object.create(null) as Record<string, ModSet>;
+}
+
 export class ModSets {
   constructor(private file: string) {}
 
@@ -37,10 +60,12 @@ export class ModSets {
       if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
         throw new Error(`Failed to read mod sets at ${this.file}: ${(e as Error).message}`);
       }
-      return {};
+      return emptySets();
     }
     try {
-      return JSON.parse(raw) as Record<string, ModSet>;
+      // JSON.parse defines `__proto__` as a real own property, but assigning
+      // one onto a plain object would not, so the copy target is null-proto.
+      return Object.assign(emptySets(), JSON.parse(raw) as Record<string, ModSet>);
     } catch (e) {
       throw new Error(`Failed to parse mod sets at ${this.file}: ${(e as Error).message}`);
     }
